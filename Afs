@@ -1,25 +1,30 @@
 --[[====================================================================
-    AFS MAIN  -  REN HUB  (Anime Fighters Simulator)
-    Written from scratch. AFS Guide was used only as a reference.
+    AFS MAIN  -  REN HUB V3  (Anime Fighters Simulator)
+    Written from scratch.
 
-    Features
-      Farm     : auto farm (any monster / nearest), click damage, yen collect,
-                 meteor, time trial (+ auto join, skip room), raid
-      Modes    : Infinity Tower (climbs every floor/tier, resumes on lose),
-                 Dungeon (summon, join, clear rooms, doors, chests),
-                 Gates Mode (rank select, summon, join, skip wait)
-      Eggs     : any world / any egg - lists build themselves from the map
-      Passive  : roll passives on many pets at once until a target passive
-      Misc     : daily spin, tickets, merchant boost, codes, webhook, FPS boost
-      Setting  : auto sell rarities, owner FX, anti AFK, remote spy
-      Maps     : new worlds added by game updates show up in every list live
+    Tabs
+      Main              auto farm (worlds / mobs / mode), quest, click, collect,
+                        ult, mount, pet TP, next world, rebirth, re-equip pets
+      Teleport          any world or mode, lists update live
+      Time Trial/Tower  trials multi-select, leave on floor, Infinity Tower
+      Raid/Defense/Met. raid world + mode, defense, meteor / fallen star
+      Dungeon/Gate/Time dungeon size + world, gates rank + amount, time chamber
+      Game Mode         every event world the game has (auto-detected)
+      Shop / Transfer   merchant, black market, passive transfer
+      Open UI           open any in-game menu
+      Hatch / Fuse      summon stars, fuse pets
+      Passive           multi pet / slot / passive / rarity / machine reroll
+      Settings          auto sell, webhook, anti AFK, FPS, walk speed, spy
+      UI Settings       key, scale, accent, save / load config
 
-    Remote arguments: the game dump only lists remote NAMES. Every remote call
-    goes through CFG.Calls. If a feature does nothing, turn on
-    Setting > Remote Spy, do the action once by hand, read F9, fix that line.
+    Click the floating R icon (or press RightControl) to open / close.
 
-    Hide / show the window: RightControl
+    Remote arguments: the game dump only lists remote NAMES. Every call goes
+    through CFG.Calls. If something does nothing: Settings > Remote Spy, do
+    the action once by hand, read F9, fix that line in CFG.Calls.
 ======================================================================]]
+
+if getgenv and getgenv().RenHubV3 then pcall(getgenv().RenHubV3) end
 
 ------------------------------------------------------------------------
 -- SERVICES
@@ -33,57 +38,93 @@ local StarterGui   = game:GetService("StarterGui")
 local Lighting     = game:GetService("Lighting")
 local VirtualUser  = game:GetService("VirtualUser")
 
-local LP           = Players.LocalPlayer
-local Worlds       = workspace:WaitForChild("Worlds")
-local Remotes      = RS:WaitForChild("Remote")
-local Bindables    = RS:WaitForChild("Bindable")
+local LP        = Players.LocalPlayer
+local Worlds    = workspace:WaitForChild("Worlds")
+local Remotes   = RS:WaitForChild("Remote")
+local Bindables = RS:WaitForChild("Bindable")
+local Modules   = RS:FindFirstChild("ModuleScripts")
+
+local Connections = {}
+local function track(conn) Connections[#Connections + 1] = conn return conn end
 
 ------------------------------------------------------------------------
 -- CONFIG
 ------------------------------------------------------------------------
 local CFG = {
-    HubName      = "REN HUB",
+    Name         = "REN HUB V3",
+    Game         = "Anime Fighter Simulator",
     ToggleKey    = Enum.KeyCode.RightControl,
-    KillTimeout  = 25,       -- give up on one enemy after this many seconds
-    JoinCooldown = 8,        -- seconds between join attempts for a mode
-    MaxInfFloor  = 500,
-    EggAmount    = { Single = 1, Multi = 6 },
-    GateRanks    = { "E", "D", "C", "B", "A", "S" },
-    Rarities     = { "Common", "Rare", "Epic", "Legendary", "Mythical" },
-    Codes        = { "1milfaves", "DivineColosseum", "Thanks600k", "2k22" },
+    ConfigFolder = "RenHub",
+    KillTimeout  = 25,
+    JoinCooldown = 8,
 
-    -- world folders that are game modes, not farm / egg maps
+    TimeTrials   = { "Lesser", "Medium", "Greater", "Ultimate", "Ultra Hard", "Insane", "Godly", "Infinite" },
+    RaidModes    = { "Normal", "Master" },
+    DungeonSizes = { "Small", "Medium", "Large", "Insane", "Hellish" },
+    GateRanks    = { "E", "D", "C", "B", "A", "S", "X", "Z", "Anniversary" },
+    PassiveMachines = { "Normal", "Requiem", "Summer", "Christmas", "Valentine", "Patrick", "Easter" },
+    RerollMethods   = { "Token", "Shard" },
+    PetRarities     = { "Common", "Rare", "Epic", "Legendary", "Mythical", "Secret", "Divine" },
+    FallbackPassiveRarities = { "Divine", "Secret", "Mythical", "Legendary", "Epic", "Rare", "Common" },
+    Codes        = { "1milfaves", "DivineColosseum", "Thanks600k", "2k22" },
+    HatchAmount  = { Single = 1, Multiple = 3, Max = 6 },
+    TargetModes  = { "Nearest", "Weakest", "Strongest" },
+    MeteorNames  = { Meteor = true, ["Fallen Star"] = true, FallenStar = true },
+
     ModeWorlds = {
         Raid = true, Tower = true, Dungeon = true, GatesMode = true, InfinityTower = true,
         GlobalBoss = true, Titan = true, TimeChamber = true, EventHub = true,
         Portal = true, MachineWorld = true,
     },
 
+    -- in-game menus for the Open UI tab (label = MainGui frame name)
+    OpenUI = {
+        { "Artifact UI", "Artefacts" }, { "Corruption Machine UI", "Corrupter" },
+        { "Dupe Machine UI", "DupeMachine" }, { "Passive Machine UI", "Passives" },
+        { "Event Hub UI", "EventHub" }, { "Heavenly Ascension UI", "HeavenlyAscensionUI" },
+        { "Aura Machine UI", "AuraMachine" }, { "Time Trial Shop UI", "TimeTrialShop" },
+        { "Rebirth UI", "Rebirth" }, { "Merchant UI", "Merchant" },
+        { "Black Market UI", "BlackMarket" }, { "Passive Transfer UI", "PassiveTransfer" },
+    },
+
     -- key = { RemoteName, function(...) return { args } end }
     Calls = {
         Travel          = { "AttemptTravel",            function(world) return { world } end },
-        OpenEgg         = { "OpenEgg",                  function(egg, amount) return { egg, amount } end },
+        DiscoverWorld   = { "AttemptDiscoverWorld",     function(world) return { world } end },
         Click           = { "ClickerDamage",            function() return {} end },
-        JoinRaid        = { "AttemptTravel",            function() return { "Raid" } end },
-        JoinTimeTrial   = { "JoinTimeTrial",            function() return {} end },
+        UseAbility      = { "UseAbility",               function() return {} end },
+        Mount           = { "SetMounted",               function(on) return { on } end },
+        PetTeleport     = { "RequestPetTeleport",       function(enemy) return { enemy } end },
+        Rebirth         = { "AttemptRebirth",           function() return {} end },
+        StartQuest      = { "StartQuest",               function(quest) return { quest } end },
+        FinishQuest     = { "FinishQuest",              function(quest) return { quest } end },
+        ReEquipPets     = { "ManagePet",                function() return { "EquipBest" } end },
+        SkipQuest       = { "SkipQuest",                function() return {} end },
 
+        JoinTimeTrial   = { "JoinTimeTrial",            function(trial) return { trial } end },
         SetInfFloor     = { "SetInfinityTowerFloor",    function(floor) return { floor } end },
         JoinInfTower    = { "JoinInfinityTower",        function() return {} end },
+        JoinRaid        = { "AttemptTravel",            function(world, mode) return { "Raid" } end },
+        JoinDefense     = { "TargetHubEvent",           function(world, friendsOnly) return { "Defense", world, friendsOnly } end },
+        JoinGlobalBoss  = { "JoinGlobalBossArena",      function() return {} end },
 
-        DungeonSetting  = { "SetDungeonSetting",        function(key, value) return { key, value } end },
-        SummonDungeon   = { "SummonDungeon",            function(difficulty) return { difficulty } end },
+        SummonDungeon   = { "SummonDungeon",            function(size, world, useArtifact) return { size, world, useArtifact } end },
         JoinDungeon     = { "JoinDungeon",              function() return {} end },
         OpenDungeonDoor = { "OpenDungeonDoor",          function(door) return { door } end },
         OpenChest       = { "OpenChest",                function(chest) return { chest } end },
-
-        SummonGate      = { "SummonGate",               function(rank) return { rank } end },
+        SummonGate      = { "SummonGate",               function(rank, amount) return { rank, amount } end },
         JoinGates       = { "JoinGatesMode",            function() return {} end },
         SkipGateWait    = { "SkipGateWait",             function() return {} end },
 
-        PassiveCategory = { "SetTargetPassiveCategory", function(category) return { category } end },
-        RollPassive     = { "RollPassive",              function(petId) return { petId } end },
-        PickPassive     = { "PickedPassive",            function(petId, keepNew) return { petId, keepNew } end },
+        OpenEgg         = { "OpenEgg",                  function(egg, amount) return { egg, amount } end },
+        FusePets        = { "FeedPets",                 function(petIds) return { petIds } end },
 
+        RollPassive     = { "RollPassive",              function(petId, slot, machine, method) return { petId, slot, machine, method } end },
+        PickPassive     = { "PickedPassive",            function(petId, slot, keep) return { petId, slot, keep } end },
+        TransferPassive = { "TransferAllPassives",      function(fromId, toId) return { fromId, toId } end },
+
+        MerchantBuy     = { "MerchantBuy",              function(slot) return { slot } end },
+        BlackMarketBuy  = { "BlackMarketBuy",           function(slot) return { slot } end },
         DailySpin       = { "DailySpin",                function() return {} end },
         ClaimTicket     = { "ClaimTicket",              function() return {} end },
         ClaimBoost      = { "ClaimBoost",               function() return {} end },
@@ -93,717 +134,1284 @@ local CFG = {
 }
 
 ------------------------------------------------------------------------
--- STATE
-------------------------------------------------------------------------
-local State = {
-    Farm = false, FarmTarget = "Nearest", Click = false, CollectYen = false, Meteor = false,
-    Trial = false, TrialJoin = false, TrialSkip = false,
-    Raid = false, RaidWorld = nil,
-
-    Inf = false, InfAllTiers = true, InfResume = true, InfStart = 1, InfFloor = 1, InfBest = 0,
-    Dungeon = false, DungeonDiff = 1, DungeonDoors = true, DungeonChests = true, DungeonRuns = 0,
-    Gates = false, GateRank = "E", GateSkip = true, GateRuns = 0,
-
-    EggWorld = nil, Egg = nil, EggMode = "Single", EggOn = false,
-
-    Passive = false, PassivePets = {}, PassiveTarget = "", PassiveMax = 200,
-    PassiveDelay = 0.5, PassiveConfirm = false,
-
-    Spin = false, Ticket = false, Boost = false,
-    Webhook = "", WebhookOn = false, WebhookEvery = 10,
-    WalkSpeed = 16, AntiAFK = true, Spy = false,
-
-    AutoSell = {}, OwnFX = false,
-}
-
-------------------------------------------------------------------------
--- CORE UTILITIES
+-- UTIL
 ------------------------------------------------------------------------
 local Util = {}
 
 function Util.Notify(text)
-    pcall(StarterGui.SetCore, StarterGui, "SendNotification", {
-        Title = CFG.HubName, Text = tostring(text), Duration = 4,
-    })
+    pcall(StarterGui.SetCore, StarterGui, "SendNotification", { Title = CFG.Name, Text = tostring(text), Duration = 4 })
 end
 
 local cooldowns = {}
 function Util.Every(key, seconds)
     local now = os.clock()
-    if not cooldowns[key] or now - cooldowns[key] >= seconds then
-        cooldowns[key] = now
-        return true
-    end
+    if not cooldowns[key] or now - cooldowns[key] >= seconds then cooldowns[key] = now return true end
     return false
 end
-function Util.ResetCooldown(key) cooldowns[key] = nil end
+function Util.Reset(key) cooldowns[key] = nil end
 
 function Util.Root()
-    local char = LP.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
+    local c = LP.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
 end
-
 function Util.Humanoid()
-    local char = LP.Character
-    return char and char:FindFirstChildOfClass("Humanoid")
+    local c = LP.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
 end
-
-function Util.MoveTo(cframe)
-    local root = Util.Root()
-    if root and cframe then root.CFrame = cframe end
+function Util.MoveTo(cf)
+    local r = Util.Root()
+    if r and cf then r.CFrame = cf end
 end
-
 function Util.World()
-    local value = LP:FindFirstChild("World")
-    return value and value.Value or ""
+    local v = LP:FindFirstChild("World")
+    return v and v.Value or ""
+end
+function Util.SetToList(set)
+    local out = {}
+    for k, on in pairs(set or {}) do if on then out[#out + 1] = k end end
+    table.sort(out, function(a, b) return tostring(a) < tostring(b) end)
+    return out
+end
+function Util.Count(set)
+    local n = 0
+    for _, on in pairs(set or {}) do if on then n = n + 1 end end
+    return n
+end
+function Util.Value(obj, names)
+    if not obj then return nil end
+    for _, n in ipairs(names) do
+        local a = obj:GetAttribute(n)
+        if a ~= nil then return a end
+        local c = obj:FindFirstChild(n)
+        if c and c:IsA("ValueBase") then return c.Value end
+    end
+    return nil
 end
 
--- remote layer ---------------------------------------------------------
+------------------------------------------------------------------------
+-- NET
+------------------------------------------------------------------------
 local Net = {}
 
 local function invokeSafe(remote, args, timeout)
-    local finished, result = false, nil
+    local done, result = false, nil
     task.spawn(function()
         local ok, res = pcall(remote.InvokeServer, remote, table.unpack(args))
-        if ok then result = res else warn("[" .. CFG.HubName .. "] " .. remote.Name .. ": " .. tostring(res)) end
-        finished = true
+        if ok then result = res else warn("[" .. CFG.Name .. "] " .. remote.Name .. ": " .. tostring(res)) end
+        done = true
     end)
-    local started = os.clock()
-    while not finished and os.clock() - started < (timeout or 6) do task.wait() end
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < (timeout or 6) do task.wait() end
     return result
 end
 
 function Net.Raw(name, args)
-    local remote = Remotes:FindFirstChild(name)
-    if not remote then
-        warn("[" .. CFG.HubName .. "] missing remote " .. name)
-        return nil
-    end
-    if remote:IsA("RemoteFunction") then
-        return invokeSafe(remote, args)
-    end
-    pcall(remote.FireServer, remote, table.unpack(args))
+    local r = Remotes:FindFirstChild(name)
+    if not r then warn("[" .. CFG.Name .. "] missing remote " .. name) return nil end
+    if r:IsA("RemoteFunction") then return invokeSafe(r, args) end
+    pcall(r.FireServer, r, table.unpack(args))
     return nil
 end
 
 function Net.Call(key, ...)
-    local entry = CFG.Calls[key]
-    if not entry then warn("[" .. CFG.HubName .. "] no CFG.Calls." .. tostring(key)) return nil end
-    return Net.Raw(entry[1], entry[2](...))
+    local e = CFG.Calls[key]
+    if not e then warn("[" .. CFG.Name .. "] no CFG.Calls." .. tostring(key)) return nil end
+    return Net.Raw(e[1], e[2](...))
 end
 
-function Net.Listen(name, handler)
-    local remote = Remotes:FindFirstChild(name)
-    if remote and remote:IsA("RemoteEvent") then
-        remote.OnClientEvent:Connect(function(...)
-            local ok, err = pcall(handler, ...)
+function Net.Listen(name, fn)
+    local r = Remotes:FindFirstChild(name)
+    if r and r:IsA("RemoteEvent") then
+        track(r.OnClientEvent:Connect(function(...)
+            local ok, err = pcall(fn, ...)
             if not ok then warn(err) end
-        end)
+        end))
     end
 end
 
--- enemies ---------------------------------------------------------------
-local Combat = {}
-local SendPet = Bindables:FindFirstChild("SendPet")
+------------------------------------------------------------------------
+-- GAME DATA (read from the game's own modules, fallbacks if blocked)
+------------------------------------------------------------------------
+local Data = {}
+local moduleCache = {}
 
-function Combat.IsAlive(enemy)
-    if not enemy or not enemy.Parent or not enemy:FindFirstChild("HumanoidRootPart") then return false end
-    local hp = enemy:FindFirstChild("Health")
-    return hp == nil or hp.Value > 0
+function Data.Module(name)
+    if moduleCache[name] ~= nil then return moduleCache[name] or nil end
+    local m = Modules and Modules:FindFirstChild(name)
+    local ok, res = false, nil
+    if m then ok, res = pcall(require, m) end
+    moduleCache[name] = (ok and type(res) == "table") and res or false
+    return moduleCache[name] or nil
 end
 
-function Combat.Name(enemy)
-    local tag = enemy:FindFirstChild("DisplayName")
-    return tag and tag.Value or enemy.Name
-end
-
-function Combat.List(worldName, onlyName)
+local function sortedKeys(tbl)
     local out = {}
-    local world = Worlds:FindFirstChild(worldName or "")
-    if not world then return out end
-    local usedFolders = false
-    for _, obj in ipairs(world:GetDescendants()) do
-        if obj.Name == "Enemies" and obj:IsA("Folder") then
-            usedFolders = true
-            for _, enemy in ipairs(obj:GetChildren()) do
-                if Combat.IsAlive(enemy) and (not onlyName or Combat.Name(enemy) == onlyName) then
-                    out[#out + 1] = enemy
-                end
+    for k in pairs(tbl or {}) do if type(k) == "string" then out[#out + 1] = k end end
+    table.sort(out)
+    return out
+end
+
+function Data.IsFarmWorld(folder)
+    return folder:IsA("Folder") and not CFG.ModeWorlds[folder.Name] and not string.find(folder.Name, "Gamemode", 1, true)
+end
+
+function Data.IsFarmWorldName(name)
+    local f = Worlds:FindFirstChild(name or "")
+    return f ~= nil and Data.IsFarmWorld(f)
+end
+
+function Data.WorldInfo(name)
+    local wd = Data.Module("WorldData")
+    return wd and type(wd[name]) == "table" and wd[name] or nil
+end
+
+function Data.WorldLabel(name)
+    local info = Data.WorldInfo(name)
+    local display = info and (info.Name or info.DisplayName or info.Title)
+    if type(display) == "string" and display ~= name then return display .. " | " .. name end
+    return name
+end
+
+function Data.FromLabel(label)
+    if type(label) ~= "string" then return label end
+    return string.match(label, "| (.+)$") or label
+end
+
+-- farm worlds in game order when WorldData has an order field
+function Data.FarmWorlds()
+    local list = {}
+    for _, f in ipairs(Worlds:GetChildren()) do
+        if Data.IsFarmWorld(f) then list[#list + 1] = f.Name end
+    end
+    local function order(n)
+        local info = Data.WorldInfo(n)
+        local o = info and (info.Order or info.Index or info.LayoutOrder or info.Id)
+        return type(o) == "number" and o or math.huge
+    end
+    table.sort(list, function(a, b)
+        local oa, ob = order(a), order(b)
+        if oa ~= ob then return oa < ob end
+        return a < b
+    end)
+    return list
+end
+
+function Data.FarmWorldLabels()
+    local out = {}
+    for _, n in ipairs(Data.FarmWorlds()) do out[#out + 1] = Data.WorldLabel(n) end
+    return out
+end
+
+function Data.EventWorlds()
+    local out = {}
+    for _, f in ipairs(Worlds:GetChildren()) do
+        if f:IsA("Folder") and (string.find(f.Name, "Gamemode", 1, true) or string.find(f.Name, "Event", 1, true)) then
+            out[#out + 1] = f.Name
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+function Data.AllWorlds()
+    local out = {}
+    for _, f in ipairs(Worlds:GetChildren()) do if f:IsA("Folder") then out[#out + 1] = f.Name end end
+    table.sort(out)
+    return out
+end
+
+-- stars / eggs: every model named ...Egg or ...Star in any world -> "Name | World"
+function Data.Stars()
+    local out, seen = {}, {}
+    for _, world in ipairs(Worlds:GetChildren()) do
+        for _, obj in ipairs(world:GetChildren()) do
+            local n = obj.Name
+            if (string.sub(n, -3) == "Egg" or string.sub(n, -4) == "Star") and not seen[world.Name .. n] then
+                seen[world.Name .. n] = true
+                out[#out + 1] = n .. " | " .. world.Name
             end
         end
     end
-    if not usedFolders then
-        for _, enemy in ipairs(world:GetDescendants()) do
-            if enemy:FindFirstChild("DisplayName") and Combat.IsAlive(enemy)
-               and (not onlyName or Combat.Name(enemy) == onlyName) then
-                out[#out + 1] = enemy
+    table.sort(out)
+    return out
+end
+
+function Data.Passives()
+    local ps = Data.Module("PassiveStats")
+    local names, rarityOf = {}, {}
+    if ps then
+        for name, info in pairs(ps) do
+            if type(name) == "string" and type(info) == "table" then
+                names[#names + 1] = name
+                rarityOf[name] = info.Rarity or info.rarity or info.Tier
             end
+        end
+        table.sort(names)
+    end
+    return names, rarityOf
+end
+
+function Data.PassiveRarities()
+    local _, rarityOf = Data.Passives()
+    local seen, out = {}, {}
+    for _, r in pairs(rarityOf) do
+        if type(r) == "string" and not seen[r] then seen[r] = true out[#out + 1] = r end
+    end
+    if #out == 0 then return CFG.FallbackPassiveRarities end
+    table.sort(out)
+    return out
+end
+
+function Data.RebirthBosses()
+    local set = {}
+    local rb = Data.Module("RebirthBossData")
+    if rb then
+        for k, v in pairs(rb) do
+            if type(k) == "string" then set[k] = true end
+            if type(v) == "table" then
+                local n = v.Name or v.Boss or v.Enemy
+                if type(n) == "string" then set[n] = true end
+            end
+        end
+    end
+    return set
+end
+
+-- pets: "Name [id]" when the pet has a readable name, else the id
+function Data.PetId(label) return string.match(label, "%[(.-)%]$") or label end
+function Data.Pets()
+    local out = {}
+    local folder = LP:FindFirstChild("Pets")
+    if not folder then return out end
+    for _, pet in ipairs(folder:GetChildren()) do
+        local n = Util.Value(pet, { "PetName", "Name", "DisplayName", "Type" })
+        out[#out + 1] = (type(n) == "string" and n ~= pet.Name) and (n .. " [" .. pet.Name .. "]") or pet.Name
+    end
+    table.sort(out)
+    return out
+end
+function Data.PetObject(id)
+    local folder = LP:FindFirstChild("Pets")
+    return folder and folder:FindFirstChild(id)
+end
+
+function Data.MainGui()
+    local pg = LP:FindFirstChild("PlayerGui")
+    return pg and pg:FindFirstChild("MainGui")
+end
+
+function Data.MenuNames()
+    local out = {}
+    local mg = Data.MainGui()
+    if mg then
+        for _, c in ipairs(mg:GetChildren()) do
+            if c:IsA("GuiObject") then out[#out + 1] = c.Name end
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+------------------------------------------------------------------------
+-- COMBAT
+------------------------------------------------------------------------
+local Combat = {}
+local SendPet = Bindables:FindFirstChild("SendPet")
+
+function Combat.Alive(e)
+    if not e or not e.Parent or not e:FindFirstChild("HumanoidRootPart") then return false end
+    local hp = e:FindFirstChild("Health")
+    return hp == nil or hp.Value > 0
+end
+function Combat.Name(e)
+    local t = e:FindFirstChild("DisplayName")
+    return t and t.Value or e.Name
+end
+function Combat.HP(e)
+    local hp = e:FindFirstChild("Health")
+    return hp and hp.Value or 0
+end
+
+-- names = set of names to keep (nil = all)
+function Combat.List(worldName, names)
+    local out = {}
+    local world = Worlds:FindFirstChild(worldName or "")
+    if not world then return out end
+    local function consider(e)
+        if Combat.Alive(e) and (not names or names[Combat.Name(e)]) then out[#out + 1] = e end
+    end
+    local folders = false
+    for _, obj in ipairs(world:GetDescendants()) do
+        if obj.Name == "Enemies" and obj:IsA("Folder") then
+            folders = true
+            for _, e in ipairs(obj:GetChildren()) do consider(e) end
+        end
+    end
+    if not folders then
+        for _, e in ipairs(world:GetDescendants()) do
+            if e:FindFirstChild("DisplayName") then consider(e) end
         end
     end
     return out
 end
 
-function Combat.Closest(list)
+function Combat.Pick(list, mode)
+    if #list == 0 then return nil end
     local root = Util.Root()
-    if not root then return list[1] end
-    local best, bestDist = nil, math.huge
-    for _, enemy in ipairs(list) do
-        local part = enemy:FindFirstChild("HumanoidRootPart")
-        if part then
-            local dist = (part.Position - root.Position).Magnitude
-            if dist < bestDist then best, bestDist = enemy, dist end
+    local best, score = nil, nil
+    for _, e in ipairs(list) do
+        local s
+        if mode == "Weakest" then s = Combat.HP(e)
+        elseif mode == "Strongest" then s = -Combat.HP(e)
+        else
+            local p = e:FindFirstChild("HumanoidRootPart")
+            s = (root and p) and (p.Position - root.Position).Magnitude or 0
         end
+        if not score or s < score then best, score = e, s end
     end
     return best
 end
 
-function Combat.Attack(enemy, stillWanted)
-    local started = os.clock()
-    while Combat.IsAlive(enemy) and stillWanted() and os.clock() - started < CFG.KillTimeout do
-        local root, part = Util.Root(), enemy:FindFirstChild("HumanoidRootPart")
-        if root and part and (root.Position - part.Position).Magnitude > 12 then
+Combat.Options = { Teleport = true, PetTP = false, Ult = false }
+
+function Combat.Attack(e, wanted)
+    local t0 = os.clock()
+    if Combat.Options.PetTP then Net.Call("PetTeleport", e) end
+    while Combat.Alive(e) and wanted() and os.clock() - t0 < CFG.KillTimeout do
+        local root, part = Util.Root(), e:FindFirstChild("HumanoidRootPart")
+        if Combat.Options.Teleport and root and part and (root.Position - part.Position).Magnitude > 12 then
             root.CFrame = part.CFrame * CFrame.new(0, 0, 4)
         end
-        if SendPet then pcall(SendPet.Fire, SendPet, enemy, true) end
+        if SendPet then pcall(SendPet.Fire, SendPet, e, true) end
+        if Combat.Options.Ult and Util.Every("ult", 1) then Net.Call("UseAbility") end
         task.wait()
     end
 end
 
--- attacks the closest enemy; returns false when the world has none left
-function Combat.Step(worldName, stillWanted, onlyName)
-    local target = Combat.Closest(Combat.List(worldName, onlyName))
+-- one attack step; false when nothing is left
+function Combat.Step(worldName, wanted, names, mode)
+    local target = Combat.Pick(Combat.List(worldName, names), mode or "Nearest")
     if not target then return false end
-    Combat.Attack(target, stillWanted)
+    Combat.Attack(target, wanted)
     return true
 end
 
--- prompts ---------------------------------------------------------------
+------------------------------------------------------------------------
+-- PROMPTS / TRAVEL
+------------------------------------------------------------------------
 local Prompt = {}
-
-function Prompt.Find(root, keywords)
-    local found = {}
-    if not root then return found end
-    for _, obj in ipairs(root:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") and obj.Enabled then
-            local text = string.lower((obj.Parent and obj.Parent.Name or "") .. " " .. obj.ActionText .. " " .. obj.ObjectText)
-            for _, word in ipairs(keywords) do
-                if string.find(text, word, 1, true) then found[#found + 1] = obj break end
+function Prompt.Find(root, words)
+    local out = {}
+    if not root then return out end
+    for _, p in ipairs(root:GetDescendants()) do
+        if p:IsA("ProximityPrompt") and p.Enabled then
+            local hay = string.lower((p.Parent and p.Parent.Name or "") .. " " .. p.ActionText .. " " .. p.ObjectText)
+            for _, w in ipairs(words) do
+                if string.find(hay, string.lower(w), 1, true) then out[#out + 1] = p break end
             end
         end
     end
-    return found
+    return out
 end
-
-function Prompt.Use(prompt)
-    local holder = prompt.Parent
-    if holder and holder:IsA("BasePart") then Util.MoveTo(holder.CFrame * CFrame.new(0, 3, 0)) end
+function Prompt.Use(p)
+    local part = p.Parent
+    if part and part:IsA("BasePart") then Util.MoveTo(part.CFrame * CFrame.new(0, 3, 0)) end
     task.wait(0.25)
-    if fireproximityprompt then
-        pcall(fireproximityprompt, prompt)
+    if fireproximityprompt then pcall(fireproximityprompt, p)
     else
-        pcall(function()
-            prompt:InputHoldBegin()
-            task.wait(prompt.HoldDuration + 0.05)
-            prompt:InputHoldEnd()
-        end)
+        pcall(function() p:InputHoldBegin() task.wait(p.HoldDuration + 0.05) p:InputHoldEnd() end)
     end
 end
 
-------------------------------------------------------------------------
--- MAP DISCOVERY  (lists rebuild themselves when the game adds worlds)
-------------------------------------------------------------------------
-local Maps = {}
-Maps.Changed = Instance.new("BindableEvent")
-
-function Maps.IsFarmWorld(folder)
-    return folder:IsA("Folder") and not CFG.ModeWorlds[folder.Name]
-        and not string.find(folder.Name, "Gamemode", 1, true)
-end
-
-function Maps.FarmWorlds()
-    local names = {}
-    for _, folder in ipairs(Worlds:GetChildren()) do
-        if Maps.IsFarmWorld(folder) then names[#names + 1] = folder.Name end
-    end
-    table.sort(names)
-    return names
-end
-
-function Maps.Eggs(worldName)
-    local world, names, seen = Worlds:FindFirstChild(worldName or ""), {}, {}
-    if not world then return names end
-    for _, obj in ipairs(world:GetDescendants()) do
-        if (obj:IsA("Model") or obj:IsA("BasePart")) and string.sub(obj.Name, -3) == "Egg" and not seen[obj.Name] then
-            seen[obj.Name] = true
-            names[#names + 1] = obj.Name
+local Travel = { LoadEnemies = true }
+function Travel.To(world)
+    if not world or world == "" or Util.World() == world then return end
+    Net.Call("Travel", world)
+    task.wait(1.5)
+    if Travel.LoadEnemies then
+        local folder = Worlds:FindFirstChild(world)
+        local spawnPart = folder and (folder:FindFirstChild("Spawn", true) or folder:FindFirstChildWhichIsA("SpawnLocation", true))
+        if spawnPart and spawnPart:IsA("BasePart") then
+            pcall(function() LP:RequestStreamAroundAsync(spawnPart.Position) end)
         end
+        task.wait(0.5)
     end
-    table.sort(names)
-    return names
 end
-
-function Maps.Monsters(worldName)
-    local names, seen = { "Nearest" }, {}
-    for _, enemy in ipairs(Combat.List(worldName)) do
-        local n = Combat.Name(enemy)
-        if not seen[n] then seen[n] = true names[#names + 1] = n end
-    end
-    return names
-end
-
-function Maps.Pets()
-    local names = {}
-    local folder = LP:FindFirstChild("Pets")
-    if folder then
-        for _, pet in ipairs(folder:GetChildren()) do names[#names + 1] = pet.Name end
-    end
-    table.sort(names)
-    return names
-end
-
-Worlds.ChildAdded:Connect(function(child)
-    task.wait(1)
-    if Maps.IsFarmWorld(child) then
-        Util.Notify("New map: " .. child.Name)
-        Maps.Changed:Fire()
-    end
-end)
-Worlds.ChildRemoved:Connect(function() Maps.Changed:Fire() end)
 
 ------------------------------------------------------------------------
--- UI LIBRARY  (sidebar layout)
+-- UI LIBRARY  (REN UI)
 ------------------------------------------------------------------------
-local UI = {}
-local Theme = {
-    Background = Color3.fromRGB(17, 17, 22),
-    Sidebar    = Color3.fromRGB(24, 24, 31),
-    Element    = Color3.fromRGB(31, 31, 40),
-    Hover      = Color3.fromRGB(40, 40, 52),
-    Accent     = Color3.fromRGB(114, 105, 218),
-    Text       = Color3.fromRGB(235, 235, 245),
-    SubText    = Color3.fromRGB(150, 150, 170),
-    Off        = Color3.fromRGB(60, 60, 75),
-}
+local Library = { Flags = {}, Theme = {} }
+local Theme = Library.Theme
+Theme.Window  = Color3.fromRGB(16, 16, 17)
+Theme.Sidebar = Color3.fromRGB(19, 19, 20)
+Theme.Card    = Color3.fromRGB(23, 23, 24)
+Theme.Element = Color3.fromRGB(29, 29, 31)
+Theme.Hover   = Color3.fromRGB(36, 36, 39)
+Theme.Stroke  = Color3.fromRGB(40, 40, 43)
+Theme.Text    = Color3.fromRGB(232, 232, 236)
+Theme.Sub     = Color3.fromRGB(150, 150, 158)
+Theme.Dim     = Color3.fromRGB(95, 95, 102)
+Theme.Accent  = Color3.fromRGB(235, 235, 240)
+Theme.SwitchOn  = Color3.fromRGB(105, 105, 112)
+Theme.SwitchOff = Color3.fromRGB(48, 48, 52)
+
+local accentTargets = {}   -- objects re-coloured when the accent changes
 
 local function make(class, props, children)
-    local obj = Instance.new(class)
+    local o = Instance.new(class)
     local parent
-    for key, value in pairs(props or {}) do
-        if key == "Parent" then parent = value else obj[key] = value end
+    for k, v in pairs(props or {}) do
+        if k == "Parent" then parent = v else o[k] = v end
     end
-    for _, child in ipairs(children or {}) do child.Parent = obj end
-    obj.Parent = parent
-    return obj
+    for _, c in ipairs(children or {}) do c.Parent = o end
+    o.Parent = parent
+    return o
 end
-
-local function corner(radius) return make("UICorner", { CornerRadius = UDim.new(0, radius or 6) }) end
-local function pad(px) return make("UIPadding", {
-    PaddingLeft = UDim.new(0, px), PaddingRight = UDim.new(0, px),
-    PaddingTop = UDim.new(0, px), PaddingBottom = UDim.new(0, px),
-}) end
-local function tween(obj, props, t)
-    TweenService:Create(obj, TweenInfo.new(t or 0.15, Enum.EasingStyle.Quad), props):Play()
+local function corner(r) return make("UICorner", { CornerRadius = UDim.new(0, r or 8) }) end
+local function stroke(c, t) return make("UIStroke", { Color = c or Theme.Stroke, Thickness = t or 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }) end
+local function padding(l, r, t, b)
+    return make("UIPadding", { PaddingLeft = UDim.new(0, l or 0), PaddingRight = UDim.new(0, r or l or 0),
+        PaddingTop = UDim.new(0, t or l or 0), PaddingBottom = UDim.new(0, b or t or l or 0) })
+end
+local function list(pad, dir)
+    return make("UIListLayout", { Padding = UDim.new(0, pad or 0), SortOrder = Enum.SortOrder.LayoutOrder,
+        FillDirection = dir or Enum.FillDirection.Vertical })
+end
+local function tween(o, props, t, style)
+    local tw = TweenService:Create(o, TweenInfo.new(t or 0.18, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+    tw:Play()
+    return tw
+end
+local function text(props)
+    local base = { BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 13, TextColor3 = Theme.Text,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Center }
+    for k, v in pairs(props) do base[k] = v end
+    return make("TextLabel", base)
+end
+local function isPress(input)
+    return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+end
+local function isMove(input)
+    return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
 end
 
 local function guiParent()
-    local ok, hui = pcall(function() return gethui and gethui() end)
-    if ok and hui then return hui end
-    local okCore, core = pcall(function() return game:GetService("CoreGui") end)
-    if okCore and core then return core end
+    local ok, h = pcall(function() return gethui and gethui() end)
+    if ok and h then return h end
+    local ok2, core = pcall(function() local c = game:GetService("CoreGui") local _ = c.Name return c end)
+    if ok2 and core then return core end
     return LP:WaitForChild("PlayerGui")
 end
 
-local function enableDrag(handle, target)
-    local dragging, dragStart, startPos
-    handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging, dragStart, startPos = true, input.Position, target.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+local function draggable(handle, target, onClick)
+    local down, start, startPos, moved
+    track(handle.InputBegan:Connect(function(input)
+        if isPress(input) then
+            down, moved, start, startPos = true, false, input.Position, target.Position
+            local c
+            c = input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    c:Disconnect()
+                    down = false
+                    if not moved and onClick then onClick() end
+                end
             end)
         end
-    end)
-    UIS.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - dragStart
-            target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end))
+    track(UIS.InputChanged:Connect(function(input)
+        if down and isMove(input) then
+            local d = input.Position - start
+            if d.Magnitude > 6 then moved = true end
+            if moved then
+                target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            end
         end
+    end))
+end
+
+-- small 3x3 dot grid icon used on dropdowns
+local function gridIcon(parent)
+    local holder = make("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(16, 16),
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), Parent = parent },
+        { make("UIGridLayout", { CellSize = UDim2.fromOffset(4, 4), CellPadding = UDim2.fromOffset(2, 2) }) })
+    for _ = 1, 9 do make("Frame", { BackgroundColor3 = Theme.Sub, BorderSizePixel = 0, Parent = holder }, { corner(1) }) end
+    return holder
+end
+
+-- the hub's own mark: an outlined diamond
+local function diamond(parent, size, filled)
+    local d = make("Frame", { Size = UDim2.fromOffset(size, size), Rotation = 45, BorderSizePixel = 0,
+        BackgroundColor3 = Theme.Accent, BackgroundTransparency = filled and 0 or 1, Parent = parent },
+        { corner(2), stroke(Theme.Accent, 1.5) })
+    return d
+end
+
+------------------------------------------------------------------------
+-- ELEMENTS (added to a card)
+------------------------------------------------------------------------
+local Elements = {}
+Elements.__index = Elements
+
+local function register(flag, obj)
+    if flag then Library.Flags[flag] = obj end
+    return obj
+end
+
+local function row(card, h)
+    card._order = card._order + 1
+    return make("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, h or 36),
+        LayoutOrder = card._order, Parent = card.Body })
+end
+
+function Elements:Paragraph(opt)
+    self._order = self._order + 1
+    local f = make("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        LayoutOrder = self._order, Parent = self.Body }, { list(3) })
+    if opt.Title then
+        text({ Text = opt.Title, Font = Enum.Font.GothamMedium, TextSize = 14, Size = UDim2.new(1, 0, 0, 18), LayoutOrder = 1, Parent = f })
+    end
+    local body = text({ Text = opt.Body or "", TextColor3 = Theme.Sub, TextSize = 12, TextWrapped = true,
+        TextYAlignment = Enum.TextYAlignment.Top, RichText = true,
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 2, Parent = f })
+    return { Set = function(_, v) body.Text = v end }
+end
+
+function Elements:Label(str)
+    return self:Paragraph({ Body = str })
+end
+
+function Elements:Divider()
+    local r = row(self, 9)
+    make("Frame", { BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 1),
+        Position = UDim2.fromOffset(0, 4), Parent = r })
+end
+
+function Elements:Button(opt)
+    local r = row(self, 36)
+    text({ Text = opt.Title, TextColor3 = Theme.Sub, Size = UDim2.new(1, -30, 1, 0), Parent = r })
+    local chev = text({ Text = ">", Font = Enum.Font.GothamBold, TextColor3 = Theme.Sub, TextXAlignment = Enum.TextXAlignment.Right,
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -4, 0, 0), Size = UDim2.new(0, 20, 1, 0), Parent = r })
+    local b = make("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = r })
+    b.MouseButton1Click:Connect(function()
+        tween(chev, { Position = UDim2.new(1, 0, 0, 0) }, 0.1)
+        task.delay(0.12, function() tween(chev, { Position = UDim2.new(1, -4, 0, 0) }, 0.15) end)
+        task.spawn(function()
+            local ok, err = pcall(opt.Callback)
+            if not ok then warn(err) end
+        end)
     end)
 end
 
--- element builders for one page --------------------------------------------
-local function buildPage(page)
-    local Page = {}
-
-    local function row(height)
-        return make("Frame", {
-            Size = UDim2.new(1, 0, 0, height or 34), BackgroundColor3 = Theme.Element,
-            BorderSizePixel = 0, Parent = page,
-        }, { corner(6) })
+function Elements:Toggle(opt)
+    local r = row(self, 36)
+    text({ Text = opt.Title, TextColor3 = Theme.Sub, Size = UDim2.new(1, -60, 1, 0), Parent = r })
+    local sw = make("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0),
+        Size = UDim2.fromOffset(44, 24), BackgroundColor3 = Theme.SwitchOff, Parent = r }, { corner(12) })
+    local knob = make("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 4, 0.5, 0),
+        Size = UDim2.fromOffset(16, 16), BackgroundColor3 = Theme.Dim, Parent = sw }, { corner(8) })
+    local value = false
+    local obj = { Type = "Toggle" }
+    function obj:Set(v, silent)
+        value = v and true or false
+        tween(sw, { BackgroundColor3 = value and Theme.SwitchOn or Theme.SwitchOff })
+        tween(knob, { Position = value and UDim2.new(1, -20, 0.5, 0) or UDim2.new(0, 4, 0.5, 0),
+            BackgroundColor3 = value and Theme.Accent or Theme.Dim })
+        if not silent and opt.Callback then task.spawn(function() pcall(opt.Callback, value) end) end
     end
-
-    local function title(parent, text, xOffset)
-        return make("TextLabel", {
-            Text = text, Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.Text,
-            TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
-            Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -(xOffset or 24), 0, 34), Parent = parent,
-        })
-    end
-
-    function Page:Section(text)
-        make("TextLabel", {
-            Text = string.upper(text), Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Theme.Accent,
-            TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
-            Size = UDim2.new(1, 0, 0, 22), Parent = page,
-        }, { make("UIPadding", { PaddingLeft = UDim.new(0, 4), PaddingTop = UDim.new(0, 6) }) })
-    end
-
-    function Page:Label(text)
-        local r = row(30)
-        r.BackgroundTransparency = 0.4
-        local lbl = title(r, text)
-        lbl.Size = UDim2.new(1, -24, 1, 0)
-        lbl.TextColor3 = Theme.SubText
-        return { Set = function(_, newText) lbl.Text = newText end }
-    end
-
-    function Page:Button(text, callback)
-        local r = row()
-        title(r, text)
-        local btn = make("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = r })
-        btn.MouseEnter:Connect(function() tween(r, { BackgroundColor3 = Theme.Hover }) end)
-        btn.MouseLeave:Connect(function() tween(r, { BackgroundColor3 = Theme.Element }) end)
-        btn.MouseButton1Click:Connect(function()
-            tween(r, { BackgroundColor3 = Theme.Accent }, 0.08)
-            task.delay(0.12, function() tween(r, { BackgroundColor3 = Theme.Element }) end)
-            task.spawn(function()
-                local ok, err = pcall(callback)
-                if not ok then warn(err) end
-            end)
-        end)
-    end
-
-    function Page:Toggle(text, default, callback)
-        local r = row()
-        title(r, text, 70)
-        local track = make("Frame", {
-            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
-            Size = UDim2.fromOffset(38, 20), BackgroundColor3 = Theme.Off, Parent = r,
-        }, { corner(10) })
-        local knob = make("Frame", {
-            AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0),
-            Size = UDim2.fromOffset(14, 14), BackgroundColor3 = Theme.Text, Parent = track,
-        }, { corner(7) })
-        local value = false
-        local obj = {}
-        function obj:Set(v, silent)
-            value = v and true or false
-            tween(track, { BackgroundColor3 = value and Theme.Accent or Theme.Off })
-            tween(knob, { Position = value and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0) })
-            if not silent then task.spawn(function() pcall(callback, value) end) end
-        end
-        function obj:Get() return value end
-        make("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = r })
-            .MouseButton1Click:Connect(function() obj:Set(not value) end)
-        obj:Set(default, true)   -- no callback on load (State already holds defaults)
-        return obj
-    end
-
-    function Page:Slider(text, min, max, default, callback)
-        local r = row(48)
-        local lbl = title(r, text)
-        lbl.Size = UDim2.new(1, -70, 0, 28)
-        local valueText = make("TextLabel", {
-            Text = tostring(default), Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = Theme.Accent,
-            BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 0),
-            Size = UDim2.fromOffset(60, 28), TextXAlignment = Enum.TextXAlignment.Right, Parent = r,
-        })
-        local bar = make("Frame", {
-            Position = UDim2.new(0, 12, 0, 32), Size = UDim2.new(1, -24, 0, 6),
-            BackgroundColor3 = Theme.Off, Parent = r,
-        }, { corner(3) })
-        local fill = make("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = Theme.Accent, Parent = bar }, { corner(3) })
-
-        local current = default
-        local function apply(v, fire)
-            current = math.clamp(math.floor(v + 0.5), min, max)
-            fill.Size = UDim2.fromScale((current - min) / math.max(max - min, 1), 1)
-            valueText.Text = tostring(current)
-            if fire then pcall(callback, current) end
-        end
-        local sliding = false
-        local function fromInput(input)
-            local pct = math.clamp((input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
-            apply(min + (max - min) * pct, true)
-        end
-        bar.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                sliding = true
-                fromInput(input)
-            end
-        end)
-        UIS.InputChanged:Connect(function(input)
-            if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-                fromInput(input)
-            end
-        end)
-        UIS.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                sliding = false
-            end
-        end)
-        apply(default, true)
-        return { Set = function(_, v) apply(v, true) end, Get = function() return current end }
-    end
-
-    function Page:TextBox(text, placeholder, clearAfter, callback)
-        local r = row()
-        title(r, text, 200)
-        local box = make("TextBox", {
-            AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
-            Size = UDim2.new(0.5, -8, 0, 24), BackgroundColor3 = Theme.Background,
-            Text = "", PlaceholderText = placeholder or "", PlaceholderColor3 = Theme.SubText,
-            TextColor3 = Theme.Text, Font = Enum.Font.Gotham, TextSize = 12,
-            ClearTextOnFocus = false, Parent = r,
-        }, { corner(5) })
-        box.FocusLost:Connect(function()
-            if box.Text ~= "" then
-                pcall(callback, box.Text)
-                if clearAfter then box.Text = "" end
-            end
-        end)
-    end
-
-    -- multi = true gives checkboxes; callback gets a set table { [name] = true }
-    function Page:Dropdown(text, items, callback, multi)
-        local holder = make("Frame", {
-            Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = Theme.Element,
-            ClipsDescendants = true, Parent = page,
-        }, { corner(6) })
-        local header = title(holder, text, 40)
-        local arrow = make("TextLabel", {
-            Text = "v", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = Theme.SubText,
-            BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 0),
-            Size = UDim2.fromOffset(20, 34), Parent = holder,
-        })
-        local list = make("ScrollingFrame", {
-            Position = UDim2.fromOffset(6, 36), Size = UDim2.new(1, -12, 0, 0),
-            BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-            CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = holder,
-        }, { make("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }) })
-
-        local open, selected, single, entries = false, {}, nil, {}
-        local obj = {}
-
-        local function headerText()
-            if multi then
-                local n = 0
-                for _ in pairs(selected) do n = n + 1 end
-                header.Text = text .. "  :  " .. n .. " selected"
-            else
-                header.Text = text .. (single and ("  :  " .. single) or "")
-            end
-        end
-
-        local function resize()
-            local rows = math.min(#entries, 6)
-            local h = open and (40 + rows * 27) or 34
-            list.Size = UDim2.new(1, -12, 0, rows * 27)
-            tween(holder, { Size = UDim2.new(1, 0, 0, h) })
-            arrow.Text = open and "^" or "v"
-        end
-
-        function obj:Refresh(newItems)
-            for _, e in ipairs(entries) do e:Destroy() end
-            entries = {}
-            local keep = {}
-            for i, name in ipairs(newItems) do
-                if selected[name] then keep[name] = true end
-                local btn = make("TextButton", {
-                    Text = "  " .. tostring(name), Font = Enum.Font.Gotham, TextSize = 12,
-                    TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left,
-                    BackgroundColor3 = (selected[name] or single == name) and Theme.Accent or Theme.Background,
-                    Size = UDim2.new(1, -4, 0, 24), LayoutOrder = i, Parent = list,
-                }, { corner(4) })
-                btn.MouseButton1Click:Connect(function()
-                    if multi then
-                        selected[name] = not selected[name] or nil
-                        btn.BackgroundColor3 = selected[name] and Theme.Accent or Theme.Background
-                        headerText()
-                        pcall(callback, selected)
-                    else
-                        single = name
-                        for _, other in ipairs(entries) do other.BackgroundColor3 = Theme.Background end
-                        btn.BackgroundColor3 = Theme.Accent
-                        open = false
-                        resize()
-                        headerText()
-                        pcall(callback, name)
-                    end
-                end)
-                entries[#entries + 1] = btn
-            end
-            if multi then selected = keep end
-            headerText()
-            resize()
-        end
-
-        function obj:SelectAll(names)
-            if not multi then return end
-            for _, n in ipairs(names) do selected[n] = true end
-            for _, e in ipairs(entries) do e.BackgroundColor3 = Theme.Accent end
-            headerText()
-            pcall(callback, selected)
-        end
-
-        function obj:ClearSelection()
-            selected, single = {}, nil
-            for _, e in ipairs(entries) do e.BackgroundColor3 = Theme.Background end
-            headerText()
-            if multi then pcall(callback, selected) end
-        end
-
-        make("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 34), Parent = holder })
-            .MouseButton1Click:Connect(function() open = not open resize() end)
-
-        obj:Refresh(items or {})
-        return obj
-    end
-
-    return Page
+    function obj:Get() return value end
+    make("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = r })
+        .MouseButton1Click:Connect(function() obj:Set(not value) end)
+    obj:Set(opt.Default, true)
+    return register(opt.Flag, obj)
 end
 
-function UI.Window(titleText)
+function Elements:Slider(opt)
+    local r = row(self, 36)
+    local min, max, dec = opt.Min or 0, opt.Max or 100, opt.Decimals or 0
+    text({ Text = opt.Title, TextColor3 = Theme.Sub, Size = UDim2.new(1, -150, 1, 0), Parent = r })
+    local box = make("TextBox", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0),
+        Size = UDim2.fromOffset(54, 28), BackgroundColor3 = Theme.Window, Text = "", Font = Enum.Font.Gotham,
+        TextSize = 12, TextColor3 = Theme.Text, ClearTextOnFocus = false, Parent = r }, { corner(6), stroke() })
+    local bar = make("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -66, 0.5, 0),
+        Size = UDim2.fromOffset(70, 4), BackgroundColor3 = Theme.Stroke, Parent = r }, { corner(2) })
+    local fill = make("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = Theme.Sub, Parent = bar }, { corner(2) })
+    local knob = make("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5),
+        Size = UDim2.fromOffset(14, 14), BackgroundColor3 = Theme.Accent, Parent = bar }, { corner(7) })
+
+    local value
+    local obj = { Type = "Slider" }
+    local function round(v)
+        local m = 10 ^ dec
+        return math.floor(v * m + 0.5) / m
+    end
+    function obj:Set(v, silent)
+        v = tonumber(v) or min
+        value = math.clamp(round(v), min, max)
+        local pct = (value - min) / math.max(max - min, 1e-9)
+        fill.Size = UDim2.fromScale(pct, 1)
+        knob.Position = UDim2.fromScale(pct, 0.5)
+        box.Text = dec > 0 and string.format("%." .. dec .. "f", value) or tostring(value)
+        if not silent and opt.Callback then pcall(opt.Callback, value) end
+    end
+    function obj:Get() return value end
+
+    local sliding = false
+    local function fromX(x)
+        local pct = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+        obj:Set(min + (max - min) * pct)
+    end
+    local hit = make("TextButton", { Text = "", BackgroundTransparency = 1, AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, -6, 0.5, 0), Size = UDim2.new(1, 12, 0, 24), Parent = bar })
+    hit.InputBegan:Connect(function(input) if isPress(input) then sliding = true fromX(input.Position.X) end end)
+    track(UIS.InputChanged:Connect(function(input) if sliding and isMove(input) then fromX(input.Position.X) end end))
+    track(UIS.InputEnded:Connect(function(input) if isPress(input) then sliding = false end end))
+    box.FocusLost:Connect(function() obj:Set(box.Text) end)
+
+    obj:Set(opt.Default or min, opt.Silent)
+    return register(opt.Flag, obj)
+end
+
+function Elements:Input(opt)
+    local r = row(self, 36)
+    text({ Text = opt.Title, TextColor3 = Theme.Sub, Size = UDim2.new(0.45, 0, 1, 0), Parent = r })
+    local box = make("TextBox", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0),
+        Size = UDim2.new(0.55, -8, 0, 28), BackgroundColor3 = Theme.Window, Text = "", PlaceholderText = opt.Placeholder or "",
+        PlaceholderColor3 = Theme.Dim, Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = Theme.Text,
+        ClearTextOnFocus = false, TextTruncate = Enum.TextTruncate.AtEnd, Parent = r },
+        { corner(6), stroke(), padding(8, 8, 0, 0) })
+    local obj = { Type = "Input" }
+    function obj:Set(v, silent)
+        box.Text = tostring(v or "")
+        if not silent and opt.Callback then pcall(opt.Callback, box.Text) end
+    end
+    function obj:Get() return box.Text end
+    box.FocusLost:Connect(function()
+        if opt.Callback then pcall(opt.Callback, box.Text) end
+        if opt.ClearAfter then box.Text = "" end
+    end)
+    if opt.Default then obj:Set(opt.Default, true) end
+    return register(opt.Flag, obj)
+end
+
+-- Dropdown: searchable, single or multi. Items are strings.
+function Elements:Dropdown(opt)
+    self._order = self._order + 1
+    local multi = opt.Multi
+    local holder = make("Frame", { BackgroundColor3 = Theme.Element, Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = self._order, Parent = self.Body }, { corner(8), stroke(), list(0) })
+    local header = make("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 44), LayoutOrder = 1, Parent = holder })
+    local headerText = text({ Text = opt.Title, TextColor3 = Theme.Sub, Position = UDim2.fromOffset(16, 0),
+        Size = UDim2.new(1, -52, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, Parent = header })
+    gridIcon(header)
+
+    local body = make("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        Visible = false, LayoutOrder = 2, Parent = holder }, { list(6), padding(12, 12, 0, 10) })
+    local search = make("TextBox", { BackgroundColor3 = Theme.Card, Size = UDim2.new(1, 0, 0, 34), Text = "",
+        PlaceholderText = "Search...", PlaceholderColor3 = Theme.Dim, Font = Enum.Font.Gotham, TextSize = 13,
+        TextColor3 = Theme.Text, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false,
+        LayoutOrder = 1, Visible = opt.Search ~= false, Parent = body }, { corner(8), padding(34, 10, 0, 0) })
+    -- magnifier drawn with two frames
+    local lens = make("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(10, 10), Position = UDim2.new(0, -22, 0.5, -7), Parent = search },
+        { corner(5), stroke(Theme.Sub, 1.5) })
+    make("Frame", { BackgroundColor3 = Theme.Sub, BorderSizePixel = 0, Size = UDim2.fromOffset(2, 6), Rotation = -45,
+        Position = UDim2.fromOffset(10, 8), Parent = lens })
+
+    local listFrame = make("ScrollingFrame", { BackgroundTransparency = 1, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 0),
+        ScrollBarThickness = 2, ScrollBarImageColor3 = Theme.Dim, CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y, LayoutOrder = 2, Parent = body }, { list(2) })
+
+    local items, selected, single, rows, open = {}, {}, nil, {}, false
+    local obj = { Type = "Dropdown" }
+
+    local function summary()
+        if multi then
+            local names = Util.SetToList(selected)
+            headerText.Text = #names > 0 and (opt.Title .. " • " .. table.concat(names, ", ")) or (opt.Title .. "...")
+        else
+            headerText.Text = single and (opt.Title .. " • " .. single) or (opt.Title .. "...")
+        end
+        headerText.TextColor3 = (single or next(selected)) and Theme.Text or Theme.Sub
+    end
+
+    local function paint(rowObj, name)
+        local on = multi and selected[name] or (not multi and single == name)
+        rowObj.check.Visible = on and true or false
+        rowObj.label.Position = on and UDim2.fromOffset(34, 0) or UDim2.fromOffset(14, 0)
+        rowObj.label.TextColor3 = on and Theme.Text or Theme.Sub
+    end
+
+    local function resize()
+        local shown = 0
+        for _, r in ipairs(rows) do if r.frame.Visible then shown = shown + 1 end end
+        listFrame.Size = UDim2.new(1, 0, 0, math.min(shown * 36, opt.MaxHeight or 250))
+    end
+
+    local function fire()
+        if not opt.Callback then return end
+        if multi then
+            local copy = {}
+            for k, v in pairs(selected) do copy[k] = v end
+            pcall(opt.Callback, copy)
+        else
+            pcall(opt.Callback, single)
+        end
+    end
+
+    function obj:Refresh(newItems, keepSelection)
+        for _, r in ipairs(rows) do r.frame:Destroy() end
+        rows, items = {}, newItems or {}
+        if keepSelection == false then selected, single = {}, nil end
+        for i, name in ipairs(items) do
+            local f = make("TextButton", { Text = "", AutoButtonColor = false, BackgroundColor3 = Theme.Element,
+                BackgroundTransparency = 1, Size = UDim2.new(1, -4, 0, 34), LayoutOrder = i, Parent = listFrame }, { corner(6) })
+            local check = text({ Text = "✓", Font = Enum.Font.GothamBold, TextSize = 13, Position = UDim2.fromOffset(12, 0),
+                Size = UDim2.new(0, 16, 1, 0), Parent = f })
+            local label = text({ Text = tostring(name), TextColor3 = Theme.Sub, Size = UDim2.new(1, -40, 1, 0),
+                TextTruncate = Enum.TextTruncate.AtEnd, Parent = f })
+            local r = { frame = f, check = check, label = label, name = name }
+            rows[#rows + 1] = r
+            paint(r, name)
+            f.MouseEnter:Connect(function() tween(f, { BackgroundTransparency = 0.4 }, 0.1) end)
+            f.MouseLeave:Connect(function() tween(f, { BackgroundTransparency = 1 }, 0.1) end)
+            f.MouseButton1Click:Connect(function()
+                if multi then
+                    selected[name] = not selected[name] or nil
+                else
+                    if single == name and not opt.Required then single = nil else single = name end
+                end
+                for _, rr in ipairs(rows) do paint(rr, rr.name) end
+                summary()
+                fire()
+            end)
+        end
+        search.Text = ""
+        resize()
+        summary()
+    end
+
+    function obj:Set(v, silent)
+        if multi then
+            selected = {}
+            if type(v) == "table" then
+                for k, on in pairs(v) do
+                    if type(k) == "number" then selected[on] = true elseif on then selected[k] = true end
+                end
+            end
+        else
+            single = v
+        end
+        for _, r in ipairs(rows) do paint(r, r.name) end
+        summary()
+        if not silent then fire() end
+    end
+    function obj:Get()
+        if multi then
+            local copy = {}
+            for k, v in pairs(selected) do copy[k] = v end
+            return copy
+        end
+        return single
+    end
+    function obj:Items() return items end
+
+    search:GetPropertyChangedSignal("Text"):Connect(function()
+        local q = string.lower(search.Text)
+        for _, r in ipairs(rows) do r.frame.Visible = q == "" or string.find(string.lower(tostring(r.name)), q, 1, true) ~= nil end
+        resize()
+    end)
+
+    make("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = header })
+        .MouseButton1Click:Connect(function()
+            open = not open
+            body.Visible = open
+        end)
+
+    obj:Refresh(opt.Items or {})
+    if opt.Default ~= nil then obj:Set(opt.Default, true) end
+    return register(opt.Flag, obj)
+end
+
+------------------------------------------------------------------------
+-- WINDOW
+------------------------------------------------------------------------
+function Library:Window(opt)
     local parent = guiParent()
-    local old = parent:FindFirstChild("RenHubUI")
-    if old then old:Destroy() end
+    for _, n in ipairs({ "RenHubV3", "RenHubUI" }) do
+        local old = parent:FindFirstChild(n)
+        if old then old:Destroy() end
+    end
 
-    local gui = make("ScreenGui", {
-        Name = "RenHubUI", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = parent,
-    })
-    local main = make("Frame", {
-        Size = UDim2.fromOffset(600, 400), Position = UDim2.new(0.5, -300, 0.5, -200),
-        BackgroundColor3 = Theme.Background, BorderSizePixel = 0, Parent = gui,
-    }, { corner(10), make("UIStroke", { Color = Theme.Accent, Transparency = 0.6, Thickness = 1 }) })
+    local W = { Tabs = {}, Size = Vector2.new(opt.Width or 780, opt.Height or 520), Open = true, UserScale = 1 }
+    local gui = make("ScreenGui", { Name = "RenHubV3", ResetOnSpawn = false, IgnoreGuiInset = true,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999, Parent = parent })
+    W.Gui = gui
 
-    local topBar = make("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundTransparency = 1, Parent = main })
-    make("TextLabel", {
-        Text = titleText, Font = Enum.Font.GothamBold, TextSize = 16, TextColor3 = Theme.Accent,
-        TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(16, 0), Size = UDim2.new(0.5, 0, 1, 0), Parent = topBar,
-    })
-    make("TextLabel", {
-        Text = "RightCtrl to hide", Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.SubText,
-        TextXAlignment = Enum.TextXAlignment.Right, BackgroundTransparency = 1,
-        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -44, 0, 0), Size = UDim2.new(0.4, 0, 1, 0), Parent = topBar,
-    })
-    local minimize = make("TextButton", {
-        Text = "-", Font = Enum.Font.GothamBold, TextSize = 18, TextColor3 = Theme.Text,
-        BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 0),
-        Size = UDim2.fromOffset(28, 38), Parent = topBar,
-    })
-    enableDrag(topBar, main)
+    local main = make("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(W.Size.X, W.Size.Y), BackgroundColor3 = Theme.Window, Parent = gui },
+        { corner(14), stroke(Theme.Stroke) })
+    local scale = make("UIScale", { Parent = main })
+    W.Main = main
 
-    local sidebar = make("ScrollingFrame", {
-        Position = UDim2.fromOffset(10, 44), Size = UDim2.new(0, 130, 1, -54),
-        BackgroundColor3 = Theme.Sidebar, BorderSizePixel = 0, ScrollBarThickness = 0,
-        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = main,
-    }, { corner(8), pad(6), make("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }) })
+    local function fitScale()
+        local cam = workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+        return math.min(1, (vp.X - 30) / W.Size.X, (vp.Y - 30) / W.Size.Y) * W.UserScale
+    end
+    scale.Scale = fitScale()
+    if workspace.CurrentCamera then
+        track(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+            if W.Open then scale.Scale = fitScale() end
+        end))
+    end
 
-    local pages = make("Frame", {
-        Position = UDim2.fromOffset(150, 44), Size = UDim2.new(1, -160, 1, -54),
-        BackgroundTransparency = 1, Parent = main,
-    })
+    -- sidebar ----------------------------------------------------------------
+    local side = make("Frame", { Size = UDim2.new(0, 236, 1, 0), BackgroundColor3 = Theme.Sidebar, BorderSizePixel = 0, Parent = main })
+    make("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.new(0, 1, 1, 0),
+        BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0, Parent = side })
 
-    local collapsed = false
-    minimize.MouseButton1Click:Connect(function()
-        collapsed = not collapsed
-        sidebar.Visible, pages.Visible = not collapsed, not collapsed
-        tween(main, { Size = collapsed and UDim2.fromOffset(600, 38) or UDim2.fromOffset(600, 400) })
+    local lights = make("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(16, 14), Size = UDim2.fromOffset(60, 12), Parent = side },
+        { list(8, Enum.FillDirection.Horizontal) })
+    local lightButtons = {}
+    for i, c in ipairs({ Color3.fromRGB(255, 95, 87), Color3.fromRGB(254, 188, 46), Color3.fromRGB(40, 200, 64) }) do
+        lightButtons[i] = make("TextButton", { Text = "", AutoButtonColor = false, BackgroundColor3 = c,
+            Size = UDim2.fromOffset(12, 12), LayoutOrder = i, Parent = lights }, { corner(6) })
+    end
+
+    text({ Text = opt.Title or "Hub", Font = Enum.Font.GothamBold, TextSize = 17, Position = UDim2.fromOffset(24, 40),
+        Size = UDim2.new(1, -70, 0, 22), Parent = side })
+    text({ Text = string.upper(opt.SubTitle or ""), TextSize = 11, TextColor3 = Theme.Sub, Position = UDim2.fromOffset(24, 62),
+        Size = UDim2.new(1, -70, 0, 14), Parent = side })
+    local logo = make("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(20, 20), Position = UDim2.new(1, -44, 0, 48), Parent = side })
+    diamond(logo, 12, false).Position = UDim2.fromOffset(4, 4)
+
+    make("Frame", { Position = UDim2.fromOffset(0, 96), Size = UDim2.new(1, -1, 0, 1), BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0, Parent = side })
+
+    local tabList = make("ScrollingFrame", { Position = UDim2.fromOffset(0, 108), Size = UDim2.new(1, -1, 1, -190),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 2, ScrollBarImageColor3 = Theme.Dim,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = side },
+        { list(6), padding(18, 18, 6, 6) })
+
+    -- profile
+    make("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, -74), Size = UDim2.new(1, -1, 0, 1),
+        BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0, Parent = side })
+    local avatar = make("ImageLabel", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 22, 1, -16),
+        Size = UDim2.fromOffset(42, 42), BackgroundColor3 = Theme.Element, Parent = side }, { corner(21), stroke() })
+    task.spawn(function()
+        local ok, img = pcall(Players.GetUserThumbnailAsync, Players, LP.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+        if ok then avatar.Image = img end
     end)
-    UIS.InputBegan:Connect(function(input, processed)
-        if not processed and input.KeyCode == CFG.ToggleKey then gui.Enabled = not gui.Enabled end
-    end)
+    text({ Text = LP.DisplayName, Font = Enum.Font.GothamBold, TextSize = 13, AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 74, 1, -38), Size = UDim2.new(1, -90, 0, 16), Parent = side })
+    text({ Text = "@" .. LP.Name, TextSize = 12, TextColor3 = Theme.Sub, AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 74, 1, -22), Size = UDim2.new(1, -90, 0, 14), Parent = side })
 
-    local Window, tabs, order = {}, {}, 0
-    local function select(tab)
-        for _, t in ipairs(tabs) do
-            t.page.Visible = (t == tab)
-            tween(t.button, {
-                BackgroundColor3 = (t == tab) and Theme.Accent or Theme.Sidebar,
-                TextColor3 = (t == tab) and Theme.Text or Theme.SubText,
-            })
+    -- content -----------------------------------------------------------------
+    local content = make("Frame", { Position = UDim2.fromOffset(236, 0), Size = UDim2.new(1, -236, 1, 0),
+        BackgroundTransparency = 1, Parent = main })
+    local headerBar = make("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundTransparency = 1, Parent = content })
+    local pageTitle = text({ Text = "", TextSize = 15, TextColor3 = Theme.Sub, Position = UDim2.fromOffset(26, 0),
+        Size = UDim2.new(1, -60, 1, 0), Parent = headerBar })
+    make("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 1),
+        BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0, Parent = headerBar })
+    local pages = make("Frame", { Position = UDim2.fromOffset(0, 57), Size = UDim2.new(1, 0, 1, -57),
+        BackgroundTransparency = 1, ClipsDescendants = true, Parent = content })
+
+    draggable(headerBar, main)
+    draggable(make("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 96), ZIndex = 0, Parent = side }), main)
+
+    -- open / close ------------------------------------------------------------
+    local busy = false
+    function W:SetOpen(on)
+        if busy or on == W.Open then return end
+        busy, W.Open = true, on
+        if on then
+            main.Visible = true
+            main.GroupTransparency = 1
+            scale.Scale = fitScale() * 0.9
+            tween(scale, { Scale = fitScale() }, 0.28, Enum.EasingStyle.Back)
+            tween(main, { GroupTransparency = 0 }, 0.2)
+            task.wait(0.28)
+        else
+            tween(scale, { Scale = fitScale() * 0.9 }, 0.18)
+            tween(main, { GroupTransparency = 1 }, 0.18)
+            task.wait(0.18)
+            main.Visible = false
         end
+        busy = false
+    end
+    function W:Toggle() task.spawn(W.SetOpen, W, not W.Open) end
+    function W:SetScale(s) W.UserScale = s scale.Scale = fitScale() end
+
+    lightButtons[1].MouseButton1Click:Connect(function() W:Toggle() end)
+    lightButtons[2].MouseButton1Click:Connect(function() W:Toggle() end)
+    lightButtons[3].MouseButton1Click:Connect(function()
+        tween(main, { Position = UDim2.fromScale(0.5, 0.5) }, 0.25)
+    end)
+    W.ToggleKey = opt.ToggleKey or Enum.KeyCode.RightControl
+    track(UIS.InputBegan:Connect(function(input, gp)
+        if not gp and input.KeyCode == W.ToggleKey then W:Toggle() end
+    end))
+
+    -- floating icon -------------------------------------------------------------
+    local icon = make("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 18, 0.5, 0),
+        Size = UDim2.fromOffset(54, 54), BackgroundColor3 = Theme.Sidebar, Parent = gui },
+        { corner(16), stroke(Theme.Stroke, 1.5) })
+    local iconInner = make("Frame", { BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(28, 28), Parent = icon })
+    local d = diamond(iconInner, 20, false)
+    d.AnchorPoint = Vector2.new(0.5, 0.5)
+    d.Position = UDim2.fromScale(0.5, 0.5)
+    text({ Text = "R", Font = Enum.Font.GothamBlack, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Center,
+        Size = UDim2.fromScale(1, 1), Parent = iconInner })
+    local iconScale = make("UIScale", { Parent = icon })
+    local iconHit = make("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = icon })
+    iconHit.MouseEnter:Connect(function() tween(iconScale, { Scale = 1.08 }, 0.15) end)
+    iconHit.MouseLeave:Connect(function() tween(iconScale, { Scale = 1 }, 0.15) end)
+    draggable(iconHit, icon, function()
+        tween(iconScale, { Scale = 0.9 }, 0.08)
+        task.delay(0.09, function() tween(iconScale, { Scale = 1 }, 0.2, Enum.EasingStyle.Back) end)
+        W:Toggle()
+    end)
+    W.Icon = icon
+
+    -- tabs ------------------------------------------------------------------------
+    local function selectTab(tab)
+        for _, t in ipairs(W.Tabs) do
+            local on = t == tab
+            t.Page.Visible = on
+            tween(t.Button, { BackgroundTransparency = on and 0 or 1 }, 0.15)
+            tween(t.Label, { TextColor3 = on and Theme.Text or Theme.Sub }, 0.15)
+            t.Icon.BackgroundTransparency = on and 0 or 1
+        end
+        pageTitle.Text = tab.Name
+        W.Current = tab
     end
 
-    function Window:Tab(name)
-        order = order + 1
-        local button = make("TextButton", {
-            Text = name, Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.SubText,
-            BackgroundColor3 = Theme.Sidebar, Size = UDim2.new(1, 0, 0, 32), LayoutOrder = order, Parent = sidebar,
-        }, { corner(6) })
-        local page = make("ScrollingFrame", {
-            Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
-            ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Accent, Visible = false,
-            CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = pages,
-        }, {
-            make("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }),
-            make("UIPadding", { PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }),
-        })
-        local tab = { button = button, page = page }
-        tabs[#tabs + 1] = tab
-        button.MouseButton1Click:Connect(function() select(tab) end)
-        if #tabs == 1 then select(tab) end
-        return buildPage(page)
+    function W:Tab(name, dividerAbove)
+        local order = #W.Tabs + 1
+        if dividerAbove then
+            make("Frame", { BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 1),
+                LayoutOrder = order * 2 - 1, Parent = tabList })
+        end
+        local btn = make("TextButton", { Text = "", AutoButtonColor = false, BackgroundColor3 = Theme.Element,
+            BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 44), LayoutOrder = order * 2, Parent = tabList },
+            { corner(10), stroke(Theme.Stroke) })
+        btn:FindFirstChildOfClass("UIStroke").Transparency = 1
+        local iconHolder = make("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(16, 16),
+            Position = UDim2.new(0, 18, 0.5, -8), Parent = btn })
+        local ic = diamond(iconHolder, 10, false)
+        ic.Position = UDim2.fromOffset(3, 3)
+        local label = text({ Text = name, TextSize = 15, TextColor3 = Theme.Sub, Position = UDim2.fromOffset(48, 0),
+            Size = UDim2.new(1, -56, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, Parent = btn })
+
+        local page = make("ScrollingFrame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+            ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Dim, CanvasSize = UDim2.new(),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false, Parent = pages },
+            { list(14, Enum.FillDirection.Horizontal), padding(16, 16, 16, 16) })
+        local left = make("Frame", { BackgroundTransparency = 1, Size = UDim2.new(0.5, -7, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = 1, Parent = page }, { list(14) })
+        local right = make("Frame", { BackgroundTransparency = 1, Size = UDim2.new(0.5, -7, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = 2, Parent = page }, { list(14) })
+
+        local tab = { Name = name, Button = btn, Label = label, Icon = ic, Page = page, Columns = { Left = left, Right = right }, _cards = 0 }
+        btn.MouseEnter:Connect(function() if W.Current ~= tab then tween(btn, { BackgroundTransparency = 0.6 }, 0.1) end end)
+        btn.MouseLeave:Connect(function() if W.Current ~= tab then tween(btn, { BackgroundTransparency = 1 }, 0.1) end end)
+        btn.MouseButton1Click:Connect(function() selectTab(tab) end)
+
+        function tab:Card(title, side)
+            tab._cards = tab._cards + 1
+            local col = tab.Columns[side or "Left"] or left
+            local frame = make("Frame", { BackgroundColor3 = Theme.Card, Size = UDim2.new(1, 0, 0, 0),
+                AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = tab._cards, Parent = col },
+                { corner(12), stroke(), padding(20, 20, 18, 16), list(8) })
+            if title then
+                text({ Text = title, Font = Enum.Font.GothamMedium, TextSize = 16, Size = UDim2.new(1, 0, 0, 26),
+                    LayoutOrder = 0, Parent = frame })
+            end
+            local card = setmetatable({ Body = frame, _order = 0 }, Elements)
+            return card
+        end
+
+        W.Tabs[#W.Tabs + 1] = tab
+        if #W.Tabs == 1 then selectTab(tab) end
+        return tab
     end
 
-    return Window
+    -- config ------------------------------------------------------------------------
+    local function configPath(name)
+        return CFG.ConfigFolder .. "/" .. tostring(name or "default") .. ".json"
+    end
+    function W:SaveConfig(name)
+        if not writefile then Util.Notify("Executor has no writefile") return end
+        local out = {}
+        for flag, el in pairs(Library.Flags) do out[flag] = el:Get() end
+        pcall(function() if not isfolder(CFG.ConfigFolder) then makefolder(CFG.ConfigFolder) end end)
+        local ok, err = pcall(writefile, configPath(name), HttpService:JSONEncode(out))
+        Util.Notify(ok and ("Saved config " .. name) or ("Save failed: " .. tostring(err)))
+    end
+    function W:LoadConfig(name, quiet)
+        if not (readfile and isfile) then return end
+        local okExists, exists = pcall(isfile, configPath(name))
+        if not okExists or not exists then if not quiet then Util.Notify("No config " .. name) end return end
+        local ok, decoded = pcall(function() return HttpService:JSONDecode(readfile(configPath(name))) end)
+        if not ok or type(decoded) ~= "table" then Util.Notify("Config broken") return end
+        for flag, value in pairs(decoded) do
+            local el = Library.Flags[flag]
+            if el then pcall(el.Set, el, value) end
+        end
+        if not quiet then Util.Notify("Loaded config " .. name) end
+    end
+
+    function W:Destroy()
+        for _, c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
+        gui:Destroy()
+    end
+
+    return W
 end
 
 ------------------------------------------------------------------------
--- FEATURE LOGIC
+-- FEATURES
 ------------------------------------------------------------------------
-local Features = {}
-local InfToggle, PassiveToggle   -- assigned when the UI is built
+local Flags = Library.Flags
+local function F(flag)
+    local el = Flags[flag]
+    if not el then return nil end
+    return el:Get()
+end
+local function On(flag) return F(flag) == true end
+local function worldsFrom(flag)
+    local out = {}
+    for _, label in ipairs(Util.SetToList(F(flag))) do out[#out + 1] = Data.FromLabel(label) end
+    return out
+end
+local function contains(t, v) for _, x in ipairs(t) do if x == v then return true end end return false end
 
--- Infinity Tower ----------------------------------------------------------
+local Features = {}
+local Stats = { InfFloor = 1, InfBest = 0, DungeonRuns = 0, GateRuns = 0, TrialFloor = 0, TrialName = nil, Rebirths = 0 }
+local HomeWorld = Util.World()
+
+-- MAIN ------------------------------------------------------------------------
+function Features.Farm()
+    local world = Util.World()
+    local selectedWorlds = worldsFrom("FarmWorlds")
+    if On("OnlySelectedWorld") and #selectedWorlds > 0 and not contains(selectedWorlds, world) then
+        Travel.To(selectedWorlds[1])
+        return
+    end
+    local wanted = function() return On("AutoFarm") end
+
+    if On("FocusRebirthBoss") then
+        local bosses = Data.RebirthBosses()
+        if next(bosses) and Combat.Step(world, wanted, bosses, "Nearest") then return end
+    end
+
+    local mode = F("FarmMode") or "Nearest"
+    if mode == "Mobs Selected" then
+        local mobs = F("FarmMobs") or {}
+        if not next(mobs) then return end
+        Combat.Step(world, wanted, mobs, "Nearest")
+    else
+        Combat.Step(world, wanted, nil, mode)
+    end
+end
+
+function Features.Monsters()
+    local worlds = worldsFrom("FarmWorlds")
+    if #worlds == 0 then worlds = { Util.World() } end
+    local seen, out = {}, {}
+    for _, w in ipairs(worlds) do
+        for _, e in ipairs(Combat.List(w)) do
+            local n = Combat.Name(e)
+            if not seen[n] then seen[n] = true out[#out + 1] = n end
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+function Features.Quest()
+    local world = Util.World()
+    if Util.Every("quest", 10) then
+        local finished = Net.Call("FinishQuest", world)
+        if On("SkipQuest") then Net.Call("SkipQuest") end
+        Net.Call("StartQuest", world)
+        if finished and On("NextQuestWorld") then
+            local order, discovered = Data.FarmWorlds(), LP:FindFirstChild("Discovered")
+            for i, w in ipairs(order) do
+                if w == world then
+                    local nxt = order[i + 1]
+                    if nxt and (not discovered or discovered:FindFirstChild(nxt)) then Travel.To(nxt) end
+                    break
+                end
+            end
+        end
+    end
+end
+
+function Features.NextWorld()
+    local order, world = Data.FarmWorlds(), Util.World()
+    for i, w in ipairs(order) do
+        if w == world then
+            local nxt = order[i + 1]
+            if not nxt then return end
+            Net.Call("DiscoverWorld", nxt)
+            task.wait(1)
+            local discovered = LP:FindFirstChild("Discovered")
+            if not discovered or discovered:FindFirstChild(nxt) then Travel.To(nxt) end
+            return
+        end
+    end
+end
+
+function Features.Collect()
+    local root = Util.Root()
+    local effects = workspace:FindFirstChild("Effects")
+    if not root or not effects then return end
+    for _, drop in ipairs(effects:GetChildren()) do
+        if drop.Name == "Yen" or string.find(drop.Name, "Pickup", 1, true) or string.find(drop.Name, "Drop", 1, true) then
+            local part = drop:IsA("BasePart") and drop or drop:FindFirstChild("Base") or drop:FindFirstChildWhichIsA("BasePart")
+            if part then part.CFrame = root.CFrame end
+        end
+    end
+end
+
+-- TIME TRIAL / TOWER ----------------------------------------------------------------
+local trialIndex = 0
+function Features.TimeTrial()
+    local world = Util.World()
+    if world == "Tower" then
+        local wanted = function() return On("AutoTrial") end
+        local trialName = Stats.TrialName
+        if On("AutoLeaveTrial") and trialName then
+            local limit = F("Leave_" .. trialName)
+            if limit and Stats.TrialFloor >= limit then
+                Util.Notify("Leaving " .. trialName .. " at floor " .. Stats.TrialFloor)
+                Travel.To(HomeWorld ~= "" and HomeWorld or Data.FarmWorlds()[1])
+                return true
+            end
+        end
+        if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest") then return true end
+        local tower = Worlds:FindFirstChild("Tower")
+        if not On("TrialIgnoreChest") then
+            for _, p in ipairs(Prompt.Find(tower, { "chest" })) do Prompt.Use(p) task.wait(0.2) end
+        end
+        for _, obj in ipairs(tower and tower:GetDescendants() or {}) do
+            if obj.Name == "ConfirmPart" then
+                local p = obj:FindFirstChildOfClass("ProximityPrompt")
+                if p and p.Enabled and Util.Every("trial-room", 2) then
+                    Prompt.Use(p)
+                    Stats.TrialFloor = Stats.TrialFloor + 1
+                end
+            end
+        end
+        return true
+    end
+    local trials = Util.SetToList(F("Trials"))
+    if #trials == 0 then return false end
+    if Util.Every("trial-join", 15) then
+        if CFG.ModeWorlds[world] == nil then HomeWorld = world end
+        trialIndex = trialIndex % #trials + 1
+        Stats.TrialName, Stats.TrialFloor = trials[trialIndex], 0
+        Net.Call("JoinTimeTrial", trials[trialIndex])
+    end
+    return false
+end
+
 function Features.InfinityTower()
     if Util.World() == "InfinityTower" then
-        local fought = Combat.Step("InfinityTower", function() return State.Inf end)
-        if not fought and not State.InfAllTiers then
-            State.Inf = false
-            if InfToggle then InfToggle:Set(false, true) end
-            Util.Notify("Floor cleared - stopped (All Tiers is off)")
+        local fought = Combat.Step("InfinityTower", function() return On("AutoInf") end, nil, F("InfTarget") or "Nearest")
+        if not fought and not On("InfAllTiers") and Util.Every("inf-stop", 5) then
+            Flags.AutoInf:Set(false)
+            Util.Notify("Floor cleared - Climb All Tiers is off")
         end
     elseif Util.Every("inf-join", CFG.JoinCooldown) then
-        Net.Call("SetInfFloor", State.InfFloor)
+        Net.Call("SetInfFloor", Stats.InfFloor)
         task.wait(0.5)
         Net.Call("JoinInfTower")
     end
 end
 
--- Dungeon -----------------------------------------------------------------
+-- RAID / DEFENSE / METEOR ------------------------------------------------------------
+function Features.Raid()
+    if Util.World() == "Raid" then
+        Combat.Step("Raid", function() return On("AutoRaid") end)
+        return true
+    end
+    if not Util.Every("raid-join", CFG.JoinCooldown) then return false end
+    local active, mode
+    pcall(function()
+        local rd = Worlds.Raid.RaidData
+        local w = rd:FindFirstChild("CurrentWorld") or rd:FindFirstChild("CurrentRaid")
+        local m = rd:FindFirstChild("CurrentMode") or rd:FindFirstChild("Mode") or rd:FindFirstChild("Difficulty")
+        active, mode = w and w.Value, m and m.Value
+    end)
+    local worlds, modes = worldsFrom("RaidWorlds"), F("RaidModes") or {}
+    local worldOk = On("RaidAllWorlds") or contains(worlds, active)
+    local modeOk = not next(modes) or mode == nil or modes[mode]
+    if active and worldOk and modeOk then
+        Net.Call("JoinRaid", active, mode)
+        return true
+    end
+    return false
+end
+
+local defenseActive = false
+function Features.Defense()
+    local world = Util.World()
+    if defenseActive then
+        if Data.IsFarmWorldName(world) then
+            defenseActive = false
+        else
+            Combat.Step(world, function() return On("AutoDefense") end)
+            return true
+        end
+    end
+    local target = F("DefenseWorld")
+    if target and Util.Every("defense-join", 15) then
+        Net.Call("JoinDefense", Data.FromLabel(target), On("DefenseFriends"))
+        task.wait(2)
+        if Util.World() ~= world then defenseActive = true end
+    end
+    return false
+end
+
+function Features.Meteor()
+    local worlds = On("MeteorAllWorlds") and Data.FarmWorlds() or worldsFrom("MeteorWorlds")
+    local current = Util.World()
+    if contains(worlds, current) or #worlds == 0 then
+        if Combat.Step(current, function() return On("AutoMeteor") end, CFG.MeteorNames) then return true end
+    end
+    for _, w in ipairs(worlds) do
+        if w ~= current and #Combat.List(w, CFG.MeteorNames) > 0 then
+            Travel.To(w)
+            return true
+        end
+    end
+    return false
+end
+
+-- DUNGEON / GATE / TIME CHAMBER ------------------------------------------------------------
 function Features.Dungeon()
     if Util.World() ~= "Dungeon" then
         if Util.Every("dungeon-join", CFG.JoinCooldown) then
-            Net.Call("DungeonSetting", "Difficulty", State.DungeonDiff)
-            Net.Call("SummonDungeon", State.DungeonDiff)
+            Net.Call("SummonDungeon", F("DungeonSize") or "Small", Data.FromLabel(F("DungeonWorld") or ""), On("DungeonArtifact"))
             task.wait(1)
             Net.Call("JoinDungeon")
         end
         return
     end
-    if Combat.Step("Dungeon", function() return State.Dungeon end) then return end
-
+    if Combat.Step("Dungeon", function() return On("AutoDungeon") end) then return end
     local root = Worlds:FindFirstChild("Dungeon")
-    if State.DungeonChests then
+    if not On("DungeonIgnoreChest") then
         for _, p in ipairs(Prompt.Find(root, { "chest", "treasure" })) do
             Prompt.Use(p)
             Net.Call("OpenChest", p.Parent)
             task.wait(0.3)
         end
     end
-    if State.DungeonDoors and Util.Every("dungeon-door", 3) then
+    if Util.Every("dungeon-door", 3) then
         local door = Prompt.Find(root, { "door", "next", "open" })[1]
         if door then
             Prompt.Use(door)
@@ -812,474 +1420,699 @@ function Features.Dungeon()
     end
 end
 
--- Gates -------------------------------------------------------------------
+local gateIndex = 0
 function Features.Gates()
     if Util.World() ~= "GatesMode" then
-        if Util.Every("gates-join", CFG.JoinCooldown) then
-            Net.Call("SummonGate", State.GateRank)
+        local ranks = Util.SetToList(F("GateRanks"))
+        if #ranks > 0 and Util.Every("gates-join", CFG.JoinCooldown) then
+            gateIndex = gateIndex % #ranks + 1
+            Net.Call("SummonGate", ranks[gateIndex], F("GateAmount") or 1)
             task.wait(1)
             Net.Call("JoinGates")
         end
         return
     end
-    local fought = Combat.Step("GatesMode", function() return State.Gates end)
-    if not fought and State.GateSkip and Util.Every("gates-skip", 3) then
+    if not Combat.Step("GatesMode", function() return On("AutoGate") end) and Util.Every("gates-skip", 3) then
         Net.Call("SkipGateWait")
     end
 end
 
--- Raid --------------------------------------------------------------------
-function Features.Raid()
-    if Util.World() == "Raid" then
-        Combat.Step("Raid", function() return State.Raid end)
-        return
-    end
-    if not State.RaidWorld or not Util.Every("raid-join", CFG.JoinCooldown) then return end
-    local active
-    pcall(function()
-        local data = Worlds.Raid.RaidData
-        local v = data:FindFirstChild("CurrentWorld") or data:FindFirstChild("CurrentRaid")
-        active = v and v.Value
-    end)
-    if active == State.RaidWorld then Net.Call("JoinRaid") end
+function Features.TimeChamber()
+    if Util.World() ~= "TimeChamber" and Util.Every("chamber", 20) then Travel.To("TimeChamber") end
 end
 
--- Time Trial --------------------------------------------------------------
-function Features.TimeTrial()
-    if Util.World() == "Tower" then
-        local fought = Combat.Step("Tower", function() return State.Trial end)
-        if not fought and State.TrialSkip then
-            local tower = Worlds:FindFirstChild("Tower")
-            for _, obj in ipairs(tower and tower:GetDescendants() or {}) do
-                if obj.Name == "ConfirmPart" then
-                    local p = obj:FindFirstChildOfClass("ProximityPrompt")
-                    if p then Prompt.Use(p) end
-                end
-            end
-        end
+-- GAME MODE EVENTS ------------------------------------------------------------------------
+function Features.Events()
+    local worlds = Util.SetToList(F("EventWorlds"))
+    if #worlds == 0 then return false end
+    local current = Util.World()
+    if contains(worlds, current) then
+        Combat.Step(current, function() return On("AutoEvent") end)
         return true
     end
-    if State.TrialJoin and Util.Every("trial-join", 15) then
-        Net.Call("JoinTimeTrial")
+    if Util.Every("event-join", 15) then Travel.To(worlds[1]) end
+    return true
+end
+
+function Features.GlobalBoss()
+    if Util.World() == "GlobalBoss" then
+        Combat.Step("GlobalBoss", function() return On("AutoGlobalBoss") end, nil, "Strongest")
         return true
     end
+    if Util.Every("gboss-join", 20) then Net.Call("JoinGlobalBoss") end
     return false
 end
 
--- Normal farm -------------------------------------------------------------
-function Features.Farm()
-    local only = (State.FarmTarget ~= "Nearest") and State.FarmTarget or nil
-    Combat.Step(Util.World(), function() return State.Farm end, only)
-end
-
--- one brain: highest-priority mode that is on gets the character
-local function Brain()
-    if State.Inf then return Features.InfinityTower() end
-    if State.Dungeon then return Features.Dungeon() end
-    if State.Gates then return Features.Gates() end
-    if State.Raid then return Features.Raid() end
-    if State.Trial and Features.TimeTrial() then return end
-    if State.Meteor and Combat.Step(Util.World(), function() return State.Meteor end, "Meteor") then return end
-    if State.Farm then Features.Farm() end
-end
-
--- Eggs --------------------------------------------------------------------
-function Features.OpenEgg()
-    if Util.World() ~= State.EggWorld then
-        Net.Call("Travel", State.EggWorld)
-        task.wait(2)
+-- HATCH / FUSE ------------------------------------------------------------------------------
+function Features.Hatch()
+    local pick = F("HatchStar")
+    if not pick then return end
+    local starName, worldName = string.match(pick, "^(.-) | (.+)$")
+    if not starName then return end
+    local modes = F("HatchModes") or {}
+    local amount = modes["Summon Max Star"] and CFG.HatchAmount.Max
+        or modes["Summon Multiple Star"] and CFG.HatchAmount.Multiple or CFG.HatchAmount.Single
+    if On("HatchTp") then
+        if Util.World() ~= worldName then Travel.To(worldName) end
+        local w = Worlds:FindFirstChild(worldName)
+        local star = w and w:FindFirstChild(starName)
+        local root = Util.Root()
+        if star and root then
+            local pivot = star:GetPivot()
+            if (root.Position - pivot.Position).Magnitude > 12 then Util.MoveTo(pivot * CFrame.new(0, 0, 7)) task.wait(0.3) end
+        end
     end
-    local world = Worlds:FindFirstChild(State.EggWorld)
-    local egg = world and world:FindFirstChild(State.Egg, true)
-    if not egg then return end
-    local root = Util.Root()
-    local pivot = egg:GetPivot()
-    if root and (root.Position - pivot.Position).Magnitude > 12 then
-        Util.MoveTo(pivot * CFrame.new(0, 0, 7))
-        task.wait(0.4)
-    end
-    Net.Call("OpenEgg", egg, CFG.EggAmount[State.EggMode] or 1)
+    local w = Worlds:FindFirstChild(worldName)
+    Net.Call("OpenEgg", (w and w:FindFirstChild(starName)) or starName, amount)
 end
 
--- Passive -----------------------------------------------------------------
-local passiveRolls, passiveDone = {}, {}
-
-local function readPassive(petId, serverReply)
+function Data.PetTypes()
+    local set = {}
     local folder = LP:FindFirstChild("Pets")
-    local pet = folder and folder:FindFirstChild(petId)
-    if pet then
-        for _, key in ipairs({ "Passive", "PassiveName", "CurrentPassive" }) do
-            local attr = pet:GetAttribute(key)
-            if attr ~= nil then return tostring(attr) end
-            local child = pet:FindFirstChild(key)
-            if child and child:IsA("ValueBase") then return tostring(child.Value) end
+    for _, pet in ipairs(folder and folder:GetChildren() or {}) do
+        local n = Util.Value(pet, { "PetName", "Name", "DisplayName", "Type" })
+        set[type(n) == "string" and n or pet.Name] = true
+    end
+    return Util.SetToList(set)
+end
+
+function Features.Fuse()
+    local types, rarities = F("FusePets") or {}, F("FuseRarity") or {}
+    if not next(types) then return end
+    local folder = LP:FindFirstChild("Pets")
+    local ids = {}
+    for _, pet in ipairs(folder and folder:GetChildren() or {}) do
+        local n = Util.Value(pet, { "PetName", "Name", "DisplayName", "Type" })
+        n = type(n) == "string" and n or pet.Name
+        local rarity = Util.Value(pet, { "Rarity", "Tier" })
+        local shiny = Util.Value(pet, { "Shiny", "IsShiny" })
+        local locked = Util.Value(pet, { "Locked", "Lock", "IsLocked" })
+        local equipped = Util.Value(pet, { "Equipped", "IsEquipped" })
+        if types[n] and not locked and not equipped
+           and (not next(rarities) or rarity == nil or rarities[rarity])
+           and (On("FuseShiny") or not shiny) then
+            ids[#ids + 1] = pet.Name
         end
     end
-    if serverReply ~= nil then
-        if type(serverReply) == "table" then
-            local ok, json = pcall(HttpService.JSONEncode, HttpService, serverReply)
-            return ok and json or nil
+    if #ids > 1 then Net.Call("FusePets", ids) end
+end
+
+-- PASSIVE ------------------------------------------------------------------------------------
+local passiveDone, passiveRolls = {}, {}
+local PassiveStatus
+
+local function readPassive(petId, slot, reply)
+    local pet = Data.PetObject(petId)
+    if pet then
+        local v = Util.Value(pet, { "Passive" .. slot, "Passive_" .. slot, "PassiveSlot" .. slot })
+        if v == nil and slot == 1 then v = Util.Value(pet, { "Passive", "PassiveName" }) end
+        if v == nil then
+            local folder = pet:FindFirstChild("Passives")
+            local c = folder and (folder:FindFirstChild(tostring(slot)) or folder:GetChildren()[slot])
+            if c then v = c:IsA("ValueBase") and c.Value or c.Name end
         end
-        return tostring(serverReply)
+        if v ~= nil then return tostring(v) end
+    end
+    if type(reply) == "table" then
+        local r = reply[slot] or reply.Passive or reply.Name or reply[1]
+        return r and tostring(r) or nil
+    elseif reply ~= nil then
+        return tostring(reply)
     end
     return nil
 end
 
-local PassiveStatus
-local function updatePassiveStatus()
-    if not PassiveStatus then return end
-    local total, done = 0, 0
-    for id in pairs(State.PassivePets) do
-        total = total + 1
-        if passiveDone[id] then done = done + 1 end
+local function goToMachine()
+    local machine = F("PassiveMachine") or "Normal"
+    local words = machine == "Normal" and { "passive" } or { string.lower(machine) }
+    local prompts = Prompt.Find(workspace, words)
+    local best
+    for _, p in ipairs(prompts) do
+        local hay = string.lower((p.Parent and p.Parent:GetFullName() or "") .. p.ObjectText .. p.ActionText)
+        if string.find(hay, "passive", 1, true) or string.find(hay, "reroll", 1, true) then best = p break end
     end
-    PassiveStatus:Set("Pets: " .. total .. "   Done: " .. done)
+    local root = Util.Root()
+    if best and root and best.Parent:IsA("BasePart") and (best.Parent.Position - root.Position).Magnitude > 20 then
+        Util.MoveTo(best.Parent.CFrame * CFrame.new(0, 3, 5))
+    end
 end
 
-local cantReadWarned = false
-function Features.PassiveRound()
-    local remaining = 0
-    local target = string.lower(State.PassiveTarget)
-    for petId in pairs(State.PassivePets) do
-        if not State.Passive then return end
-        if not passiveDone[petId] then
-            remaining = remaining + 1
-            passiveRolls[petId] = (passiveRolls[petId] or 0) + 1
-            local reply = Net.Call("RollPassive", petId)
-            if State.PassiveConfirm then Net.Call("PickPassive", petId, true) end
-            task.wait(State.PassiveDelay)
+function Features.PassiveStatusText()
+    local lines = {}
+    local ready = next(F("PassivePets") or {}) and next(F("PassiveSlots") or {})
+    lines[#lines + 1] = "Status [" .. (On("AutoPassive") and "<font color='#4ade80'>running</font>" or (ready and "<font color='#4ade80'>ready</font>" or "<font color='#f87171'>not ready</font>")) .. "]"
+    lines[#lines + 1] = "[-] Pets : " .. Util.Count(F("PassivePets"))
+    lines[#lines + 1] = "[-] Passive Slot : " .. table.concat(Util.SetToList(F("PassiveSlots")), ", ")
+    lines[#lines + 1] = "[-] Reroll Mode : " .. tostring(F("PassiveMode") or "-")
+    lines[#lines + 1] = "[-] Passive Selected :"
+    for _, n in ipairs(Util.SetToList(F("PassiveNames"))) do lines[#lines + 1] = "    [+] " .. n end
+    lines[#lines + 1] = "[-] Passive Rarity Selected :"
+    for _, n in ipairs(Util.SetToList(F("PassiveRarity"))) do lines[#lines + 1] = "    [+] " .. n end
+    lines[#lines + 1] = "[-] Passive Machine : " .. tostring(F("PassiveMachine") or "-")
+    lines[#lines + 1] = "[-] Method : " .. tostring(F("PassiveMethod") or "-")
+    lines[#lines + 1] = "[-] Delayed " .. tostring(F("PassiveDelay") or 0.5)
+    local done, total = 0, 0
+    for _ in pairs(passiveRolls) do total = total + 1 end
+    for _ in pairs(passiveDone) do done = done + 1 end
+    lines[#lines + 1] = "[-] Slots done : " .. done .. " / " .. total
+    return table.concat(lines, "\n")
+end
 
-            local got = readPassive(petId, reply)
-            if target ~= "" and got and string.find(string.lower(got), target, 1, true) then
-                passiveDone[petId] = true
-                Util.Notify(petId .. " -> " .. State.PassiveTarget)
-            elseif target ~= "" and not got and not cantReadWarned then
-                cantReadWarned = true
-                Util.Notify("Can't read passive. Use Remote Spy (F9).")
+local _, passiveRarityOf = Data.Passives()
+local warnedRead = false
+function Features.Passive()
+    local pets = Util.SetToList(F("PassivePets"))
+    local slots = Util.SetToList(F("PassiveSlots"))
+    if #pets == 0 or #slots == 0 then return end
+    if Util.Every("passive-machine", 15) then goToMachine() end
+
+    local keepNames, keepRarity = F("PassiveNames") or {}, F("PassiveRarity") or {}
+    local mode = F("PassiveMode") or "Keep Selected Passive"
+    local remaining = 0
+    for _, label in ipairs(pets) do
+        local id = Data.PetId(label)
+        for _, slotText in ipairs(slots) do
+            if not On("AutoPassive") then return end
+            local slot = tonumber(slotText) or 1
+            local key = id .. "#" .. slot
+            if not passiveDone[key] then
+                remaining = remaining + 1
+                passiveRolls[key] = (passiveRolls[key] or 0) + 1
+                local reply = Net.Call("RollPassive", id, slot, F("PassiveMachine") or "Normal", F("PassiveMethod") or "Token")
+                task.wait(F("PassiveDelay") or 0.5)
+                local got = readPassive(id, slot, reply)
+                if got then
+                    local keep
+                    if mode == "Keep Selected Rarity" then
+                        keep = keepRarity[passiveRarityOf[got] or ""] == true
+                    else
+                        keep = false
+                        for name in pairs(keepNames) do
+                            if string.find(string.lower(got), string.lower(name), 1, true) then keep = true break end
+                        end
+                    end
+                    if keep then
+                        passiveDone[key] = true
+                        Net.Call("PickPassive", id, slot, true)
+                        Util.Notify(label .. " slot " .. slot .. " -> " .. got)
+                    end
+                elseif not warnedRead then
+                    warnedRead = true
+                    Util.Notify("Can't read passive - use Remote Spy (F9)")
+                end
             end
-            if passiveRolls[petId] >= State.PassiveMax then
-                passiveDone[petId] = true
-            end
-            updatePassiveStatus()
         end
     end
+    if PassiveStatus then PassiveStatus:Set(Features.PassiveStatusText()) end
     if remaining == 0 then
-        State.Passive = false
-        if PassiveToggle then PassiveToggle:Set(false, true) end
-        Util.Notify("Passive rolling finished")
+        Flags.AutoPassive:Set(false)
+        Util.Notify("All selected slots have a kept passive")
+    end
+end
+function Features.ResetPassive() passiveDone, passiveRolls, warnedRead = {}, {}, false end
+
+-- SHOP ------------------------------------------------------------------------------------------
+function Features.Shop()
+    if On("AutoMerchant") and Util.Every("merchant", 30) then
+        for _, s in ipairs(Util.SetToList(F("MerchantSlots"))) do Net.Call("MerchantBuy", tonumber(s)) task.wait(0.3) end
+    end
+    if On("AutoBlackMarket") and Util.Every("blackmarket", 30) then
+        for _, s in ipairs(Util.SetToList(F("BlackMarketSlots"))) do Net.Call("BlackMarketBuy", tonumber(s)) task.wait(0.3) end
     end
 end
 
--- Settings push -------------------------------------------------------------
+-- OPEN UI ----------------------------------------------------------------------------------------
+function Features.OpenMenu(name, on)
+    local mg = Data.MainGui()
+    local frame = mg and mg:FindFirstChild(name)
+    if not frame then Util.Notify("Menu not found: " .. name) return end
+    pcall(function()
+        if frame:IsA("GuiObject") then frame.Visible = on end
+        if frame:IsA("LayerCollector") then frame.Enabled = on end
+    end)
+end
+
+-- SETTINGS ----------------------------------------------------------------------------------------
 function Features.PushSettings()
-    local sell = {}
-    for _, r in ipairs(CFG.Rarities) do
-        sell[r] = State.AutoSell[r] or false
-        sell["Shiny" .. r] = State.AutoSell["Shiny" .. r] or false
+    local sell, lock = {}, {}
+    for _, r in ipairs({ "Common", "Rare", "Epic", "Legendary", "Mythical" }) do
+        sell[r] = On("Sell_" .. r)
+        sell["Shiny" .. r] = On("Sell_Shiny" .. r)
+        lock[r], lock["Shiny" .. r] = false, false
     end
-    local lock = {}
-    for k in pairs(sell) do lock[k] = false end
     Net.Call("SetSettings", {
-        AutoSell = sell, AutoLock = lock, OwnFX = State.OwnFX,
+        AutoSell = sell, AutoLock = lock, OwnFX = On("OwnerEffect"),
         AutoClicker = true, Flash = true, LegendAnnouncements = false, BoostPaused = false,
         LowQuality = false, OtherFX = false, AllPets = true, AutoSprint = true,
         MusicEnabled = true, SoundsEnabled = true, CriticalHits = true,
     })
 end
 
--- Webhook -------------------------------------------------------------------
-function Features.Webhook(header)
+function Features.Webhook(title)
     local send = (syn and syn.request) or (http and http.request) or http_request or request
-    if not send or State.Webhook == "" then return end
+    local url = F("WebhookUrl") or ""
+    if not send or url == "" then Util.Notify("No webhook / request function") return end
     local yen = "?"
     pcall(function()
-        for _, stat in ipairs(LP.leaderstats:GetChildren()) do
-            if stat.Name ~= "Rank" then yen = tostring(stat.Value) break end
-        end
+        for _, s in ipairs(LP.leaderstats:GetChildren()) do if s.Name ~= "Rank" then yen = tostring(s.Value) break end end
     end)
-    local fields = {
-        { name = "World",           value = Util.World() ~= "" and Util.World() or "-", inline = true },
-        { name = "Yen",             value = yen,                                       inline = true },
-        { name = "Inf Tower Best",  value = tostring(State.InfBest),                   inline = true },
-        { name = "Dungeon Runs",    value = tostring(State.DungeonRuns),               inline = true },
-        { name = "Gate Runs",       value = tostring(State.GateRuns),                  inline = true },
-    }
     pcall(send, {
-        Url = State.Webhook, Method = "POST",
-        Headers = { ["Content-Type"] = "application/json" },
-        Body = HttpService:JSONEncode({
-            embeds = { {
-                title = header, color = 0x7269DA,
-                description = "Player: ||" .. LP.Name .. "||",
-                fields = fields,
-                footer = { text = CFG.HubName },
-                timestamp = DateTime.now():ToIsoDate(),
-            } },
-        }),
+        Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" },
+        Body = HttpService:JSONEncode({ embeds = { {
+            title = title, color = 0x2B2B2F, description = "Player: ||" .. LP.Name .. "||",
+            fields = {
+                { name = "World", value = Util.World() ~= "" and Util.World() or "-", inline = true },
+                { name = "Yen", value = yen, inline = true },
+                { name = "Inf Tower Best", value = tostring(Stats.InfBest), inline = true },
+                { name = "Dungeon Runs", value = tostring(Stats.DungeonRuns), inline = true },
+                { name = "Gate Runs", value = tostring(Stats.GateRuns), inline = true },
+            },
+            footer = { text = CFG.Name }, timestamp = DateTime.now():ToIsoDate(),
+        } } }),
     })
 end
 
--- FPS boost -------------------------------------------------------------------
 function Features.FpsBoost()
     pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
     Lighting.GlobalShadows = false
     Lighting.FogEnd = 1e9
-    for _, fx in ipairs(Lighting:GetChildren()) do
-        if fx:IsA("PostEffect") then fx.Enabled = false end
+    for _, fx in ipairs(Lighting:GetChildren()) do if fx:IsA("PostEffect") then fx.Enabled = false end end
+    local function lighten(o)
+        if o:IsA("BasePart") then o.Material = Enum.Material.SmoothPlastic o.Reflectance = 0 o.CastShadow = false
+        elseif o:IsA("ParticleEmitter") or o:IsA("Trail") or o:IsA("Beam") then o.Enabled = false
+        elseif o:IsA("Decal") or o:IsA("Texture") then o.Transparency = 1 end
     end
-    local terrain = workspace:FindFirstChildOfClass("Terrain")
-    if terrain then
-        terrain.WaterWaveSize, terrain.WaterWaveSpeed = 0, 0
-        terrain.WaterReflectance, terrain.WaterTransparency = 0, 1
-    end
-    local function lighten(obj)
-        if obj:IsA("BasePart") then
-            obj.Material = Enum.Material.SmoothPlastic
-            obj.Reflectance = 0
-            obj.CastShadow = false
-        elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") then
-            obj.Enabled = false
-        elseif obj:IsA("Decal") or obj:IsA("Texture") then
-            obj.Transparency = 1
-        end
-    end
-    for _, obj in ipairs(workspace:GetDescendants()) do pcall(lighten, obj) end
-    workspace.DescendantAdded:Connect(function(obj) pcall(lighten, obj) end)
+    for _, o in ipairs(workspace:GetDescendants()) do pcall(lighten, o) end
+    track(workspace.DescendantAdded:Connect(function(o) pcall(lighten, o) end))
     Util.Notify("FPS boost on")
+end
+
+-- BRAIN: one owner of the character at a time ----------------------------------------------------
+local function Brain()
+    if On("AutoInf") then return Features.InfinityTower() end
+    if On("AutoDungeon") then return Features.Dungeon() end
+    if On("AutoGate") then return Features.Gates() end
+    if On("AutoTrial") and Features.TimeTrial() then return end
+    if On("AutoRaid") and Features.Raid() then return end
+    if On("AutoDefense") and Features.Defense() then return end
+    if On("AutoEvent") and Features.Events() then return end
+    if On("AutoGlobalBoss") and Features.GlobalBoss() then return end
+    if On("AutoMeteor") and Features.Meteor() then return end
+    if On("AutoQuest") then Features.Quest() end
+    if On("AutoFarm") then return Features.Farm() end
+    if On("AutoTimeChamber") then Features.TimeChamber() end
 end
 
 ------------------------------------------------------------------------
 -- BUILD UI
 ------------------------------------------------------------------------
-local Window   = UI.Window(CFG.HubName .. "  |  AFS")
-local FarmTab  = Window:Tab("Farm")
-local ModeTab  = Window:Tab("Modes")
-local EggTab   = Window:Tab("Eggs")
-local PassTab  = Window:Tab("Passive")
-local MiscTab  = Window:Tab("Misc")
-local SetTab   = Window:Tab("Setting")
+local Window = Library:Window({ Title = CFG.Game, SubTitle = CFG.Name, ToggleKey = CFG.ToggleKey })
 
--- Farm ---------------------------------------------------------------------------
-FarmTab:Section("Auto Farm")
-local WorldLabel = FarmTab:Label("World: " .. Util.World())
-local MonsterDrop = FarmTab:Dropdown("Monster", Maps.Monsters(Util.World()), function(v) State.FarmTarget = v end)
-FarmTab:Toggle("Auto Farm", false, function(v) State.Farm = v end)
-FarmTab:Toggle("Auto Click Damage", false, function(v) State.Click = v end)
-FarmTab:Toggle("Auto Collect Yen", false, function(v) State.CollectYen = v end)
-FarmTab:Toggle("Auto Meteor", false, function(v) State.Meteor = v end)
-FarmTab:Button("Refresh Monsters", function()
-    MonsterDrop:Refresh(Maps.Monsters(Util.World()))
-    WorldLabel:Set("World: " .. Util.World())
-end)
+local TMain     = Window:Tab("Main")
+local TTeleport = Window:Tab("Teleport")
+local TTrial    = Window:Tab("Time Trial / Tower")
+local TRaid     = Window:Tab("Raid / Defense / Meteor")
+local TDungeon  = Window:Tab("Dungeon / Gate / Time")
+local TMode     = Window:Tab("Game Mode")
+local TShop     = Window:Tab("Shop / Transfer")
+local TOpen     = Window:Tab("Open UI")
+local THatch    = Window:Tab("Hatch / Fuse", true)
+local TPassive  = Window:Tab("Passive")
+local TSettings = Window:Tab("Settings", true)
+local TUI       = Window:Tab("UI Settings")
 
-FarmTab:Section("Time Trial")
-local TrialLabel = FarmTab:Label("Trial time: -")
-FarmTab:Toggle("Auto Time Trial", false, function(v) State.Trial = v end)
-FarmTab:Toggle("Auto Join Time Trial", false, function(v) State.TrialJoin = v end)
-FarmTab:Toggle("Auto Skip Room", false, function(v) State.TrialSkip = v end)
+local Refreshers = {}   -- functions run when maps / pets change
 
-FarmTab:Section("Raid")
-local RaidDrop = FarmTab:Dropdown("Raid World", Maps.FarmWorlds(), function(v) State.RaidWorld = v end)
-FarmTab:Toggle("Auto Raid", false, function(v)
-    State.Raid = v
-    if v and not State.RaidWorld then Util.Notify("Pick a raid world first") end
-end)
-
--- Modes -------------------------------------------------------------------------
-ModeTab:Section("Infinity Tower")
-local InfLabel = ModeTab:Label("Floor: - | Best: 0")
-ModeTab:Slider("Start Floor", 1, CFG.MaxInfFloor, 1, function(v)
-    State.InfStart = v
-    State.InfFloor = v
-end)
-InfToggle = ModeTab:Toggle("Auto Infinity Tower", false, function(v) State.Inf = v end)
-ModeTab:Toggle("Climb All Tiers", true, function(v) State.InfAllTiers = v end)
-ModeTab:Toggle("Resume From Best Floor", true, function(v) State.InfResume = v end)
-
-ModeTab:Section("Dungeon")
-local DungeonLabel = ModeTab:Label("Runs: 0")
-ModeTab:Slider("Difficulty", 1, 10, 1, function(v) State.DungeonDiff = v end)
-ModeTab:Toggle("Auto Dungeon", false, function(v) State.Dungeon = v end)
-ModeTab:Toggle("Open Doors", true, function(v) State.DungeonDoors = v end)
-ModeTab:Toggle("Open Chests", true, function(v) State.DungeonChests = v end)
-
-ModeTab:Section("Gates Mode")
-local GateLabel = ModeTab:Label("Runs: 0")
-ModeTab:Dropdown("Gate Rank", CFG.GateRanks, function(v) State.GateRank = v end)
-ModeTab:Toggle("Auto Gates", false, function(v) State.Gates = v end)
-ModeTab:Toggle("Skip Gate Wait", true, function(v) State.GateSkip = v end)
-
-ModeTab:Label("Priority: Tower > Dungeon > Gates > Raid > Trial > Farm")
-
--- Eggs --------------------------------------------------------------------------
-EggTab:Section("Auto Open")
-local EggDrop
-local EggWorldDrop = EggTab:Dropdown("World", Maps.FarmWorlds(), function(v)
-    State.EggWorld, State.Egg = v, nil
-    EggDrop:Refresh(Maps.Eggs(v))
-end)
-EggDrop = EggTab:Dropdown("Egg", {}, function(v) State.Egg = v end)
-EggTab:Dropdown("Amount", { "Single", "Multi" }, function(v) State.EggMode = v end)
-EggTab:Toggle("Auto Open Egg", false, function(v)
-    State.EggOn = v
-    if v and (not State.EggWorld or not State.Egg) then Util.Notify("Pick a world and egg first") end
-end)
-
--- Passive -----------------------------------------------------------------------
-PassTab:Section("Multi Pet Passive Roll")
-PassiveStatus = PassTab:Label("Pets: 0   Done: 0")
-local PetDrop = PassTab:Dropdown("Pets", Maps.Pets(), function(set)
-    State.PassivePets = {}
-    for id in pairs(set) do State.PassivePets[id] = true end
-    updatePassiveStatus()
-end, true)
-PassTab:Button("Refresh Pets", function() PetDrop:Refresh(Maps.Pets()) end)
-PassTab:Button("Select All Pets", function() PetDrop:SelectAll(Maps.Pets()) end)
-PassTab:Button("Clear Pets", function() PetDrop:ClearSelection() end)
-PassTab:TextBox("Target Passive", "e.g. Godly", false, function(v) State.PassiveTarget = v end)
-PassTab:TextBox("Passive Category", "optional", false, function(v) Net.Call("PassiveCategory", v) end)
-PassTab:Slider("Max Rolls Per Pet", 1, 1000, 200, function(v) State.PassiveMax = v end)
-PassTab:Slider("Delay (x0.1 s)", 1, 30, 5, function(v) State.PassiveDelay = v / 10 end)
-PassTab:Toggle("Auto Confirm New Passive", false, function(v) State.PassiveConfirm = v end)
-PassiveToggle = PassTab:Toggle("Auto Roll Passive", false, function(v)
-    if v then
-        passiveRolls, passiveDone, cantReadWarned = {}, {}, false
-        if next(State.PassivePets) == nil then Util.Notify("Select pets first") end
+-- MAIN ------------------------------------------------------------------------------------
+do
+    local c = TMain:Card("Auto Farm", "Left")
+    local worlds = c:Dropdown({ Title = "Select World", Items = Data.FarmWorldLabels(), Multi = true, Flag = "FarmWorlds" })
+    local mobs = c:Dropdown({ Title = "Select Mobs", Items = Features.Monsters(), Multi = true, Flag = "FarmMobs" })
+    c:Dropdown({ Title = "Farm Mode", Items = { "Mobs Selected", "Nearest", "Weakest", "Strongest" }, Default = "Nearest", Required = true, Flag = "FarmMode" })
+    c:Toggle({ Title = "Only Farm At Selected World", Default = true, Flag = "OnlySelectedWorld" })
+    c:Toggle({ Title = "Teleport While Farm", Default = true, Flag = "TeleportFarm", Callback = function(v) Combat.Options.Teleport = v end })
+    c:Toggle({ Title = "Auto Farm Mobs", Flag = "AutoFarm" })
+    Refreshers[#Refreshers + 1] = function()
+        worlds:Refresh(Data.FarmWorldLabels())
+        mobs:Refresh(Features.Monsters())
     end
-    State.Passive = v
-    updatePassiveStatus()
-end)
+    c:Button({ Title = "Refresh Mobs", Callback = function() mobs:Refresh(Features.Monsters()) end })
 
--- Misc --------------------------------------------------------------------------
-MiscTab:Section("Auto Claim")
-MiscTab:Toggle("Daily Spin", false, function(v) State.Spin = v end)
-MiscTab:Toggle("Claim Ticket", false, function(v) State.Ticket = v end)
-MiscTab:Toggle("Merchant Boost", false, function(v) State.Boost = v end)
-MiscTab:Button("Redeem All Codes", function()
-    for _, code in ipairs(CFG.Codes) do
-        Net.Call("RedeemCode", code)
-        task.wait(0.5)
-    end
-    Util.Notify("Codes sent")
-end)
-MiscTab:TextBox("Redeem Code", "type code", true, function(v) Net.Call("RedeemCode", v) end)
+    local q = TMain:Card("Auto Quest Options", "Left")
+    q:Toggle({ Title = "Auto Next Available Quest World", Flag = "NextQuestWorld" })
+    q:Toggle({ Title = "Auto Skip Quest", Flag = "SkipQuest" })
+    q:Toggle({ Title = "Focus On Rebirth Boss", Flag = "FocusRebirthBoss" })
+    q:Toggle({ Title = "Auto Quest", Flag = "AutoQuest" })
 
-MiscTab:Section("Webhook")
-MiscTab:TextBox("Webhook URL", "https://discord.com/api/webhooks/...", false, function(v) State.Webhook = v end)
-MiscTab:Slider("Send Every (min)", 1, 60, 10, function(v) State.WebhookEvery = v end)
-MiscTab:Toggle("Send Status", false, function(v)
-    State.WebhookOn = v
-    if v and State.Webhook == "" then Util.Notify("Enter a webhook URL first") end
-end)
-MiscTab:Button("Send Test", function() Features.Webhook("Test message") end)
-
-MiscTab:Section("Player")
-MiscTab:Slider("WalkSpeed", 16, 200, 16, function(v) State.WalkSpeed = v end)
-MiscTab:Button("FPS Boost", Features.FpsBoost)
-
--- Setting -----------------------------------------------------------------------
-SetTab:Section("Auto Sell")
-for _, rarity in ipairs(CFG.Rarities) do
-    SetTab:Toggle(rarity, false, function(v) State.AutoSell[rarity] = v Features.PushSettings() end)
-    SetTab:Toggle("Shiny " .. rarity, false, function(v) State.AutoSell["Shiny" .. rarity] = v Features.PushSettings() end)
+    local f = TMain:Card("Features", "Right")
+    f:Button({ Title = "Redeem All Codes", Callback = function()
+        for _, code in ipairs(CFG.Codes) do Net.Call("RedeemCode", code) task.wait(0.5) end
+        Util.Notify("Codes sent")
+    end })
+    f:Toggle({ Title = "Auto Click ( No Visual Effect )", Flag = "AutoClick" })
+    f:Toggle({ Title = "Auto Collect", Flag = "AutoCollect" })
+    f:Toggle({ Title = "Attack While Ulti", Flag = "AttackUlt", Callback = function(v) Combat.Options.Ult = v end })
+    f:Toggle({ Title = "Auto Mount", Flag = "AutoMount" })
+    f:Toggle({ Title = "TP Pet (Pet need passive)", Flag = "PetTP", Callback = function(v) Combat.Options.PetTP = v end })
+    f:Toggle({ Title = "Auto Unlock And Tp Next World", Flag = "AutoNextWorld" })
+    f:Toggle({ Title = "Auto Rebirth", Flag = "AutoRebirth" })
+    f:Toggle({ Title = "Load Enemy On Teleport", Default = true, Flag = "LoadEnemy", Callback = function(v) Travel.LoadEnemies = v end })
+    f:Divider()
+    f:Paragraph({ Title = "Re equip Pets", Body = "For smooth farming set this correctly. Use 3 minutes for general farming and 1-2 minutes for the Infinity Tower." })
+    f:Toggle({ Title = "Auto Re Equip Pets", Flag = "AutoReEquip" })
+    f:Slider({ Title = "Delayed [minutes]", Min = 1, Max = 10, Default = 2, Flag = "ReEquipDelay" })
 end
-SetTab:Section("Game")
-SetTab:Toggle("Owner Effect", false, function(v) State.OwnFX = v Features.PushSettings() end)
-SetTab:Toggle("Anti AFK", true, function(v) State.AntiAFK = v end)
-SetTab:Section("Tools")
-SetTab:Toggle("Remote Spy (F9)", false, function(v)
-    State.Spy = v
-    if v and not hookmetamethod then Util.Notify("Executor has no hookmetamethod") end
-end)
-SetTab:Button("Refresh All Lists", function() Maps.Changed:Fire() end)
+
+-- TELEPORT -------------------------------------------------------------------------------
+do
+    local c = TTeleport:Card("Teleport World", "Left")
+    local drop = c:Dropdown({ Title = "Select World", Items = Data.FarmWorldLabels(), Flag = "TpWorld" })
+    c:Button({ Title = "Teleport", Callback = function()
+        local w = F("TpWorld")
+        if w then Travel.To(Data.FromLabel(w)) else Util.Notify("Pick a world") end
+    end })
+    c:Button({ Title = "Unlock Selected World", Callback = function()
+        local w = F("TpWorld")
+        if w then Net.Call("DiscoverWorld", Data.FromLabel(w)) end
+    end })
+    Refreshers[#Refreshers + 1] = function() drop:Refresh(Data.FarmWorldLabels()) end
+
+    local m = TTeleport:Card("Teleport Mode", "Right")
+    local modes = m:Dropdown({ Title = "Select Mode World", Items = Data.AllWorlds(), Flag = "TpMode" })
+    m:Button({ Title = "Teleport", Callback = function()
+        local w = F("TpMode")
+        if w then Travel.To(w) end
+    end })
+    Refreshers[#Refreshers + 1] = function() modes:Refresh(Data.AllWorlds()) end
+end
+
+-- TIME TRIAL / TOWER ----------------------------------------------------------------------
+do
+    local c = TTrial:Card("Auto Time Trial !", "Left")
+    c:Dropdown({ Title = "Select Time Trial", Items = CFG.TimeTrials, Multi = true, Flag = "Trials" })
+    c:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "TrialTarget" })
+    c:Toggle({ Title = "Ignore Chest", Flag = "TrialIgnoreChest" })
+    c:Toggle({ Title = "Auto Farm Time Trial", Flag = "AutoTrial" })
+
+    local inf = TTrial:Card("Auto Infinity Tower !", "Left")
+    local infLabel = inf:Label("Floor : 1   Best : 0")
+    inf:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "InfTarget" })
+    inf:Slider({ Title = "Start Floor", Min = 1, Max = 1000, Default = 1, Flag = "InfStart", Callback = function(v) Stats.InfFloor = v end })
+    inf:Toggle({ Title = "Climb All Tiers", Default = true, Flag = "InfAllTiers" })
+    inf:Toggle({ Title = "Resume From Best Floor", Default = true, Flag = "InfResume" })
+    inf:Toggle({ Title = "Auto Infinity Tower", Flag = "AutoInf" })
+    Features.InfLabel = infLabel
+
+    local leave = TTrial:Card("Auto Leave On Time Trial Floors !", "Right")
+    for _, t in ipairs(CFG.TimeTrials) do
+        leave:Slider({ Title = t .. " Time Trial", Min = 1, Max = t == "Infinite" and 5000 or 100,
+            Default = t == "Infinite" and 2000 or 50, Flag = "Leave_" .. t })
+    end
+    leave:Toggle({ Title = "Auto Leave On Trial Floor", Flag = "AutoLeaveTrial" })
+    local timer = leave:Label("Trial time : -")
+    Features.TrialTimer = timer
+end
+
+-- RAID / DEFENSE / METEOR ---------------------------------------------------------------------
+do
+    local r = TRaid:Card("Auto Raid !", "Left")
+    local rw = r:Dropdown({ Title = "Select Raid World", Items = Data.FarmWorldLabels(), Multi = true, Flag = "RaidWorlds" })
+    r:Dropdown({ Title = "Select Raid Mode", Items = CFG.RaidModes, Multi = true, Flag = "RaidModes" })
+    r:Toggle({ Title = "Farm All World", Flag = "RaidAllWorlds" })
+    r:Toggle({ Title = "Auto Raid", Flag = "AutoRaid" })
+
+    local m = TRaid:Card("Auto Meteor / Fallen Star !", "Left")
+    local mw = m:Dropdown({ Title = "Select World", Items = Data.FarmWorldLabels(), Multi = true, Flag = "MeteorWorlds" })
+    m:Toggle({ Title = "Farm Meteor / Fallen All World", Flag = "MeteorAllWorlds" })
+    m:Toggle({ Title = "Auto Meteor / Fallen Star", Flag = "AutoMeteor" })
+
+    local d = TRaid:Card("Auto Defense !", "Right")
+    local dw = d:Dropdown({ Title = "Select Defense World", Items = Data.FarmWorldLabels(), Flag = "DefenseWorld" })
+    d:Toggle({ Title = "Friend Only", Flag = "DefenseFriends" })
+    d:Toggle({ Title = "Auto Defense Selected", Flag = "AutoDefense" })
+
+    Refreshers[#Refreshers + 1] = function()
+        local labels = Data.FarmWorldLabels()
+        rw:Refresh(labels) mw:Refresh(labels) dw:Refresh(labels)
+    end
+end
+
+-- DUNGEON / GATE / TIME ----------------------------------------------------------------------------
+do
+    local d = TDungeon:Card("Auto Dungeon !", "Left")
+    local runs = d:Label("Runs : 0")
+    d:Dropdown({ Title = "Select Difficulty", Items = CFG.DungeonSizes, Default = "Small", Required = true, Flag = "DungeonSize" })
+    local dw = d:Dropdown({ Title = "Select World", Items = Data.FarmWorldLabels(), Flag = "DungeonWorld" })
+    d:Toggle({ Title = "Ignore Chest", Flag = "DungeonIgnoreChest" })
+    d:Toggle({ Title = "Use Dungeon Artifact To Open", Flag = "DungeonArtifact" })
+    d:Toggle({ Title = "Auto Dungeon Selected", Flag = "AutoDungeon" })
+    Features.DungeonLabel = runs
+    Refreshers[#Refreshers + 1] = function() dw:Refresh(Data.FarmWorldLabels()) end
+
+    local g = TDungeon:Card("Auto Gate !", "Right")
+    local gateRuns = g:Label("Runs : 0")
+    g:Dropdown({ Title = "Select Gate Level", Items = CFG.GateRanks, Multi = true, Flag = "GateRanks" })
+    g:Slider({ Title = "Amount", Min = 1, Max = 10, Default = 1, Flag = "GateAmount" })
+    g:Toggle({ Title = "Auto Gate Selected", Flag = "AutoGate" })
+    Features.GateLabel = gateRuns
+
+    local t = TDungeon:Card("Auto Time Chamber !", "Right")
+    t:Paragraph({ Title = "Auto Time Chamber Infomation !", Body = "It will automatically join the Time Chamber whenever there are no other tasks." })
+    t:Toggle({ Title = "Auto Time Chamber", Flag = "AutoTimeChamber" })
+end
+
+-- GAME MODE --------------------------------------------------------------------------------------
+do
+    local e = TMode:Card("Event Worlds", "Left")
+    e:Paragraph({ Body = "Every event / game-mode world in the map is listed here, so new events (Blood Moon, Sea King, ...) show up after a game update without a script update." })
+    local ew = e:Dropdown({ Title = "Select Event", Items = Data.EventWorlds(), Multi = true, Flag = "EventWorlds" })
+    e:Toggle({ Title = "Auto Farm Event", Flag = "AutoEvent" })
+    Refreshers[#Refreshers + 1] = function() ew:Refresh(Data.EventWorlds()) end
+
+    local b = TMode:Card("Global Boss", "Right")
+    b:Toggle({ Title = "Auto Global Boss", Flag = "AutoGlobalBoss" })
+    b:Paragraph({ Body = "Priority when several modes are on:\nTower > Dungeon > Gate > Trial > Raid > Defense > Event > Boss > Meteor > Farm > Time Chamber" })
+end
+
+-- SHOP / TRANSFER --------------------------------------------------------------------------------
+do
+    local s = TShop:Card("Auto Buy", "Left")
+    s:Dropdown({ Title = "Merchant Slots", Items = { "1", "2", "3", "4", "5", "6" }, Multi = true, Flag = "MerchantSlots" })
+    s:Toggle({ Title = "Auto Buy Merchant", Flag = "AutoMerchant" })
+    s:Dropdown({ Title = "Black Market Slots", Items = { "1", "2", "3", "4", "5", "6" }, Multi = true, Flag = "BlackMarketSlots" })
+    s:Toggle({ Title = "Auto Buy Black Market", Flag = "AutoBlackMarket" })
+
+    local t = TShop:Card("Passive Transfer", "Right")
+    local from = t:Dropdown({ Title = "From Pet", Items = Data.Pets(), Flag = "TransferFrom" })
+    local to = t:Dropdown({ Title = "To Pet", Items = Data.Pets(), Flag = "TransferTo" })
+    t:Button({ Title = "Transfer All Passives", Callback = function()
+        local a, b2 = F("TransferFrom"), F("TransferTo")
+        if not a or not b2 then Util.Notify("Pick both pets") return end
+        Net.Call("TransferPassive", Data.PetId(a), Data.PetId(b2))
+        Util.Notify("Transfer sent")
+    end })
+    Refreshers[#Refreshers + 1] = function() from:Refresh(Data.Pets()) to:Refresh(Data.Pets()) end
+
+    local c = TShop:Card("Auto Claim", "Right")
+    c:Toggle({ Title = "Auto Daily Spin", Flag = "AutoSpin" })
+    c:Toggle({ Title = "Auto Claim Ticket", Flag = "AutoTicket" })
+    c:Toggle({ Title = "Auto Merchant Boost", Flag = "AutoBoost" })
+end
+
+-- OPEN UI -----------------------------------------------------------------------------------------
+do
+    local half = math.ceil(#CFG.OpenUI / 2)
+    local left, right = TOpen:Card(nil, "Left"), TOpen:Card(nil, "Right")
+    for i, entry in ipairs(CFG.OpenUI) do
+        local card = i <= half and left or right
+        card:Toggle({ Title = entry[1], Callback = function(v) Features.OpenMenu(entry[2], v) end })
+    end
+    local any = TOpen:Card("Any Menu", "Left")
+    local menus = any:Dropdown({ Title = "Select Menu", Items = Data.MenuNames(), Flag = "AnyMenu" })
+    any:Button({ Title = "Open", Callback = function() if F("AnyMenu") then Features.OpenMenu(F("AnyMenu"), true) end end })
+    any:Button({ Title = "Close", Callback = function() if F("AnyMenu") then Features.OpenMenu(F("AnyMenu"), false) end end })
+    any:Button({ Title = "Refresh Menus", Callback = function() menus:Refresh(Data.MenuNames()) end })
+end
+
+-- HATCH / FUSE ------------------------------------------------------------------------------------
+do
+    local h = THatch:Card("Auto Summon", "Left")
+    local stars = h:Dropdown({ Title = "Select Star", Items = Data.Stars(), Flag = "HatchStar" })
+    h:Dropdown({ Title = "Select Hatching Mode", Items = { "Summon Multiple Star", "Summon Max Star" }, Multi = true, Flag = "HatchModes" })
+    h:Toggle({ Title = "Tp To Star While Summon", Flag = "HatchTp" })
+    h:Toggle({ Title = "Auto Summon Star Selected", Flag = "AutoHatch" })
+    h:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 5, Default = 1, Decimals = 1, Flag = "HatchDelay" })
+    Refreshers[#Refreshers + 1] = function() stars:Refresh(Data.Stars()) end
+
+    local fu = THatch:Card("Auto Fuse", "Right")
+    fu:Paragraph({ Title = "Auto Fuse Infomation !", Body = "Only unlocked, unequipped pets are fused. Lock important pets before you start." })
+    local pets = fu:Dropdown({ Title = "Select Pet", Items = Data.PetTypes(), Multi = true, Flag = "FusePets" })
+    fu:Dropdown({ Title = "Select Rarity To Fuse", Items = CFG.PetRarities, Multi = true, Flag = "FuseRarity" })
+    fu:Button({ Title = "Refresh Pets", Callback = function() pets:Refresh(Data.PetTypes()) end })
+    fu:Toggle({ Title = "Fuse Shiny Pets", Flag = "FuseShiny" })
+    fu:Toggle({ Title = "Auto Fuse Pet Selected", Flag = "AutoFuse" })
+    Refreshers[#Refreshers + 1] = function() pets:Refresh(Data.PetTypes()) end
+end
+
+-- PASSIVE ------------------------------------------------------------------------------------------
+do
+    local p = TPassive:Card("Auto Reroll Passive", "Left")
+    p:Paragraph({ Title = "Auto Reroll Passive Caution !", Body =
+        "[-] Stand near the passive machine (the script walks you there).\n" ..
+        "[-] Use 0.5-0.7 delay when rolling more than 1 pet.\n" ..
+        "[-] If your ping > 500ms use 0.8 - 1s to keep your passive safe.\n" ..
+        "[-] Fewer pets selected = better performance." })
+    local pets = p:Dropdown({ Title = "Select Pets To Roll", Items = Data.Pets(), Multi = true, Flag = "PassivePets" })
+    p:Button({ Title = "Refresh Pets", Callback = function() pets:Refresh(Data.Pets()) end })
+    local names = Data.Passives()
+    p:Dropdown({ Title = "Select Passive To Roll", Items = names, Multi = true, Flag = "PassiveNames" })
+    p:Dropdown({ Title = "Select Passive Rarity", Items = Data.PassiveRarities(), Multi = true, Flag = "PassiveRarity" })
+    p:Dropdown({ Title = "Select Passive Slot", Items = { "1", "2", "3" }, Multi = true, Default = { ["1"] = true }, Flag = "PassiveSlots" })
+    p:Dropdown({ Title = "Select Passive Reroll Mode", Items = { "Keep Selected Rarity", "Keep Selected Passive" }, Default = "Keep Selected Passive", Required = true, Flag = "PassiveMode" })
+    p:Dropdown({ Title = "Select Passive Machine", Items = CFG.PassiveMachines, Default = "Normal", Required = true, Flag = "PassiveMachine" })
+    p:Dropdown({ Title = "Select Reroll Method", Items = CFG.RerollMethods, Default = "Token", Required = true, Flag = "PassiveMethod" })
+    p:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 2, Default = 0.5, Decimals = 1, Flag = "PassiveDelay" })
+    p:Toggle({ Title = "Auto Reroll Passive !", Flag = "AutoPassive", Callback = function(v) if v then Features.ResetPassive() end end })
+    if #names == 0 then
+        p:Paragraph({ Body = "PassiveStats module could not be read. Type a passive name below instead." })
+        p:Input({ Title = "Passive Name", Placeholder = "e.g. Demon", Callback = function(v)
+            if v ~= "" then Flags.PassiveNames:Refresh({ v }) Flags.PassiveNames:Set({ [v] = true }) end
+        end })
+    end
+    Refreshers[#Refreshers + 1] = function() pets:Refresh(Data.Pets()) end
+
+    local s = TPassive:Card(nil, "Right")
+    PassiveStatus = s:Paragraph({ Body = "Status : -" })
+end
+
+-- SETTINGS -----------------------------------------------------------------------------------------
+do
+    local sell = TSettings:Card("Auto Sell", "Left")
+    for _, r in ipairs({ "Common", "Rare", "Epic", "Legendary", "Mythical" }) do
+        sell:Toggle({ Title = r, Flag = "Sell_" .. r, Callback = Features.PushSettings })
+        sell:Toggle({ Title = "Shiny " .. r, Flag = "Sell_Shiny" .. r, Callback = Features.PushSettings })
+    end
+
+    local g = TSettings:Card("Game", "Right")
+    g:Toggle({ Title = "Owner Effect", Flag = "OwnerEffect", Callback = Features.PushSettings })
+    g:Toggle({ Title = "Anti AFK", Default = true, Flag = "AntiAFK" })
+    g:Slider({ Title = "Walk Speed", Min = 16, Max = 200, Default = 16, Flag = "WalkSpeed" })
+    g:Button({ Title = "FPS Boost", Callback = Features.FpsBoost })
+    g:Toggle({ Title = "Remote Spy (F9)", Flag = "RemoteSpy", Callback = function(v)
+        if v and not hookmetamethod then Util.Notify("Executor has no hookmetamethod") end
+    end })
+
+    local w = TSettings:Card("Webhook", "Right")
+    w:Input({ Title = "Webhook URL", Placeholder = "https://discord.com/api/webhooks/...", Flag = "WebhookUrl" })
+    w:Slider({ Title = "Send Every [minutes]", Min = 1, Max = 60, Default = 10, Flag = "WebhookEvery" })
+    w:Toggle({ Title = "Send Status", Flag = "WebhookOn" })
+    w:Button({ Title = "Send Test", Callback = function() Features.Webhook("Test message") end })
+end
+
+-- UI SETTINGS --------------------------------------------------------------------------------------
+do
+    local u = TUI:Card("Interface", "Left")
+    u:Input({ Title = "Toggle Key", Default = CFG.ToggleKey.Name, Flag = "ToggleKeyName", Callback = function(v)
+        local ok, key = pcall(function() return Enum.KeyCode[v] end)
+        if ok and key then Window.ToggleKey = key end
+    end })
+    u:Slider({ Title = "UI Scale [%]", Min = 60, Max = 120, Default = 100, Flag = "UIScale", Callback = function(v) Window:SetScale(v / 100) end })
+    u:Toggle({ Title = "Show Floating Icon", Default = true, Flag = "ShowIcon", Callback = function(v) Window.Icon.Visible = v end })
+    u:Button({ Title = "Reset Window Position", Callback = function() Window.Main.Position = UDim2.fromScale(0.5, 0.5) end })
+    u:Button({ Title = "Unload Script", Callback = function()
+        for _, el in pairs(Flags) do if el.Type == "Toggle" then el:Set(false, true) end end
+        if getgenv and getgenv().RenHubV3 then getgenv().RenHubV3() getgenv().RenHubV3 = nil else Window:Destroy() end
+    end })
+
+    local c = TUI:Card("Config", "Right")
+    c:Input({ Title = "Config Name", Default = "default", Flag = "ConfigName" })
+    c:Button({ Title = "Save Config", Callback = function() Window:SaveConfig(F("ConfigName") or "default") end })
+    c:Button({ Title = "Load Config", Callback = function() Window:LoadConfig(F("ConfigName") or "default") end })
+    c:Toggle({ Title = "Auto Load This Config", Flag = "AutoLoadConfig", Callback = function(v)
+        if writefile then pcall(writefile, CFG.ConfigFolder .. "/autoload.txt", v and (F("ConfigName") or "default") or "") end
+    end })
+end
 
 ------------------------------------------------------------------------
--- LIVE LIST UPDATES
+-- EVENTS
 ------------------------------------------------------------------------
-Maps.Changed.Event:Connect(function()
-    local worlds = Maps.FarmWorlds()
-    EggWorldDrop:Refresh(worlds)
-    RaidDrop:Refresh(worlds)
-    MonsterDrop:Refresh(Maps.Monsters(Util.World()))
-    PetDrop:Refresh(Maps.Pets())
-end)
-
-pcall(function()
-    LP:WaitForChild("World", 5).Changed:Connect(function()
-        task.wait(2)
-        WorldLabel:Set("World: " .. Util.World())
-        MonsterDrop:Refresh(Maps.Monsters(Util.World()))
+local refreshQueued = false
+local function queueRefresh()
+    if refreshQueued then return end
+    refreshQueued = true
+    task.delay(1.5, function()
+        refreshQueued = false
+        for _, fn in ipairs(Refreshers) do pcall(fn) end
     end)
-end)
-
+end
+track(Worlds.ChildAdded:Connect(function(child)
+    task.wait(1)
+    if child:IsA("Folder") then Util.Notify("New map found: " .. child.Name) end
+    queueRefresh()
+end))
+track(Worlds.ChildRemoved:Connect(queueRefresh))
 pcall(function()
     local pets = LP:WaitForChild("Pets", 5)
-    local pending = false
-    local function queue()
-        if pending then return end
-        pending = true
-        task.delay(1, function() pending = false PetDrop:Refresh(Maps.Pets()) end)
-    end
-    pets.ChildAdded:Connect(queue)
-    pets.ChildRemoved:Connect(queue)
+    track(pets.ChildAdded:Connect(queueRefresh))
+    track(pets.ChildRemoved:Connect(queueRefresh))
+end)
+pcall(function()
+    track(LP:WaitForChild("World", 5).Changed:Connect(function()
+        local w = Util.World()
+        if w == "Tower" then Stats.TrialFloor = 0 end
+        if Data.IsFarmWorldName(w) then HomeWorld = w end
+        task.wait(2)
+        queueRefresh()
+    end))
 end)
 
-------------------------------------------------------------------------
--- GAME EVENTS
-------------------------------------------------------------------------
 Net.Listen("InfinityFloorTransition", function(floor)
-    State.InfFloor = (type(floor) == "number") and floor or (State.InfFloor + 1)
-    State.InfBest = math.max(State.InfBest, State.InfFloor)
-    InfLabel:Set("Floor: " .. State.InfFloor .. " | Best: " .. State.InfBest)
+    Stats.InfFloor = type(floor) == "number" and floor or Stats.InfFloor + 1
+    Stats.InfBest = math.max(Stats.InfBest, Stats.InfFloor)
+    if Features.InfLabel then Features.InfLabel:Set("Floor : " .. Stats.InfFloor .. "   Best : " .. Stats.InfBest) end
 end)
 Net.Listen("InfinityTowerLose", function()
-    Util.Notify("Tower lost at floor " .. State.InfFloor)
-    State.InfFloor = State.InfResume and math.max(State.InfBest, State.InfStart) or State.InfStart
-    Util.ResetCooldown("inf-join")
+    Util.Notify("Tower lost at floor " .. Stats.InfFloor)
+    Stats.InfFloor = On("InfResume") and math.max(Stats.InfBest, F("InfStart") or 1) or (F("InfStart") or 1)
+    Util.Reset("inf-join")
 end)
 Net.Listen("DungeonFinish", function()
-    State.DungeonRuns = State.DungeonRuns + 1
-    DungeonLabel:Set("Runs: " .. State.DungeonRuns)
-    Util.ResetCooldown("dungeon-join")
+    Stats.DungeonRuns = Stats.DungeonRuns + 1
+    if Features.DungeonLabel then Features.DungeonLabel:Set("Runs : " .. Stats.DungeonRuns) end
+    Util.Reset("dungeon-join")
 end)
 Net.Listen("GateStarted", function()
-    State.GateRuns = State.GateRuns + 1
-    GateLabel:Set("Runs: " .. State.GateRuns)
+    Stats.GateRuns = Stats.GateRuns + 1
+    if Features.GateLabel then Features.GateLabel:Set("Runs : " .. Stats.GateRuns) end
 end)
-Net.Listen("GatesModeLost", function()
-    Util.Notify("Gate lost - rejoining")
-    Util.ResetCooldown("gates-join")
-end)
+Net.Listen("GatesModeLost", function() Util.Reset("gates-join") end)
 
-LP.Idled:Connect(function()
-    if State.AntiAFK then
+track(LP.Idled:Connect(function()
+    if On("AntiAFK") then
         VirtualUser:CaptureController()
         VirtualUser:ClickButton2(Vector2.new())
     end
-end)
+end))
 
 -- Remote Spy
 if hookmetamethod and getnamecallmethod then
     local original
     original = hookmetamethod(game, "__namecall", function(self, ...)
-        if State.Spy and not (checkcaller and checkcaller()) then
+        if Flags.RemoteSpy and Flags.RemoteSpy:Get() and not (checkcaller and checkcaller()) then
             local method = getnamecallmethod()
             if (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance"
                and self.Parent == Remotes and self.Name ~= "ClickerDamage" then
-                local out = {}
-                for i, arg in ipairs({ ... }) do
-                    local text
-                    if typeof(arg) == "Instance" then
-                        text = arg:GetFullName()
-                    elseif type(arg) == "table" then
-                        local ok, json = pcall(HttpService.JSONEncode, HttpService, arg)
-                        text = ok and json or tostring(arg)
-                    else
-                        text = typeof(arg) .. " " .. tostring(arg)
-                    end
-                    out[#out + 1] = "[" .. i .. "] " .. text
+                local parts = {}
+                for i, a in ipairs({ ... }) do
+                    local s
+                    if typeof(a) == "Instance" then s = a:GetFullName()
+                    elseif type(a) == "table" then
+                        local ok, j = pcall(HttpService.JSONEncode, HttpService, a)
+                        s = ok and j or tostring(a)
+                    else s = typeof(a) .. " " .. tostring(a) end
+                    parts[#parts + 1] = "[" .. i .. "] " .. s
                 end
-                print("[SPY] " .. self.Name .. ":" .. method .. "(" .. table.concat(out, ", ") .. ")")
+                print("[SPY] " .. self.Name .. ":" .. method .. "(" .. table.concat(parts, ", ") .. ")")
             end
         end
         return original(self, ...)
@@ -1289,61 +2122,66 @@ end
 ------------------------------------------------------------------------
 -- LOOPS
 ------------------------------------------------------------------------
+local running = true
 local function loop(interval, fn)
     task.spawn(function()
-        while true do
+        while running do
             local ok, err = pcall(fn)
-            if not ok then warn("[" .. CFG.HubName .. "] " .. tostring(err)) task.wait(1) end
-            task.wait(interval)
+            if not ok then warn("[" .. CFG.Name .. "] " .. tostring(err)) task.wait(1) end
+            task.wait(type(interval) == "function" and interval() or interval)
         end
     end)
 end
 
 loop(0.1, Brain)
-
-loop(0.05, function()
-    if State.Click then Net.Call("Click") end
-end)
-
-loop(1, function()
-    if not State.CollectYen then return end
-    local root, effects = Util.Root(), workspace:FindFirstChild("Effects")
-    if not root or not effects then return end
-    for _, drop in ipairs(effects:GetChildren()) do
-        if drop.Name == "Yen" then
-            local part = drop:FindFirstChild("Base") or drop:FindFirstChildWhichIsA("BasePart")
-            if part then part.CFrame = root.CFrame end
-        end
-    end
-end)
-
-loop(0.3, function()
-    if State.EggOn and State.EggWorld and State.Egg then Features.OpenEgg() end
-end)
-
-loop(0.2, function()
-    if State.Passive then Features.PassiveRound() end
-end)
+loop(0.05, function() if On("AutoClick") then Net.Call("Click") end end)
+loop(1, function() if On("AutoCollect") then Features.Collect() end end)
+loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") then Features.Hatch() end end)
+loop(3, function() if On("AutoFuse") then Features.Fuse() end end)
+loop(0.2, function() if On("AutoPassive") then Features.Passive() end end)
+loop(2, function() if PassiveStatus then PassiveStatus:Set(Features.PassiveStatusText()) end end)
 
 local lastWebhook = os.clock()
 loop(1, function()
-    if State.Spin and Util.Every("spin", 60) then Net.Call("DailySpin") end
-    if State.Ticket and Util.Every("ticket", 60) then Net.Call("ClaimTicket") end
-    if State.Boost and Util.Every("boost", 60) then Net.Call("ClaimBoost") end
+    if On("AutoRebirth") and Util.Every("rebirth", 5) then Net.Call("Rebirth") end
+    if On("AutoNextWorld") and Util.Every("nextworld", 15) then Features.NextWorld() end
+    if On("AutoMount") and Util.Every("mount", 10) then
+        local m = LP:FindFirstChild("Mounting")
+        if not m or not m.Value then Net.Call("Mount", true) end
+    end
+    if On("AutoReEquip") and Util.Every("reequip", (F("ReEquipDelay") or 2) * 60) then Net.Call("ReEquipPets") end
+    if On("AutoSpin") and Util.Every("spin", 60) then Net.Call("DailySpin") end
+    if On("AutoTicket") and Util.Every("ticket", 60) then Net.Call("ClaimTicket") end
+    if On("AutoBoost") and Util.Every("boost", 60) then Net.Call("ClaimBoost") end
+    Features.Shop()
 
-    if State.WebhookOn and os.clock() - lastWebhook >= State.WebhookEvery * 60 then
+    if On("WebhookOn") and os.clock() - lastWebhook >= (F("WebhookEvery") or 10) * 60 then
         lastWebhook = os.clock()
         Features.Webhook("Anime Fighters Simulator - Status")
     end
 
-    local hum = Util.Humanoid()
-    if hum and State.WalkSpeed > 16 and hum.WalkSpeed ~= State.WalkSpeed then
-        hum.WalkSpeed = State.WalkSpeed
-    end
+    local hum, speed = Util.Humanoid(), F("WalkSpeed") or 16
+    if hum and speed > 16 and hum.WalkSpeed ~= speed then hum.WalkSpeed = speed end
 
     pcall(function()
-        TrialLabel:Set("Trial time: " .. Worlds.Tower.Countdown.SurfaceGui.Background.Time.Text)
+        Features.TrialTimer:Set("Trial time : " .. Worlds.Tower.Countdown.SurfaceGui.Background.Time.Text ..
+            "   Floor : " .. Stats.TrialFloor)
     end)
 end)
 
-Util.Notify("Loaded - " .. #Maps.FarmWorlds() .. " maps found")
+-- auto load config
+pcall(function()
+    if isfile and isfile(CFG.ConfigFolder .. "/autoload.txt") then
+        local name = readfile(CFG.ConfigFolder .. "/autoload.txt")
+        if name ~= "" then Window:LoadConfig(name, true) end
+    end
+end)
+
+if getgenv then
+    getgenv().RenHubV3 = function()
+        running = false
+        Window:Destroy()
+    end
+end
+
+Util.Notify("Loaded - " .. #Data.FarmWorlds() .. " maps, " .. #(Data.Passives()) .. " passives")
