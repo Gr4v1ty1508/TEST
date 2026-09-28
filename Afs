@@ -1853,7 +1853,7 @@ function Features.TimeTrial()
         local tower = Worlds:FindFirstChild("Tower")
         local trials = Util.SetToList(F("Trials"))
         if #trials > 0 and #Combat.List("Tower") == 0 and Stats.TrialFloor == 0 then
-            Features.JoinTrial(trials)   -- waiting room: ask to join the selected trial
+            Features.TryJoinTrial(trials)   -- lobby: join when the selected door is about to open
         end
         if not On("TrialIgnoreChest") then
             for _, p in ipairs(Prompt.Find(tower, { "chest" })) do Prompt.Use(p) task.wait(0.2) end
@@ -1872,16 +1872,11 @@ function Features.TimeTrial()
     local trials = Util.SetToList(F("Trials"))
     if #trials == 0 then return false end
     if CFG.ModeWorlds[world] == nil then HomeWorld = world end
-    -- 1. the waiting room opens 60 s before a trial starts: go there in the last
-    --    CFG.TrialGoAt seconds and keep farming elsewhere until then
-    if os.clock() - trialJoinedAt < 75 then return true end
-    local left = Features.TrialCountdown()
-    local timeToGo = left == nil or (left > 0 and left <= CFG.TrialGoAt)
-    if timeToGo then
-        Features.JoinTrial(trials)
-        return os.clock() - trialJoinedAt < 75   -- stay put at the door until it starts
-    end
-    return false
+    -- each trial door has its own countdown; join a selected one only in its last
+    -- CFG.TrialGoAt seconds, keep farming elsewhere until then
+    if os.clock() - trialJoinedAt < 75 then return true end   -- at the door, waiting for the start
+    Features.TryJoinTrial(trials)
+    return os.clock() - trialJoinedAt < 75
 end
 
 -- seconds until the next time trial starts, from the countdown board in the
@@ -1909,27 +1904,120 @@ function Features.TrialCountdown()
     return nil
 end
 
--- ask to join the next selected trial (uses the game's real arguments once you
--- have joined a trial by hand one time)
-function Features.JoinTrial(trials)
-    -- joined recently: we're at the door waiting for the start, don't ask again
-    if os.clock() - trialJoinedAt < 75 then return end
-    if not Util.Every("trial-join", 5) then return end
-    trialIndex = trialIndex % #trials + 1
-    local name = trials[trialIndex]
-    local id = CFG.TimeTrialIds[name]
-    if not id then Util.Notify("No trial number for " .. tostring(name)) return end
+-- TRIAL DOORS -----------------------------------------------------------------------
+-- The lobby has one door per trial (TowerDoor1..8), each with its own timer board.
+-- Door positions come from the game's AttemptTravel answer (or a part named
+-- TowerDoor<n>) and are saved to GravityHub/AFS/trial_doors.json; the timer
+-- used for a door is the countdown board closest to it.
+local doorPos, doorStarts = {}, {}
+local DOOR_FILE = CFG.ConfigFolder .. "/trial_doors.json"
+pcall(function()
+    if isfile and isfile(DOOR_FILE) then
+        for k, v in pairs(HttpService:JSONDecode(readfile(DOOR_FILE))) do
+            if type(v) == "table" and #v == 3 then doorPos[tonumber(k)] = Vector3.new(v[1], v[2], v[3]) end
+        end
+    end
+end)
+local function saveDoors()
+    pcall(function()
+        if not writefile then return end
+        local out = {}
+        for k, v in pairs(doorPos) do out[tostring(k)] = { v.X, v.Y, v.Z } end
+        writefile(DOOR_FILE, HttpService:JSONEncode(out))
+    end)
+end
+
+local boardCache, boardTime = {}, -math.huge
+local function countdownBoards()
+    if os.clock() - boardTime < 1 then return boardCache end
+    boardTime, boardCache = os.clock(), {}
+    local tower = Worlds:FindFirstChild("Tower")
+    if not tower then return boardCache end
+    for _, d in ipairs(tower:GetDescendants()) do
+        if d:IsA("TextLabel") then
+            local secs = parseClock(d.Text)
+            if secs then
+                local gui = d:FindFirstAncestorWhichIsA("SurfaceGui") or d:FindFirstAncestorWhichIsA("BillboardGui")
+                local part = gui and (gui.Adornee or gui.Parent)
+                local pos
+                if part and part:IsA("BasePart") then pos = part.Position
+                elseif part and part:IsA("Model") then pos = part:GetPivot().Position end
+                if pos then boardCache[#boardCache + 1] = { pos = pos, secs = secs } end
+            end
+        end
+    end
+    return boardCache
+end
+
+function Features.DoorPosition(id)
+    if doorPos[id] then return doorPos[id] end
+    local tower = Worlds:FindFirstChild("Tower")
+    local door = tower and tower:FindFirstChild("TowerDoor" .. id, true)
+    if door then
+        doorPos[id] = door:IsA("BasePart") and door.Position or (door:IsA("Model") and door:GetPivot().Position) or nil
+        if doorPos[id] then saveDoors() end
+    end
+    return doorPos[id]
+end
+
+-- seconds until door <id> opens its next run (nil = don't know yet)
+function Features.DoorCountdown(id)
+    local dp = Features.DoorPosition(id)
+    if dp then
+        local best, bestDist
+        for _, b in ipairs(countdownBoards()) do
+            local dist = (b.pos - dp).Magnitude
+            if dist < 90 and (not bestDist or dist < bestDist) then best, bestDist = b, dist end
+        end
+        if best then
+            doorStarts[id] = os.clock() + best.secs
+            return best.secs
+        end
+        -- board not loaded (you're far away): load the area around that door
+        if Util.Every("door-stream-" .. id, 20) then
+            task.spawn(pcall, LP.RequestStreamAroundAsync, LP, dp)
+        end
+    end
+    if doorStarts[id] and doorStarts[id] - os.clock() > -5 then return doorStarts[id] - os.clock() end
+    return nil
+end
+
+-- join exactly like the game: JoinTimeTrial(n) -> AttemptTravel("TowerDoor<n>", true)
+function Features.JoinTrial(name, id)
     Stats.TrialName, Stats.TrialFloor = name, 0
-    -- exactly what the game does: JoinTimeTrial(n) -> AttemptTravel("TowerDoor<n>", true)
     Net.Raw("JoinTimeTrial", { id })
     task.wait(0.3)
     local pos = Net.Raw("AttemptTravel", { "TowerDoor" .. id, true })
     local cf = toCFrame(pos)
     if cf then
+        if not doorPos[id] then doorPos[id] = cf.Position saveDoors() end
         pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
         Util.MoveTo(cf + Vector3.new(0, 4, 0))
         trialJoinedAt = os.clock()
         Util.Notify("Waiting for " .. name .. " Time Trial")
+    end
+end
+
+-- pick the selected trial whose door opens soonest, within the last CFG.TrialGoAt seconds
+function Features.TryJoinTrial(trials)
+    if os.clock() - trialJoinedAt < 75 then return end
+    local pick, pickId, pickSecs, unknown
+    for _, name in ipairs(trials) do
+        local id = CFG.TimeTrialIds[name]
+        if id then
+            local secs = Features.DoorCountdown(id)
+            if secs == nil then unknown = unknown or { name, id }
+            elseif secs > 0 and secs <= CFG.TrialGoAt and (not pickSecs or secs < pickSecs) then
+                pick, pickId, pickSecs = name, id, secs
+            end
+        end
+    end
+    if pick then
+        if Util.Every("trial-join", 5) then Features.JoinTrial(pick, pickId) end
+    elseif unknown and not doorPos[unknown[2]] and Util.Every("trial-scout", 60) then
+        -- first time only: we don't know where that door is yet; one try tells us
+        -- (the game answers with the door position, saved for next time)
+        Features.JoinTrial(unknown[1], unknown[2])
     end
 end
 
