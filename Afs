@@ -2825,10 +2825,6 @@ do
     spy:Paragraph({ Body = "Turn on, do the action once by hand (e.g. start a dungeon), then press Copy Log and send it to fix CFG.Calls. Log is also saved to GravityHub/AFS/spy_log.txt." })
     spy:Toggle({ Title = "Remote Spy", Flag = "RemoteSpy", Callback = function(v)
         if v and not hookmetamethod then Util.Notify("Executor has no hookmetamethod") end
-        if v then   -- fresh log each time it's turned on
-            table.clear(SpyLog)
-            pcall(function() if writefile then writefile(CFG.ConfigFolder .. "/spy_log.txt", "") end end)
-        end
     end })
     spy:Button({ Title = "Copy Log", Callback = function()
         if setclipboard then setclipboard(table.concat(SpyLog, "\n")) Util.Notify("Copied " .. #SpyLog .. " lines") else Util.Notify("No setclipboard") end
