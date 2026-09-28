@@ -59,6 +59,9 @@ local CFG = {
     ConfigFolder = "GravityHub/AFS",
     KillTimeout  = 25,
     JoinCooldown = 8,
+    -- remotes the game spams every second while fighting; left out of Remote Spy
+    SpyIgnore    = { ClickerDamage = true, SendPet = true, PetAttack = true, PetAbility = true,
+                     DPS = true, DPSTest = true, UpdateLocalEnemyHealth = true, GetLocalEnemyHealth = true },
     TrialGoAt    = 30,   -- go to the time trial room this many seconds before it starts
 
     TimeTrials   = { "Lesser", "Medium", "Greater", "Ultimate", "Ultra Hard", "Insane", "Godly", "Infinite" },
@@ -2822,6 +2825,10 @@ do
     spy:Paragraph({ Body = "Turn on, do the action once by hand (e.g. start a dungeon), then press Copy Log and send it to fix CFG.Calls. Log is also saved to GravityHub/AFS/spy_log.txt." })
     spy:Toggle({ Title = "Remote Spy", Flag = "RemoteSpy", Callback = function(v)
         if v and not hookmetamethod then Util.Notify("Executor has no hookmetamethod") end
+        if v then   -- fresh log each time it's turned on
+            table.clear(SpyLog)
+            pcall(function() if writefile then writefile(CFG.ConfigFolder .. "/spy_log.txt", "") end end)
+        end
     end })
     spy:Button({ Title = "Copy Log", Callback = function()
         if setclipboard then setclipboard(table.concat(SpyLog, "\n")) Util.Notify("Copied " .. #SpyLog .. " lines") else Util.Notify("No setclipboard") end
@@ -2929,7 +2936,7 @@ local function describe(a)
 end
 local function spyWrite(line)
     SpyLog[#SpyLog + 1] = line
-    if #SpyLog > 400 then table.remove(SpyLog, 1) end
+    if #SpyLog > 1000 then table.remove(SpyLog, 1) end
     print(line)
     if appendfile then
         pcall(function()
@@ -2954,7 +2961,7 @@ if hookmetamethod and getnamecallmethod then
         end
         if Flags.RemoteSpy and Flags.RemoteSpy:Get() and not (checkcaller and checkcaller())
            and (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance"
-           and self.Parent == Remotes and self.Name ~= "ClickerDamage" then
+           and self.Parent == Remotes and not CFG.SpyIgnore[self.Name] then
             local args = table.pack(...)
             local parts = {}
             for i = 1, args.n do parts[i] = "[" .. i .. "] " .. describe(args[i]) end
