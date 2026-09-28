@@ -15,7 +15,8 @@
       Hatch / Fuse      summon stars, fuse pets
       Passive           multi pet / slot / passive / rarity / machine reroll
       Settings          auto sell, webhook, anti AFK, FPS, walk speed, spy
-      UI Settings       key, scale, accent, save / load config
+      UI Settings       key, scale, accent (settings auto-save per account
+                        to GravityHub/AFS/CONFIG/<player>.json)
 
     Click the floating R icon (or press RightControl) to open / close.
 
@@ -45,6 +46,7 @@ local Bindables = RS:WaitForChild("Bindable")
 local Modules   = RS:FindFirstChild("ModuleScripts")
 
 local Connections = {}
+local autoSave = true  -- turned off on unload so the saved config is not overwritten
 local function track(conn) Connections[#Connections + 1] = conn return conn end
 
 ------------------------------------------------------------------------
@@ -54,7 +56,7 @@ local CFG = {
     Name         = "REN HUB V3",
     Game         = "Anime Fighter Simulator",
     ToggleKey    = Enum.KeyCode.RightControl,
-    ConfigFolder = "RenHub",
+    ConfigFolder = "GravityHub/AFS",
     KillTimeout  = 25,
     JoinCooldown = 8,
 
@@ -1213,29 +1215,48 @@ function Library:Window(opt)
         return tab
     end
 
-    -- config ------------------------------------------------------------------------
-    local function configPath(name)
-        return CFG.ConfigFolder .. "/" .. tostring(name or "default") .. ".json"
+    -- config (auto save / auto load, one file per account) --------------------------
+    -- GravityHub/AFS/CONFIG/<PlayerName>.json
+    local function ensureFolder(path)
+        if not (isfolder and makefolder) then return end
+        local cur = ""
+        for part in string.gmatch(path, "[^/]+") do
+            cur = cur == "" and part or (cur .. "/" .. part)
+            pcall(function() if not isfolder(cur) then makefolder(cur) end end)
+        end
     end
-    function W:SaveConfig(name)
-        if not writefile then Util.Notify("Executor has no writefile") return end
+    W.EnsureFolder = ensureFolder
+    local configDir = CFG.ConfigFolder .. "/CONFIG"
+    local configPath = configDir .. "/" .. LP.Name .. ".json"
+    local lastSaved = nil
+    local function encodeFlags()
         local out = {}
-        for flag, el in pairs(Library.Flags) do out[flag] = el:Get() end
-        pcall(function() if not isfolder(CFG.ConfigFolder) then makefolder(CFG.ConfigFolder) end end)
-        local ok, err = pcall(writefile, configPath(name), HttpService:JSONEncode(out))
-        Util.Notify(ok and ("Saved config " .. name) or ("Save failed: " .. tostring(err)))
+        for flag, el in pairs(Library.Flags) do
+            local ok, v = pcall(el.Get, el)
+            if ok and v ~= nil and type(v) ~= "function" and type(v) ~= "userdata" then out[flag] = v end
+        end
+        local ok, json = pcall(HttpService.JSONEncode, HttpService, out)
+        return ok and json or nil
     end
-    function W:LoadConfig(name, quiet)
+    -- writes only when something changed since the last save
+    function W:SaveConfig()
+        if not writefile then return end
+        local json = encodeFlags()
+        if not json or json == lastSaved then return end
+        ensureFolder(configDir)
+        if pcall(writefile, configPath, json) then lastSaved = json end
+    end
+    function W:LoadConfig()
         if not (readfile and isfile) then return end
-        local okExists, exists = pcall(isfile, configPath(name))
-        if not okExists or not exists then if not quiet then Util.Notify("No config " .. name) end return end
-        local ok, decoded = pcall(function() return HttpService:JSONDecode(readfile(configPath(name))) end)
-        if not ok or type(decoded) ~= "table" then Util.Notify("Config broken") return end
+        local okExists, exists = pcall(isfile, configPath)
+        if not okExists or not exists then return end
+        local ok, decoded = pcall(function() return HttpService:JSONDecode(readfile(configPath)) end)
+        if not ok or type(decoded) ~= "table" then Util.Notify("Config broken, starting fresh") return end
         for flag, value in pairs(decoded) do
             local el = Library.Flags[flag]
             if el then pcall(el.Set, el, value) end
         end
-        if not quiet then Util.Notify("Loaded config " .. name) end
+        lastSaved = encodeFlags()
     end
 
     function W:Destroy()
@@ -2090,7 +2111,7 @@ do
     g:Slider({ Title = "Walk Speed", Min = 16, Max = 200, Default = 16, Flag = "WalkSpeed" })
     g:Button({ Title = "FPS Boost", Callback = Features.FpsBoost })
     local spy = TSettings:Card("Remote Spy", "Right")
-    spy:Paragraph({ Body = "Turn on, do the action once by hand (e.g. start a dungeon), then press Copy Log and send it to fix CFG.Calls. Log is also saved to RenHub/spy_log.txt." })
+    spy:Paragraph({ Body = "Turn on, do the action once by hand (e.g. start a dungeon), then press Copy Log and send it to fix CFG.Calls. Log is also saved to GravityHub/AFS/spy_log.txt." })
     spy:Toggle({ Title = "Remote Spy", Flag = "RemoteSpy", Callback = function(v)
         if v and not hookmetamethod then Util.Notify("Executor has no hookmetamethod") end
     end })
@@ -2117,17 +2138,11 @@ do
     u:Toggle({ Title = "Show Floating Icon", Default = true, Flag = "ShowIcon", Callback = function(v) Window.Icon.Visible = v end })
     u:Button({ Title = "Reset Window Position", Callback = function() Window.Main.Position = UDim2.fromScale(0.5, 0.5) end })
     u:Button({ Title = "Unload Script", Callback = function()
+        pcall(function() Window:SaveConfig() end) autoSave = false  -- keep settings as they were before unload
         for _, el in pairs(Flags) do if el.Type == "Toggle" then el:Set(false, true) end end
         if getgenv and getgenv().RenHubV3 then getgenv().RenHubV3() getgenv().RenHubV3 = nil else Window:Destroy() end
     end })
 
-    local c = TUI:Card("Config", "Right")
-    c:Input({ Title = "Config Name", Default = "default", Flag = "ConfigName" })
-    c:Button({ Title = "Save Config", Callback = function() Window:SaveConfig(F("ConfigName") or "default") end })
-    c:Button({ Title = "Load Config", Callback = function() Window:LoadConfig(F("ConfigName") or "default") end })
-    c:Toggle({ Title = "Auto Load This Config", Flag = "AutoLoadConfig", Callback = function(v)
-        if writefile then pcall(writefile, CFG.ConfigFolder .. "/autoload.txt", v and (F("ConfigName") or "default") or "") end
-    end })
 end
 
 ------------------------------------------------------------------------
@@ -2191,7 +2206,7 @@ track(LP.Idled:Connect(function()
     end
 end))
 
--- Remote Spy (outgoing calls + return values, kept in SpyLog and RenHub/spy_log.txt)
+-- Remote Spy (outgoing calls + return values, kept in SpyLog and GravityHub/AFS/spy_log.txt)
 local function describe(a)
     local t = typeof(a)
     if t == "Instance" then return a:GetFullName() end
@@ -2208,7 +2223,7 @@ local function spyWrite(line)
     print(line)
     if appendfile then
         pcall(function()
-            if not isfolder(CFG.ConfigFolder) then makefolder(CFG.ConfigFolder) end
+            Window.EnsureFolder(CFG.ConfigFolder)
             appendfile(CFG.ConfigFolder .. "/spy_log.txt", line .. "\n")
         end)
     end
@@ -2287,11 +2302,12 @@ loop(1, function()
     end)
 end)
 
--- auto load config
-pcall(function()
-    if isfile and isfile(CFG.ConfigFolder .. "/autoload.txt") then
-        local name = readfile(CFG.ConfigFolder .. "/autoload.txt")
-        if name ~= "" then Window:LoadConfig(name, true) end
+-- auto load this account's config, then auto save every 3 s when something changed
+pcall(function() Window:LoadConfig() end)
+task.spawn(function()
+    while running and autoSave do
+        task.wait(3)
+        if running and autoSave then pcall(function() Window:SaveConfig() end) end
     end
 end)
 
