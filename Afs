@@ -1753,7 +1753,7 @@ function Features.IsMounted()
     local m = LP:FindFirstChild("Mounting")
     if m then
         if m:IsA("BoolValue") then return m.Value end
-        if m:IsA("StringValue") then return m.Value ~= "" end
+        -- a StringValue here is the EQUIPPED mount's name (e.g. "ReZero"), not "riding or not"
         if m:IsA("IntValue") or m:IsA("NumberValue") then return m.Value ~= 0 end
         if m:IsA("ObjectValue") then return m.Value ~= nil end
     end
@@ -2514,42 +2514,6 @@ do
     f:Toggle({ Title = "Attack While Ulti", Flag = "AttackUlt", Callback = function(v) Combat.Options.Ult = v end })
     f:Toggle({ Title = "Auto Mount", Flag = "AutoMount", Callback = function(v)
         if v then task.spawn(Features.Mount) end
-    end })
-    f:Button({ Title = "Mount Info (copy)", Callback = function()
-        local out = {}
-        local function add(k, v) out[#out + 1] = k .. " = " .. tostring(v) end
-        local m = LP:FindFirstChild("Mounting")
-        add("Mounting", m and (m.ClassName .. " : " .. tostring(m.Value)) or "missing")
-        local hum = Util.Humanoid()
-        add("Humanoid.Sit", hum and hum.Sit) add("SeatPart", hum and hum.SeatPart)
-        add("WalkSpeed", hum and hum.WalkSpeed)
-        add("IsMounted()", Features.IsMounted())
-        for _, n in ipairs({ "SetMounted", "EquipMount", "ClaimMount" }) do
-            local r = Remotes:FindFirstChild(n) add("Remote." .. n, r and r.ClassName or "missing")
-        end
-        for _, n in ipairs({ "ToggleMount", "Dismount" }) do
-            local b = Bindables:FindFirstChild(n) add("Bindable." .. n, b and b.ClassName or "missing")
-        end
-        local char = LP.Character
-        if char then
-            local kids = {}
-            for _, c in ipairs(char:GetChildren()) do if c:IsA("Model") or c:IsA("Folder") then kids[#kids + 1] = c.Name end end
-            add("Character models", table.concat(kids, ", "))
-        end
-        local mg = Data.MainGui()
-        local mb = mg and mg:FindFirstChild("MountButtonFrame")
-        if mb then
-            local parts = {}
-            for _, d in ipairs(mb:GetDescendants()) do
-                if d:IsA("GuiButton") or d:IsA("TextLabel") then
-                    parts[#parts + 1] = d.ClassName .. ":" .. d.Name .. (d:IsA("TextLabel") and ("'" .. d.Text .. "'") or "")
-                end
-            end
-            add("MountButtonFrame", table.concat(parts, " | "))
-        end
-        local txt = table.concat(out, "\n")
-        print(txt)
-        if setclipboard then setclipboard(txt) Util.Notify("Mount info copied") else Util.Notify("Printed to F9") end
     end })
     f:Toggle({ Title = "TP Pet (Pet need passive)", Flag = "PetTP", Callback = function(v) Combat.Options.PetTP = v end })
     f:Toggle({ Title = "Auto Unlock And Tp Next World", Flag = "AutoNextWorld" })
