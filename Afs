@@ -1856,9 +1856,20 @@ function Features.TimeTrial()
         if #trials > 0 and #Combat.List("Tower") == 0 and Stats.TrialFloor == 0 then
             Features.TryJoinTrial(trials)   -- lobby: join when the selected door is about to open
         end
+        -- enemies of the current room exist but aren't loaded near us (the game only
+        -- loads what's close): go to where they are so they load, then fight
+        local waiting = Features.TowerEnemyTargets()
+        if #waiting > 0 then
+            local pos = waiting[1]
+            pcall(function() LP:RequestStreamAroundAsync(pos) end)
+            Util.MoveTo(CFrame.new(pos + Vector3.new(0, 5, 0)))
+            task.wait(0.5)
+            return true
+        end
         if not On("TrialIgnoreChest") then
             for _, p in ipairs(Prompt.Find(tower, { "chest" })) do Prompt.Use(p) task.wait(0.2) end
         end
+        -- room cleared: press the button that sends us to the next room
         for _, obj in ipairs(tower and tower:GetDescendants() or {}) do
             if obj.Name == "ConfirmPart" then
                 local p = obj:FindFirstChildOfClass("ProximityPrompt")
@@ -1868,6 +1879,7 @@ function Features.TimeTrial()
                 end
             end
         end
+        Features.DumpTowerOnce()
         return true
     end
     local trials = Util.SetToList(F("Trials"))
@@ -1903,6 +1915,56 @@ function Features.TrialCountdown()
     end
     if trialStartsAt and trialStartsAt - os.clock() > -5 then return trialStartsAt - os.clock() end
     return nil
+end
+
+-- positions of enemies in the Tower that exist but aren't loaded near us yet.
+-- A model's pivot is known even while its parts are streamed out.
+function Features.TowerEnemyTargets()
+    local out, tower = {}, Worlds:FindFirstChild("Tower")
+    if not tower then return out end
+    for _, f in ipairs(tower:GetDescendants()) do
+        if f.Name == "Enemies" and f:IsA("Folder") then
+            for _, e in ipairs(f:GetChildren()) do
+                if e:IsA("Model") and not e:FindFirstChild("HumanoidRootPart") then
+                    local hp = e:FindFirstChild("Health")
+                    if not hp or hp.Value > 0 then
+                        local ok, cf = pcall(e.GetPivot, e)
+                        if ok and cf and cf.Position.Magnitude > 1 then out[#out + 1] = cf.Position end
+                    end
+                end
+            end
+        end
+    end
+    local root = Util.Root()
+    if root then table.sort(out, function(a, b) return (a - root.Position).Magnitude < (b - root.Position).Magnitude end) end
+    return out
+end
+
+-- stuck in a trial with nothing to do: save the Tower's layout once to
+-- GravityHub/AFS/tower_dump.txt so the room / door names can be checked
+local towerDumped = false
+function Features.DumpTowerOnce()
+    if towerDumped or not writefile or not Util.Every("tower-stuck", 15) then return end
+    towerDumped = true
+    local tower = Worlds:FindFirstChild("Tower")
+    if not tower then return end
+    local lines = {}
+    local function walk(o, depth)
+        if #lines > 3000 or depth > 4 then return end
+        local extra = ""
+        if o:IsA("BasePart") then extra = "  @ " .. tostring(o.Position)
+        elseif o:IsA("Model") then local ok, cf = pcall(o.GetPivot, o) extra = ok and ("  @ " .. tostring(cf.Position)) or ""
+        elseif o:IsA("TextLabel") then extra = "  '" .. o.Text .. "'"
+        elseif o:IsA("ValueBase") then extra = "  = " .. tostring(o.Value) end
+        lines[#lines + 1] = string.rep("  ", depth) .. o.ClassName .. " " .. o.Name .. extra
+        local kids = o:GetChildren()
+        if #kids > 40 then lines[#lines + 1] = string.rep("  ", depth + 1) .. "(" .. #kids .. " children)" return end
+        for _, c in ipairs(kids) do walk(c, depth + 1) end
+    end
+    walk(tower, 0)
+    local root = Util.Root()
+    lines[#lines + 1] = "PLAYER @ " .. tostring(root and root.Position)
+    pcall(writefile, CFG.ConfigFolder .. "/tower_dump.txt", table.concat(lines, "\n"))
 end
 
 -- TRIAL DOORS -----------------------------------------------------------------------
