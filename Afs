@@ -1994,32 +1994,48 @@ function Features.RoomCenter()
     return count > 0 and sum / count or nil
 end
 
--- TRIAL ROOMS: every room is a model named "StartRoom" in Tower.Map (no numbers).
--- We find the room we're standing in, remember it as done, and go to the closest
--- room we haven't been in yet (rooms of a run are next to each other).
+-- TRIAL ROOMS: a run is built from models in Tower.Map named "BattleRoom" (fight)
+-- and "RestRoom" (every 5th, has the ConfirmPart button); the first room is the
+-- door's StartRoom. The game keeps adding the next room as the run goes on, so
+-- the room to be in is the NEWEST one of our run.
+local ROOM_TYPES = { BattleRoom = true, RestRoom = true, StartRoom = true }
 local roomBoxes = setmetatable({}, { __mode = "k" })
 local visitedRooms = setmetatable({}, { __mode = "k" })
+local roomBorn = setmetatable({}, { __mode = "k" })
+local roomWatch = nil
+local function watchRooms(map)
+    if roomWatch or not map then return end
+    roomWatch = track(map.ChildAdded:Connect(function(m)
+        if m.Name == "BattleRoom" or m.Name == "RestRoom" then roomBorn[m] = os.clock() end
+    end))
+end
 local function roomBox(m)
     local b = roomBoxes[m]
     if not b then
         local ok, cf, size = pcall(m.GetBoundingBox, m)
-        if not ok or not cf then return nil end
+        if not ok or not cf or size.Magnitude < 1 then
+            local ok2, pv = pcall(m.GetPivot, m)
+            if not ok2 then return nil end
+            return { cf = pv, size = Vector3.new(80, 60, 80), temp = true }
+        end
         b = { cf = cf, size = size }
         roomBoxes[m] = b
     end
     return b
 end
-function Features.TrialRooms()
+function Features.TrialRooms(types)
     local tower = Worlds:FindFirstChild("Tower")
     local map = tower and tower:FindFirstChild("Map")
+    watchRooms(map)
     local out = {}
     for _, m in ipairs(map and map:GetChildren() or {}) do
-        if m.Name == "StartRoom" and m:IsA("Model") then out[#out + 1] = m end
+        if m:IsA("Model") and (types or ROOM_TYPES)[m.Name] then out[#out + 1] = m end
     end
     return out
 end
+local PLAY_ROOMS = { BattleRoom = true, RestRoom = true }
 function Features.RoomAt(pos)
-    for _, m in ipairs(Features.TrialRooms()) do
+    for _, m in ipairs(Features.TrialRooms(PLAY_ROOMS)) do
         local b = roomBox(m)
         if b then
             local rel = b.cf:PointToObjectSpace(pos)
@@ -2031,28 +2047,35 @@ function Features.RoomAt(pos)
     end
     return nil
 end
-function Features.ResetTrialRooms() table.clear(visitedRooms) end
+function Features.ResetTrialRooms()
+    table.clear(visitedRooms)
+    Features.TrialRooms()   -- start watching for new rooms before the run begins
+end
 function Features.AdvanceRoom()
     local root = Util.Root()
     if not root then return end
+    -- in a run = the game shows "Room N"
+    if not Features.CurrentRoom() then return end
     local cur = Features.RoomAt(root.Position)
-    if not cur then return end                 -- lobby, not in a run
-    visitedRooms[cur] = true
-    -- the closest room we haven't cleared yet
-    local cb = roomBox(cur)
-    if not cb then return end
-    local best, bestDist
-    for _, m in ipairs(Features.TrialRooms()) do
+    if cur then visitedRooms[cur] = true end
+    -- newest room of our run (made after we joined, close to us), else nearest new one
+    local best, bestBorn, near, nearDist
+    for _, m in ipairs(Features.TrialRooms(PLAY_ROOMS)) do
         if m ~= cur and not visitedRooms[m] then
             local b = roomBox(m)
             if b then
-                local dist = (b.cf.Position - cb.cf.Position).Magnitude
-                if not bestDist or dist < bestDist then best, bestDist = m, dist end
+                local dist = (b.cf.Position - root.Position).Magnitude
+                if dist < 2500 then
+                    local born = roomBorn[m]
+                    if born and (not bestBorn or born > bestBorn) then best, bestBorn = m, born end
+                    if not nearDist or dist < nearDist then near, nearDist = m, dist end
+                end
             end
         end
     end
-    if best then
-        local c = roomBox(best).cf.Position
+    local target = best or near
+    if target then
+        local c = roomBox(target).cf.Position
         pcall(function() LP:RequestStreamAroundAsync(c) end)
         Util.MoveTo(CFrame.new(c + Vector3.new(0, 5, 0)))
     end
@@ -2077,7 +2100,10 @@ function Features.TowerEnemyTargets()
         end
     end
     local root = Util.Root()
-    if root then table.sort(out, function(a, b) return (a - root.Position).Magnitude < (b - root.Position).Magnitude end) end
+    if root then
+        for k = #out, 1, -1 do if (out[k] - root.Position).Magnitude > 600 then table.remove(out, k) end end
+        table.sort(out, function(a, b) return (a - root.Position).Magnitude < (b - root.Position).Magnitude end)
+    end
     return out
 end
 
