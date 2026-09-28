@@ -277,7 +277,7 @@ end
 -- GravityHub/AFS/learned_calls.json and reused, so the script sends what the
 -- game really expects instead of a guess.
 local Learn = { data = nil }
-Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true }
+Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true, JoinTimeTrial = true }
 Learn.File = CFG.ConfigFolder .. "/learned_calls.json"
 function Learn.Load()
     if Learn.data then return Learn.data end
@@ -1832,6 +1832,10 @@ function Features.TimeTrial()
         end
         if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest") then return true end
         local tower = Worlds:FindFirstChild("Tower")
+        local trials = Util.SetToList(F("Trials"))
+        if #trials > 0 and #Combat.List("Tower") == 0 and Stats.TrialFloor == 0 then
+            Features.JoinTrial(trials)   -- waiting room: ask to join the selected trial
+        end
         if not On("TrialIgnoreChest") then
             for _, p in ipairs(Prompt.Find(tower, { "chest" })) do Prompt.Use(p) task.wait(0.2) end
         end
@@ -1848,18 +1852,43 @@ function Features.TimeTrial()
     end
     local trials = Util.SetToList(F("Trials"))
     if #trials == 0 then return false end
-    if Util.Every("trial-join", 15) then
-        if CFG.ModeWorlds[world] == nil then HomeWorld = world end
-        trialIndex = trialIndex % #trials + 1
-        Stats.TrialName, Stats.TrialFloor = trials[trialIndex], 0
-        -- the game's trial names end in "Time Trial" ("Godly Time Trial"); try that
-        -- first, fall back to the short name, and keep whichever gets us in
-        local form = trialForm or (lastTrialTry == "full" and "short" or "full")
-        lastTrialTry = form
-        local name = trials[trialIndex]
-        Net.Call("JoinTimeTrial", form == "full" and (name .. " Time Trial") or name)
+    if CFG.ModeWorlds[world] == nil then HomeWorld = world end
+    -- 1. go to the time trial waiting room (Tower) first
+    if Util.Every("trial-travel", 10) then
+        Util.Notify("Going to the Time Trial room")
+        Travel.To("Tower", true)
+        if Util.World() == "Tower" then Features.JoinTrial(trials) end
     end
     return false
+end
+
+-- ask to join the next selected trial (uses the game's real arguments once you
+-- have joined a trial by hand one time)
+function Features.JoinTrial(trials)
+    if not Util.Every("trial-join", 15) then return end
+    trialIndex = trialIndex % #trials + 1
+    local name = trials[trialIndex]
+    Stats.TrialName, Stats.TrialFloor = name, 0
+    local tpl, n = Learn.Get("JoinTimeTrial")
+    if tpl then
+        for k = 1, n do
+            if type(tpl[k]) == "string" then
+                local full = string.find(tpl[k], "Time Trial", 1, true) ~= nil
+                for _, t in ipairs(CFG.TimeTrials) do
+                    if string.find(string.lower(tpl[k]), string.lower(t), 1, true) then
+                        tpl[k] = full and (name .. " Time Trial") or name
+                        break
+                    end
+                end
+            end
+        end
+        Net.Raw("JoinTimeTrial", tpl)
+        return
+    end
+    -- not learned yet: "Godly Time Trial" first, then "Godly", keep whichever works
+    local form = trialForm or (lastTrialTry == "full" and "short" or "full")
+    lastTrialTry = form
+    Net.Call("JoinTimeTrial", form == "full" and (name .. " Time Trial") or name)
 end
 
 function Features.InfinityTower()
