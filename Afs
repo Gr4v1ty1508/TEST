@@ -66,10 +66,10 @@ local CFG = {
     TrialPeriod  = 1800,  -- how often a trial door repeats (seconds), used until it's learned
     -- the game joins a time trial by NUMBER (JoinTimeTrial(5)) and then travels to
     -- "TowerDoor<number>". Fix a number here if a trial opens the wrong room.
-    TimeTrialIds = { Lesser = 1, Medium = 2, Greater = 3, Ultimate = 4, ["Ultra Hard"] = 5,
+    TimeTrialIds = { Lesser = 1, Medium = 2, Greater = 3, Ultimate = 4, Impossible = 5,
                      Insane = 6, Godly = 7, Infinite = 8 },   -- go to the time trial room this many seconds before it starts
 
-    TimeTrials   = { "Lesser", "Medium", "Greater", "Ultimate", "Ultra Hard", "Insane", "Godly", "Infinite" },
+    TimeTrials   = { "Lesser", "Medium", "Greater", "Ultimate", "Impossible", "Insane", "Godly", "Infinite" },
     RaidModes    = { "Normal", "Giant", "Massive" },
     DungeonSizes = { "Small", "Medium", "Large", "Insane", "Hellish" },
     -- what SummonDungeon gets for each size (change to numbers 1-5 if Remote Spy shows numbers)
