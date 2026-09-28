@@ -63,6 +63,7 @@ local CFG = {
     SpyIgnore    = { ClickerDamage = true, SendPet = true, PetAttack = true, PetAbility = true,
                      DPS = true, DPSTest = true, UpdateLocalEnemyHealth = true, GetLocalEnemyHealth = true },
     TrialGoAt    = 30,
+    TrialPeriod  = 1800,  -- how often a trial door repeats (seconds), used until it's learned
     -- the game joins a time trial by NUMBER (JoinTimeTrial(5)) and then travels to
     -- "TowerDoor<number>". Fix a number here if a trial opens the wrong room.
     TimeTrialIds = { Lesser = 1, Medium = 2, Greater = 3, Ultimate = 4, ["Ultra Hard"] = 5,
@@ -1909,12 +1910,25 @@ end
 -- Door positions come from the game's AttemptTravel answer (or a part named
 -- TowerDoor<n>) and are saved to GravityHub/AFS/trial_doors.json; the timer
 -- used for a door is the countdown board closest to it.
-local doorPos, doorStarts = {}, {}
+-- Start times are stored as SERVER time (workspace:GetServerTimeNow), so the
+-- prediction matches the server even after you leave the lobby or rejoin; each
+-- door's repeat time is learned from two readings (default CFG.TrialPeriod).
+local doorPos, doorStarts, doorPeriod = {}, {}, {}
 local DOOR_FILE = CFG.ConfigFolder .. "/trial_doors.json"
+local function serverNow()
+    local ok, t = pcall(function() return workspace:GetServerTimeNow() end)
+    return ok and t or os.time()
+end
 pcall(function()
     if isfile and isfile(DOOR_FILE) then
         for k, v in pairs(HttpService:JSONDecode(readfile(DOOR_FILE))) do
-            if type(v) == "table" and #v == 3 then doorPos[tonumber(k)] = Vector3.new(v[1], v[2], v[3]) end
+            local id = tonumber(k)
+            if id and type(v) == "table" then
+                if type(v.pos) == "table" then doorPos[id] = Vector3.new(v.pos[1], v.pos[2], v.pos[3])
+                elseif #v == 3 then doorPos[id] = Vector3.new(v[1], v[2], v[3]) end   -- old format
+                doorStarts[id] = tonumber(v.start)
+                doorPeriod[id] = tonumber(v.period)
+            end
         end
     end
 end)
@@ -1922,7 +1936,10 @@ local function saveDoors()
     pcall(function()
         if not writefile then return end
         local out = {}
-        for k, v in pairs(doorPos) do out[tostring(k)] = { v.X, v.Y, v.Z } end
+        for id in pairs(doorPos) do
+            local p = doorPos[id]
+            out[tostring(id)] = { pos = { p.X, p.Y, p.Z }, start = doorStarts[id], period = doorPeriod[id] }
+        end
         writefile(DOOR_FILE, HttpService:JSONEncode(out))
     end)
 end
@@ -1970,7 +1987,17 @@ function Features.DoorCountdown(id)
             if dist < 90 and (not bestDist or dist < bestDist) then best, bestDist = b, dist end
         end
         if best then
-            doorStarts[id] = os.clock() + best.secs
+            local start = serverNow() + best.secs
+            local old = doorStarts[id]
+            -- the board jumped to a new cycle: the gap is how often this door repeats
+            if old and start - old > 120 then
+                local gap = start - old
+                if gap >= 300 and gap <= 4 * 3600 then doorPeriod[id] = math.floor(gap / 30 + 0.5) * 30 end
+            end
+            if not old or math.abs(start - old) > 2 then
+                doorStarts[id] = start
+                if Util.Every("door-save", 30) then saveDoors() end
+            end
             return best.secs
         end
         -- board not loaded (you're far away): load the area around that door
@@ -1978,7 +2005,13 @@ function Features.DoorCountdown(id)
             task.spawn(pcall, LP.RequestStreamAroundAsync, LP, dp)
         end
     end
-    if doorStarts[id] and doorStarts[id] - os.clock() > -5 then return doorStarts[id] - os.clock() end
+    -- board not readable: predict from the last server-time reading
+    local start = doorStarts[id]
+    if start then
+        local now, period = serverNow(), doorPeriod[id] or CFG.TrialPeriod
+        while start - now < -5 do start = start + period end
+        return start - now
+    end
     return nil
 end
 
