@@ -86,7 +86,7 @@ local CFG = {
     PinnedWorlds = {
         "Summer (2025) Island", "Anniversary (2024) Island", "Patrick Event", "Christmas 2025",
         "Easter Event 2026", "Beyond The Valentine", "Summer (2024) Island", "Winter (2023) Island",
-        "Super Island", "Spring (2024) Island", "Prismatic Journey", "Solo Dungeon",
+        "Super Island",
     },
 
     -- normal worlds in game order (world 1 -> newest). Worlds the game adds later
@@ -115,6 +115,7 @@ local CFG = {
     -- worlds hidden from every world list (can't be teleported to any more).
     -- match = start of the name shown in the list, not case sensitive
     HiddenWorlds = {
+        "Spring (2024) Island", "Prismatic Journey", "Solo Dungeon",
     },
 
     -- in-game menus for the Open UI tab (label = MainGui frame name)
