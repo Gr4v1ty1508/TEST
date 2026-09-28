@@ -61,7 +61,7 @@ local CFG = {
     JoinCooldown = 8,
 
     TimeTrials   = { "Lesser", "Medium", "Greater", "Ultimate", "Ultra Hard", "Insane", "Godly", "Infinite" },
-    RaidModes    = { "Normal", "Master" },
+    RaidModes    = { "Normal", "Giant", "Massive" },
     DungeonSizes = { "Small", "Medium", "Large", "Insane", "Hellish" },
     -- what SummonDungeon gets for each size (change to numbers 1-5 if Remote Spy shows numbers)
     DungeonSizeArg = { Small = "Small", Medium = "Medium", Large = "Large", Insane = "Insane", Hellish = "Hellish" },
@@ -1775,9 +1775,11 @@ end
 
 -- TIME TRIAL / TOWER ----------------------------------------------------------------
 local trialIndex = 0
+local trialForm, lastTrialTry = nil, nil
 function Features.TimeTrial()
     local world = Util.World()
     if world == "Tower" then
+        if lastTrialTry and not trialForm then trialForm = lastTrialTry end
         local wanted = function() return On("AutoTrial") end
         local trialName = Stats.TrialName
         if On("AutoLeaveTrial") and trialName then
@@ -1810,7 +1812,12 @@ function Features.TimeTrial()
         if CFG.ModeWorlds[world] == nil then HomeWorld = world end
         trialIndex = trialIndex % #trials + 1
         Stats.TrialName, Stats.TrialFloor = trials[trialIndex], 0
-        Net.Call("JoinTimeTrial", trials[trialIndex])
+        -- the game's trial names end in "Time Trial" ("Godly Time Trial"); try that
+        -- first, fall back to the short name, and keep whichever gets us in
+        local form = trialForm or (lastTrialTry == "full" and "short" or "full")
+        lastTrialTry = form
+        local name = trials[trialIndex]
+        Net.Call("JoinTimeTrial", form == "full" and (name .. " Time Trial") or name)
     end
     return false
 end
@@ -1846,6 +1853,11 @@ function Features.Raid()
     local worlds, modes = worldsFrom("RaidWorlds"), F("RaidModes") or {}
     local worldOk = On("RaidAllWorlds") or contains(worlds, active)
     local modeOk = not next(modes) or mode == nil or modes[mode]
+    if not modeOk and type(mode) == "string" then
+        for m, on in pairs(modes) do
+            if on and string.find(string.lower(mode), string.lower(m), 1, true) then modeOk = true break end
+        end
+    end
     if active and worldOk and modeOk then
         Net.Call("JoinRaid", active, mode)
         return true
