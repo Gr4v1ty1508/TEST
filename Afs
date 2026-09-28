@@ -81,6 +81,13 @@ local CFG = {
         Portal = true, MachineWorld = true,
     },
 
+    -- worlds hidden from every world list (can't be teleported to any more).
+    -- match = start of the name shown in the list, not case sensitive
+    HiddenWorlds = {
+        "Anniversary (2024) Island", "Winter (2023) Island", "Spring (2024) Island",
+        "Summer (2024) Island", "Prismatic Journey", "Solo Dungeon",
+    },
+
     -- in-game menus for the Open UI tab (label = MainGui frame name)
     OpenUI = {
         { "Artifact UI", "Artefacts" }, { "Corruption Machine UI", "Corrupter" },
@@ -370,7 +377,12 @@ end
 -- worlds the game hasn't released yet show a placeholder name ("Locked?", "???")
 function Data.IsHiddenWorld(name)
     local d = string.lower(Data.WorldDisplay(name))
-    return string.find(d, "lock", 1, true) ~= nil or string.match(d, "^[%?%s]*$") ~= nil
+    if string.find(d, "lock", 1, true) or string.match(d, "^[%?%s]*$") then return true end
+    for _, h in ipairs(CFG.HiddenWorlds) do
+        local hl = string.lower(h)
+        if string.sub(d, 1, #hl) == hl or string.lower(name) == hl then return true end
+    end
+    return false
 end
 
 -- dropdown label -> world key (label = the world's name, sorted by game order)
