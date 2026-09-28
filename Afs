@@ -1767,16 +1767,32 @@ function Features.IsMounted()
     return nil
 end
 
--- only ever sends "mount = true" (never a toggle), and gives up after two tries
--- that change nothing, so it can't flip you on / off forever
-local mountTries, mountWorld = 0, nil
+-- sends the mount call ONCE per world / respawn and then waits, so even if the
+-- game's SetMounted works like an on/off switch it can't flip you forever.
+-- When LP.Mounting changes right after our call, that value is remembered as
+-- "mounted" and used from then on.
+local mountTries, mountWorld, mountedValue, lastMountCall = 0, nil, nil, 0
+pcall(function()
+    local m = LP:WaitForChild("Mounting", 5)
+    if m and m:IsA("ValueBase") then
+        track(m.Changed:Connect(function()
+            if os.clock() - lastMountCall < 3 then mountedValue = m.Value end
+        end))
+    end
+end)
+local baseIsMounted = Features.IsMounted
+function Features.IsMounted()
+    local m = LP:FindFirstChild("Mounting")
+    if mountedValue ~= nil and m then return m.Value == mountedValue end
+    return baseIsMounted()
+end
 function Features.Mount()
     local world = Util.World()
     if world ~= mountWorld then mountWorld, mountTries = world, 0 end  -- teleport / new world: try again
-    local state = Features.IsMounted()
-    if state == true then mountTries = 0 return end
-    if mountTries >= 2 then return end
+    if Features.IsMounted() == true then mountTries = 0 return end
+    if mountTries >= 1 then return end
     mountTries = mountTries + 1
+    lastMountCall = os.clock()
     Net.Call("Mount", true)
 end
 pcall(function()
