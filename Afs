@@ -1748,9 +1748,15 @@ end
 
 -- MOUNT -------------------------------------------------------------------------------
 local MountAssets = RS:FindFirstChild("ReplicatedAssets") and RS.ReplicatedAssets:FindFirstChild("Mounts")
+-- true / false when we can tell, nil when nothing tells us
 function Features.IsMounted()
     local m = LP:FindFirstChild("Mounting")
-    if m and m:IsA("BoolValue") then return m.Value end
+    if m then
+        if m:IsA("BoolValue") then return m.Value end
+        if m:IsA("StringValue") then return m.Value ~= "" end
+        if m:IsA("IntValue") or m:IsA("NumberValue") then return m.Value ~= 0 end
+        if m:IsA("ObjectValue") then return m.Value ~= nil end
+    end
     local hum, char = Util.Humanoid(), LP.Character
     if hum and (hum.Sit or hum.SeatPart) then return true end
     if char and MountAssets then
@@ -1758,20 +1764,24 @@ function Features.IsMounted()
             if c:IsA("Model") and MountAssets:FindFirstChild(c.Name) then return true end
         end
     end
-    return false
+    return nil
 end
+
+-- only ever sends "mount = true" (never a toggle), and gives up after two tries
+-- that change nothing, so it can't flip you on / off forever
+local mountTries, mountWorld = 0, nil
 function Features.Mount()
-    if Features.IsMounted() then return end
+    local world = Util.World()
+    if world ~= mountWorld then mountWorld, mountTries = world, 0 end  -- teleport / new world: try again
+    local state = Features.IsMounted()
+    if state == true then mountTries = 0 return end
+    if mountTries >= 2 then return end
+    mountTries = mountTries + 1
     Net.Call("Mount", true)
-    task.wait(1.5)
-    if Features.IsMounted() then return end
-    local tm = Bindables:FindFirstChild("ToggleMount")
-    if tm then pcall(tm.Fire, tm) return end
-    local mg = Data.MainGui()
-    local frame = mg and mg:FindFirstChild("MountButtonFrame")
-    local b = frame and frame:FindFirstChildWhichIsA("GuiButton", true)
-    if b then fireGui(b, { "MouseButton1Click", "Activated" }) end
 end
+pcall(function()
+    track(LP.CharacterAdded:Connect(function() mountTries = 0 end))
+end)
 
 -- TIME TRIAL / TOWER ----------------------------------------------------------------
 local trialIndex = 0
@@ -2894,7 +2904,7 @@ local lastWebhook = os.clock()
 loop(1, function()
     if On("AutoRebirth") and Util.Every("rebirth", 5) then Net.Call("Rebirth") end
     if On("AutoNextWorld") and Util.Every("nextworld", 15) then Features.NextWorld() end
-    if On("AutoMount") and Util.Every("mount", 5) then Features.Mount() end
+    if On("AutoMount") and Util.Every("mount", 8) then Features.Mount() end
     if On("AutoReEquip") and Util.Every("reequip", (F("ReEquipDelay") or 2) * 60) then Net.Call("ReEquipPets") end
     if On("AutoSpin") and Util.Every("spin", 60) then Net.Call("DailySpin") end
     if On("AutoTicket") and Util.Every("ticket", 60) then Net.Call("ClaimTicket") end
