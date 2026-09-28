@@ -1835,6 +1835,7 @@ end)
 -- TIME TRIAL / TOWER ----------------------------------------------------------------
 local trialIndex = 0
 local trialForm, lastTrialTry = nil, nil
+local trialDoorId = nil   -- door number of the trial we joined
 local trialJoinedAt = 0
 function Features.TimeTrial()
     local world = Util.World()
@@ -1942,10 +1943,29 @@ end
 -- middle of the current room: a model / folder in the Tower named like "Room1",
 -- "Room 1", "Room_1" or "1" inside a Rooms folder. nil if the map doesn't have one.
 local roomCache = {}
+local function centerOf(obj)
+    if not obj then return nil end
+    if obj:IsA("Model") then
+        local ok, cf = pcall(obj.GetBoundingBox, obj)
+        if ok and cf then return cf.Position end
+        local ok2, pv = pcall(obj.GetPivot, obj)
+        return ok2 and pv.Position or nil
+    end
+    if obj:IsA("BasePart") then return obj.Position end
+    return nil
+end
 function Features.RoomCenter()
     local n = Features.CurrentRoom()
     local tower = Worlds:FindFirstChild("Tower")
-    if not n or not tower then return nil end
+    if not tower then return nil end
+    -- room 1: the door we joined points at its run's first room (Door<n>.StartRoom)
+    if (n == nil or n == 1) and trialDoorId then
+        local door = Features.DoorModel(trialDoorId)
+        local sr = door and door:FindFirstChild("StartRoom")
+        local c = sr and sr:IsA("ObjectValue") and centerOf(sr.Value)
+        if c then return c end
+    end
+    if not n then return nil end
     local hit = roomCache[n]
     if not hit or not hit.Parent then
         hit = nil
@@ -1998,14 +2018,14 @@ end
 -- stuck in a trial with nothing to do: save the Tower's layout once to
 -- GravityHub/AFS/tower_dump.txt so the room / door names can be checked
 local towerDumped = false
-function Features.DumpTowerOnce()
-    if towerDumped or not writefile or not Util.Every("tower-stuck", 15) then return end
+function Features.DumpTowerOnce(force)
+    if not force and (towerDumped or not writefile or not Util.Every("tower-stuck", 15)) then return end
     towerDumped = true
     local tower = Worlds:FindFirstChild("Tower")
     if not tower then return end
     local lines = {}
     local function walk(o, depth)
-        if #lines > 3000 or depth > 4 then return end
+        if #lines > 4000 or depth > 7 then return end
         local extra = ""
         if o:IsA("BasePart") then extra = "  @ " .. tostring(o.Position)
         elseif o:IsA("Model") then local ok, cf = pcall(o.GetPivot, o) extra = ok and ("  @ " .. tostring(cf.Position)) or ""
@@ -2013,7 +2033,18 @@ function Features.DumpTowerOnce()
         elseif o:IsA("ValueBase") then extra = "  = " .. tostring(o.Value) end
         lines[#lines + 1] = string.rep("  ", depth) .. o.ClassName .. " " .. o.Name .. extra
         local kids = o:GetChildren()
-        if #kids > 40 then lines[#lines + 1] = string.rep("  ", depth + 1) .. "(" .. #kids .. " children)" return end
+        if #kids > 40 then
+            local count, order = {}, {}
+            for _, c in ipairs(kids) do
+                local key = c.ClassName .. " " .. c.Name
+                if not count[key] then count[key] = 0 order[#order + 1] = key end
+                count[key] = count[key] + 1
+            end
+            for i2 = 1, math.min(#order, 60) do
+                lines[#lines + 1] = string.rep("  ", depth + 1) .. order[i2] .. "  x" .. count[order[i2]]
+            end
+            return
+        end
         for _, c in ipairs(kids) do walk(c, depth + 1) end
     end
     walk(tower, 0)
@@ -2083,10 +2114,13 @@ local function countdownBoards()
     return boardCache
 end
 
+function Features.DoorModel(id)
+    local tower = Worlds:FindFirstChild("Tower")
+    return tower and (tower:FindFirstChild("Door" .. id) or tower:FindFirstChild("TowerDoor" .. id, true))
+end
 function Features.DoorPosition(id)
     if doorPos[id] then return doorPos[id] end
-    local tower = Worlds:FindFirstChild("Tower")
-    local door = tower and tower:FindFirstChild("TowerDoor" .. id, true)
+    local door = Features.DoorModel(id)
     if door then
         doorPos[id] = door:IsA("BasePart") and door.Position or (door:IsA("Model") and door:GetPivot().Position) or nil
         if doorPos[id] then saveDoors() end
@@ -2096,6 +2130,30 @@ end
 
 -- seconds until door <id> opens its next run (nil = don't know yet)
 function Features.DoorCountdown(id)
+    -- 1) the door's own board: Tower.Door<n>.Countdown.SurfaceGui...
+    local door = Features.DoorModel(id)
+    local board = door and door:FindFirstChild("Countdown")
+    if board then
+        for _, d in ipairs(board:GetDescendants()) do
+            if d:IsA("TextLabel") then
+                local secs = parseClock(d.Text)
+                if secs then
+                    local start = serverNow() + secs
+                    local old = doorStarts[id]
+                    if old and start - old > 120 then
+                        local gap = start - old
+                        if gap >= 300 and gap <= 4 * 3600 then doorPeriod[id] = math.floor(gap / 30 + 0.5) * 30 end
+                    end
+                    if not old or math.abs(start - old) > 2 then
+                        doorStarts[id] = start
+                        if Util.Every("door-save", 30) then saveDoors() end
+                    end
+                    return secs
+                end
+            end
+        end
+    end
+    -- 2) closest board to where the door is
     local dp = Features.DoorPosition(id)
     if dp then
         local best, bestDist
@@ -2135,6 +2193,7 @@ end
 -- join exactly like the game: JoinTimeTrial(n) -> AttemptTravel("TowerDoor<n>", true)
 function Features.JoinTrial(name, id)
     Stats.TrialName, Stats.TrialFloor = name, 0
+    trialDoorId = id
     Net.Raw("JoinTimeTrial", { id })
     task.wait(0.3)
     local pos = Net.Raw("AttemptTravel", { "TowerDoor" .. id, true })
@@ -3267,8 +3326,15 @@ loop(1, function()
     if hum and speed > 16 and hum.WalkSpeed ~= speed then hum.WalkSpeed = speed end
 
     pcall(function()
-        Features.TrialTimer:Set("Trial time : " .. Worlds.Tower.Countdown.SurfaceGui.Background.Time.Text ..
-            "   Floor : " .. Stats.TrialFloor)
+        -- soonest selected trial door
+        local best, bestName
+        for _, name in ipairs(Util.SetToList(F("Trials"))) do
+            local id = CFG.TimeTrialIds[name]
+            local secs = id and Features.DoorCountdown(id)
+            if secs and (not best or secs < best) then best, bestName = secs, name end
+        end
+        local txt = best and string.format("%s %d:%02d", bestName, math.floor(best / 60), math.floor(best % 60)) or "?"
+        Features.TrialTimer:Set("Trial time : " .. txt .. "   Floor : " .. Stats.TrialFloor)
     end)
 end)
 
