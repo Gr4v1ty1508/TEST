@@ -314,6 +314,29 @@ local function shortNumber(text)
     local n = string.match(text, "^%D*(%d+)%D*$")
     return n and tonumber(n) or nil
 end
+-- remembered world positions (GravityHub/AFS/world_order.json) so a
+-- favourited world keeps its real place in the list
+local ORDER_FILE = CFG.ConfigFolder .. "/world_order.json"
+function Data.LoadWorldOrderCache()
+    local ok, t = pcall(function()
+        if not (isfile and readfile) or not isfile(ORDER_FILE) then return {} end
+        return HttpService:JSONDecode(readfile(ORDER_FILE))
+    end)
+    return (ok and type(t) == "table") and t or {}
+end
+function Data.SaveWorldOrderCache(t)
+    pcall(function()
+        if not writefile then return end
+        if isfolder and makefolder then
+            local cur = ""
+            for part in string.gmatch(CFG.ConfigFolder, "[^/]+") do
+                cur = cur == "" and part or (cur .. "/" .. part)
+                if not isfolder(cur) then makefolder(cur) end
+            end
+        end
+        writefile(ORDER_FILE, HttpService:JSONEncode(t))
+    end)
+end
 local function buildWorldNumbers()
     local map, byDisplay = {}, {}
     for _, f in ipairs(Worlds:GetChildren()) do
@@ -337,6 +360,7 @@ local function buildWorldNumbers()
         if mg and mg:FindFirstChild("Travel") then roots[#roots + 1] = mg.Travel end
         if pg:FindFirstChild("Travel") then roots[#roots + 1] = pg.Travel end
     end
+    local entries = {}
     for _, root in ipairs(roots) do
         for _, d in ipairs(root:GetDescendants()) do
             if d:IsA("GuiObject") and not d:IsA("TextLabel") then
@@ -348,18 +372,44 @@ local function buildWorldNumbers()
                         num = num or shortNumber(t.Text)
                     end
                 end
-                if key and not map[key] then
+                if key and not entries[key] then
                     if not num then
                         for _, t in ipairs(d:GetDescendants()) do
                             if t:IsA("TextLabel") then num = shortNumber(t.Text) if num then break end end
                         end
                     end
-                    if not num and d.LayoutOrder > 0 then num = d.LayoutOrder end
-                    map[key] = num
+                    entries[key] = { text = num, layout = d.LayoutOrder }
                 end
             end
         end
     end
+    -- favourited worlds (star) get a different LayoutOrder so the game can pin
+    -- them to the top. Normal rows share a step (e.g. 10, 20, 30 ...); a row
+    -- that breaks the pattern is treated as favourited and its real position
+    -- comes from the saved cache instead.
+    local total, tens = 0, 0
+    for _, e in pairs(entries) do
+        if not e.text and e.layout > 0 then
+            total = total + 1
+            if e.layout % 10 == 0 then tens = tens + 1 end
+        end
+    end
+    local stepTen = total >= 10 and tens / total >= 0.6
+    local cache, changed = Data.LoadWorldOrderCache(), false
+    for key, e in pairs(entries) do
+        local num = e.text
+        if not num then
+            local ok = e.layout > 0 and (not stepTen or e.layout % 10 == 0)
+            if ok then num = e.layout end
+        end
+        if num then
+            if cache[key] ~= num then cache[key], changed = num, true end
+            map[key] = num
+        else
+            map[key] = cache[key]
+        end
+    end
+    if changed then Data.SaveWorldOrderCache(cache) end
     return map
 end
 function Data.ResetWorldCache()
