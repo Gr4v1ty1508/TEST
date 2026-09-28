@@ -14,7 +14,7 @@
       Open UI           open any in-game menu
       Hatch / Fuse      summon stars, fuse pets
       Passive           multi pet / slot / passive / rarity / machine reroll
-      Settings          auto sell, webhook, anti AFK, FPS, walk speed, spy
+      Settings          auto sell, webhook, anti AFK, ultra performance, walk speed, spy
       UI Settings       key, scale, accent (settings auto-save per account
                         to GravityHub/AFS/CONFIG/<player>.json)
 
@@ -2104,19 +2104,101 @@ function Features.Webhook(title)
     })
 end
 
-function Features.FpsBoost()
-    pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
-    Lighting.GlobalShadows = false
-    Lighting.FogEnd = 1e9
-    for _, fx in ipairs(Lighting:GetChildren()) do if fx:IsA("PostEffect") then fx.Enabled = false end end
-    local function lighten(o)
-        if o:IsA("BasePart") then o.Material = Enum.Material.SmoothPlastic o.Reflectance = 0 o.CastShadow = false
-        elseif o:IsA("ParticleEmitter") or o:IsA("Trail") or o:IsA("Beam") then o.Enabled = false
-        elseif o:IsA("Decal") or o:IsA("Texture") then o.Transparency = 1 end
+-- ULTRA PERFORMANCE -------------------------------------------------------------------
+-- only hides / disables visuals; nothing the script farms with (enemies, pickups,
+-- prompts, timers) is destroyed, so every feature keeps working
+local RunService = game:GetService("RunService")
+local Perf = { on = false, conns = {}, saved = nil }
+
+local function perfObject(o)
+    if o:IsA("BasePart") then
+        o.Material = Enum.Material.SmoothPlastic
+        o.Reflectance = 0
+        o.CastShadow = false
+        if o:IsA("MeshPart") then pcall(function() o.RenderFidelity = Enum.RenderFidelity.Performance end) end
+    elseif o:IsA("ParticleEmitter") or o:IsA("Trail") or o:IsA("Beam") or o:IsA("Smoke")
+        or o:IsA("Fire") or o:IsA("Sparkles") or o:IsA("Light") or o:IsA("Highlight") then
+        o.Enabled = false
+    elseif o:IsA("Explosion") then
+        o.Visible = false
+    elseif o:IsA("Decal") or o:IsA("Texture") then
+        o.Transparency = 1
+    elseif o:IsA("SurfaceAppearance") then
+        o:Destroy()
     end
-    for _, o in ipairs(workspace:GetDescendants()) do pcall(lighten, o) end
-    track(workspace.DescendantAdded:Connect(function(o) pcall(lighten, o) end))
-    Util.Notify("FPS boost on")
+end
+
+function Features.UltraPerformance(on)
+    if on == Perf.on then return end
+    Perf.on = on
+    for _, c in ipairs(Perf.conns) do pcall(function() c:Disconnect() end) end
+    Perf.conns = {}
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if on then
+        Perf.saved = Perf.saved or { Shadows = Lighting.GlobalShadows, FogEnd = Lighting.FogEnd }
+        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+        pcall(function() if sethiddenproperty then sethiddenproperty(Lighting, "Technology", Enum.Technology.Compatibility) end end)
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 1e9
+        for _, fx in ipairs(Lighting:GetChildren()) do
+            pcall(function()
+                if fx:IsA("PostEffect") then fx.Enabled = false
+                elseif fx:IsA("Atmosphere") then fx.Density = 0 fx.Haze = 0 fx.Glare = 0 end
+            end)
+        end
+        if terrain then
+            pcall(function()
+                terrain.WaterWaveSize, terrain.WaterWaveSpeed, terrain.WaterReflectance = 0, 0, 0
+                terrain.Decoration = false
+            end)
+            local clouds = terrain:FindFirstChildOfClass("Clouds")
+            if clouds then pcall(function() clouds.Enabled = false end) end
+        end
+        -- whole map in chunks so the game doesn't freeze while it runs
+        task.spawn(function()
+            local all = workspace:GetDescendants()
+            for i, o in ipairs(all) do
+                if not Perf.on then return end
+                pcall(perfObject, o)
+                if i % 1500 == 0 then task.wait() end
+            end
+        end)
+        Perf.conns[#Perf.conns + 1] = track(workspace.DescendantAdded:Connect(function(o)
+            if Perf.on then task.defer(function() pcall(perfObject, o) end) end
+        end))
+        Perf.conns[#Perf.conns + 1] = track(Lighting.ChildAdded:Connect(function(fx)
+            pcall(function() if fx:IsA("PostEffect") then fx.Enabled = false end end)
+        end))
+        Util.Notify("Ultra Performance on")
+    else
+        if Perf.saved then
+            Lighting.GlobalShadows = Perf.saved.Shadows
+            Lighting.FogEnd = Perf.saved.FogEnd
+        end
+        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic end)
+        Util.Notify("Ultra Performance off - rejoin to bring back all textures / effects")
+    end
+end
+
+-- other players' characters (their pets / effects follow them) hidden on your screen only
+local function setPlayerHidden(plr, hidden)
+    local char = plr.Character
+    if not char then return end
+    for _, o in ipairs(char:GetDescendants()) do
+        pcall(function()
+            if o:IsA("BasePart") or o:IsA("Decal") then o.LocalTransparencyModifier = hidden and 1 or 0
+            elseif o:IsA("BillboardGui") or o:IsA("ParticleEmitter") or o:IsA("Trail") then o.Enabled = not hidden end
+        end)
+    end
+end
+function Features.HideOthers(hidden)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then setPlayerHidden(plr, hidden) end
+    end
+end
+
+function Features.Disable3D(off)
+    pcall(function() RunService:Set3dRenderingEnabled(not off) end)
 end
 
 -- BRAIN: one owner of the character at a time ----------------------------------------------------
@@ -2401,7 +2483,16 @@ do
     local g = TSettings:Card("Game", "Left")
     g:Toggle({ Title = "Anti AFK", Default = true, Flag = "AntiAFK" })
     g:Slider({ Title = "Walk Speed", Min = 16, Max = 200, Default = 16, Flag = "WalkSpeed" })
-    g:Button({ Title = "FPS Boost", Callback = Features.FpsBoost })
+
+    local up = TSettings:Card("Ultra Performance", "Left")
+    up:Paragraph({ Body = "Removes shadows, textures, particles, lights, water and post effects that drop FPS. Farming keeps working. Turning it off fully needs a rejoin." })
+    up:Toggle({ Title = "Ultra Performance", Flag = "UltraPerf", Callback = function(v) Features.UltraPerformance(v) end })
+    up:Toggle({ Title = "Hide Other Players", Flag = "HideOthers", Callback = function(v) Features.HideOthers(v) end })
+    up:Toggle({ Title = "Disable 3D Rendering (AFK / black screen)", Flag = "No3D", Callback = function(v) Features.Disable3D(v) end })
+    if setfpscap then
+        up:Slider({ Title = "FPS Cap", Min = 15, Max = 240, Default = 60, Silent = true, Flag = "FpsCap",
+            Callback = function(v) pcall(setfpscap, v) end })
+    end
     local spy = TSettings:Card("Remote Spy", "Right")
     spy:Paragraph({ Body = "Turn on, do the action once by hand (e.g. start a dungeon), then press Copy Log and send it to fix CFG.Calls. Log is also saved to GravityHub/AFS/spy_log.txt." })
     spy:Toggle({ Title = "Remote Spy", Flag = "RemoteSpy", Callback = function(v)
@@ -2563,6 +2654,7 @@ end
 loop(0.1, Brain)
 loop(0.05, function() if On("AutoClick") then Net.Call("Click") end end)
 loop(0.5, function() if On("AutoCollect") then Features.Collect() end end)
+loop(3, function() if On("HideOthers") then Features.HideOthers(true) end end)
 loop(1, function() if On("AttackUlt") then Features.Ult() end end)
 loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") then Features.Hatch() end end)
 loop(3, function() if On("AutoFuse") then Features.Fuse() end end)
