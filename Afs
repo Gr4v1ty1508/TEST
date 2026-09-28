@@ -1961,7 +1961,7 @@ function Features.RoomCenter()
     local tower = Worlds:FindFirstChild("Tower")
     if not tower then return nil end
     -- room 1: the door we joined points at its run's first room (Door<n>.StartRoom)
-    if (n == nil or n == 1) and trialDoorId then
+    if n == 1 and trialDoorId then   -- only once the run has started (never from the lobby)
         local door = Features.DoorModel(trialDoorId)
         local sr = door and door:FindFirstChild("StartRoom")
         local c = sr and sr:IsA("ObjectValue") and centerOf(sr.Value)
