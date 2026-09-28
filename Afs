@@ -257,8 +257,29 @@ local function sortedKeys(tbl)
     return out
 end
 
+-- a farm world is listed in WorldData; mode maps added in future updates
+-- (no WorldData entry) are skipped automatically. Falls back to name rules
+-- when WorldData can't be read.
+local worldDataHits = nil
+local function worldDataUsable()
+    if worldDataHits == nil then
+        worldDataHits = 0
+        local wd = Data.Module("WorldData")
+        if wd then
+            for _, f in ipairs(Worlds:GetChildren()) do
+                if type(wd[f.Name]) == "table" then worldDataHits = worldDataHits + 1 end
+            end
+        end
+    end
+    return worldDataHits >= 10
+end
 function Data.IsFarmWorld(folder)
-    return folder:IsA("Folder") and not CFG.ModeWorlds[folder.Name] and not string.find(folder.Name, "Gamemode", 1, true)
+    if not folder:IsA("Folder") or CFG.ModeWorlds[folder.Name] or string.find(folder.Name, "Gamemode", 1, true) then return false end
+    if worldDataUsable() then
+        local wd = Data.Module("WorldData")
+        return type(wd[folder.Name]) == "table"
+    end
+    return true
 end
 
 function Data.IsFarmWorldName(name)
@@ -334,6 +355,10 @@ local function buildWorldNumbers()
     end
     return map
 end
+function Data.ResetWorldCache()
+    worldNumCache = nil
+    worldDataHits = nil
+end
 function Data.WorldNumber(name)
     if not worldNumCache or os.clock() - worldNumTime > 10 then
         local ok, res = pcall(buildWorldNumbers)
@@ -356,7 +381,31 @@ function Data.FromLabel(label)
     if type(label) ~= "string" then return label end
     if labelToWorld[label] then return labelToWorld[label] end
     if Worlds:FindFirstChild(label) then return label end
-    return string.match(label, "| (.+)$") or string.match(label, "%((.-)%)$") or label  -- old config labels
+    local old = string.match(label, "| (.+)$") or string.match(label, "%((.-)%)$")  -- old config labels
+    if old then return old end
+    -- "22 Icy Wastes" saved before the game renumbered its worlds -> match by name
+    local display = string.match(label, "^%d+ (.+)$") or label
+    for _, f in ipairs(Worlds:GetChildren()) do
+        if f:IsA("Folder") and Data.WorldDisplay(f.Name) == display then return f.Name end
+    end
+    return label
+end
+
+-- refresh a world dropdown and keep what was selected even if labels changed
+function Data.RefreshWorldDrop(drop, labels)
+    local cur = drop:Get()
+    drop:Refresh(labels)
+    local function relabel(l)
+        local key = Data.FromLabel(l)
+        return Worlds:FindFirstChild(key or "") and Data.WorldLabel(key) or l
+    end
+    if type(cur) == "table" then
+        local set = {}
+        for l, on in pairs(cur) do if on then set[relabel(l)] = true end end
+        drop:Set(set, true)
+    elseif type(cur) == "string" then
+        drop:Set(relabel(cur), true)
+    end
 end
 
 -- event world = name has "Event" / "Gamemode", or WorldData marks it as an event
@@ -2029,7 +2078,7 @@ do
     c:Toggle({ Title = "Teleport While Farm", Default = true, Flag = "TeleportFarm", Callback = function(v) Combat.Options.Teleport = v end })
     c:Toggle({ Title = "Auto Farm Mobs", Flag = "AutoFarm" })
     Refreshers[#Refreshers + 1] = function()
-        worlds:Refresh(Data.FarmWorldLabels())
+        Data.RefreshWorldDrop(worlds, Data.FarmWorldLabels())
         mobs:Refresh(Features.Monsters())
     end
     c:Button({ Title = "Refresh Mobs", Callback = function() mobs:Refresh(Features.Monsters()) end })
@@ -2071,7 +2120,12 @@ do
         local w = F("TpWorld")
         if w then Net.Call("DiscoverWorld", Data.FromLabel(w)) end
     end })
-    Refreshers[#Refreshers + 1] = function() drop:Refresh(Data.FarmWorldLabels()) end
+    Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(drop, Data.FarmWorldLabels()) end
+    c:Button({ Title = "Refresh World List", Callback = function()
+        Data.ResetWorldCache()
+        for _, fn in ipairs(Refreshers) do pcall(fn) end
+        Util.Notify(#Data.FarmWorlds() .. " worlds loaded")
+    end })
 end
 
 -- TIME TRIAL / TOWER ----------------------------------------------------------------------
@@ -2121,7 +2175,7 @@ do
 
     Refreshers[#Refreshers + 1] = function()
         local labels = Data.FarmWorldLabels()
-        rw:Refresh(labels) mw:Refresh(labels) dw:Refresh(labels)
+        Data.RefreshWorldDrop(rw, labels) Data.RefreshWorldDrop(mw, labels) Data.RefreshWorldDrop(dw, labels)
     end
 end
 
@@ -2136,7 +2190,7 @@ do
     d:Toggle({ Title = "Auto Dungeon Selected", Flag = "AutoDungeon" })
     Features.DungeonLabel = runs
     d:Button({ Title = "Teleport To Dungeon Lobby", Callback = function() Travel.To("Dungeon", true) end })
-    Refreshers[#Refreshers + 1] = function() dw:Refresh(Data.FarmWorldLabels()) end
+    Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(dw, Data.FarmWorldLabels()) end
 
     local g = TDungeon:Card("Auto Gate !", "Right")
     local gateRuns = g:Label("Runs : 0")
@@ -2156,7 +2210,7 @@ do
     e:Paragraph({ Body = "Every event / game-mode world in the map is listed here, so new events (Blood Moon, Sea King, ...) show up after a game update without a script update." })
     local ew = e:Dropdown({ Title = "Select Event", Items = Data.EventWorlds(), Multi = true, Flag = "EventWorlds" })
     e:Toggle({ Title = "Auto Farm Event", Flag = "AutoEvent" })
-    Refreshers[#Refreshers + 1] = function() ew:Refresh(Data.EventWorlds()) end
+    Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(ew, Data.EventWorlds()) end
 
     local b = TMode:Card("Global Boss", "Right")
     b:Toggle({ Title = "Auto Global Boss", Flag = "AutoGlobalBoss" })
@@ -2304,9 +2358,11 @@ local function queueRefresh()
     refreshQueued = true
     task.delay(1.5, function()
         refreshQueued = false
+        Data.ResetWorldCache()
         for _, fn in ipairs(Refreshers) do pcall(fn) end
     end)
 end
+
 track(Worlds.ChildAdded:Connect(function(child)
     task.wait(1)
     if child:IsA("Folder") then Util.Notify("New map found: " .. child.Name) end
@@ -2452,6 +2508,27 @@ end)
 
 -- auto load this account's config, then auto save every 3 s when something changed
 pcall(function() Window:LoadConfig() end)
+for _, fn in ipairs(Refreshers) do pcall(fn) end
+
+-- auto update: every 30 s compare the world list with what the dropdowns show;
+-- a new world, a removed world or new numbering refreshes every list by itself
+local lastWorldSig = nil
+local function worldSignature()
+    Data.ResetWorldCache()
+    return table.concat(Data.FarmWorldLabels(), "\n") .. "#" .. table.concat(Data.EventWorlds(), "\n")
+end
+task.spawn(function()
+    lastWorldSig = worldSignature()
+    while running do
+        task.wait(30)
+        local ok, sig = pcall(worldSignature)
+        if ok and sig ~= lastWorldSig then
+            lastWorldSig = sig
+            for _, fn in ipairs(Refreshers) do pcall(fn) end
+            Util.Notify("World list updated")
+        end
+    end
+end)
 task.spawn(function()
     while running and autoSave do
         task.wait(3)
