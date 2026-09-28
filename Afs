@@ -5,7 +5,7 @@
     Tabs
       Main              auto farm (worlds / mobs / mode), quest, click, collect,
                         ult, mount, pet TP, next world, rebirth, re-equip pets
-      Teleport          any world or mode, lists update live
+      Teleport          any world (numbered like the in-game list)
       Time Trial/Tower  trials multi-select, leave on floor, Infinity Tower
       Raid/Defense/Met. raid world + mode, defense, meteor / fallen star
       Dungeon/Gate/Time dungeon size + world, gates rank + amount, time chamber
@@ -89,6 +89,7 @@ local CFG = {
         { "Aura Machine UI", "AuraMachine" }, { "Time Trial Shop UI", "TimeTrialShop" },
         { "Rebirth UI", "Rebirth" }, { "Merchant UI", "Merchant" },
         { "Black Market UI", "BlackMarket" }, { "Passive Transfer UI", "PassiveTransfer" },
+        { "Mega Booster UI", "MegaBooster" },
     },
 
     -- key = { RemoteName, function(...) return { args } end }
@@ -270,42 +271,92 @@ function Data.WorldInfo(name)
     return wd and type(wd[name]) == "table" and wd[name] or nil
 end
 
-function Data.WorldLabel(name)
+function Data.WorldDisplay(name)
     local info = Data.WorldInfo(name)
-    local display = info and (info.Name or info.DisplayName or info.Title)
-    if type(display) == "string" and display ~= name then return display .. " | " .. name end
-    return name
+    local display = info and (info.Name or info.DisplayName or info.Title or info.WorldName)
+    return type(display) == "string" and display or name
+end
+
+-- world number as shown in the game's travel list ("22 Icy Wastes").
+-- 1) a number field in WorldData, 2) the travel GUI (badge text / LayoutOrder)
+local worldNumCache, worldNumTime = nil, 0
+local NUMBER_FIELDS = { "WorldNumber", "Number", "Num", "Order", "Index", "LayoutOrder", "WorldIndex", "Id", "ID" }
+local function shortNumber(text)
+    if type(text) ~= "string" or #text > 14 then return nil end
+    local n = string.match(text, "^%D*(%d+)%D*$")
+    return n and tonumber(n) or nil
+end
+local function buildWorldNumbers()
+    local map, byDisplay = {}, {}
+    for _, f in ipairs(Worlds:GetChildren()) do
+        if f:IsA("Folder") then
+            local info = Data.WorldInfo(f.Name)
+            if info then
+                for _, k in ipairs(NUMBER_FIELDS) do
+                    if type(info[k]) == "number" then map[f.Name] = info[k] break end
+                end
+            end
+            byDisplay[string.lower(Data.WorldDisplay(f.Name))] = f.Name
+            byDisplay[string.lower(f.Name)] = f.Name
+        end
+    end
+    if next(map) then return map end
+    -- fallback: read the in-game travel list
+    local pg = LP:FindFirstChild("PlayerGui")
+    local roots = {}
+    if pg then
+        local mg = pg:FindFirstChild("MainGui")
+        if mg and mg:FindFirstChild("Travel") then roots[#roots + 1] = mg.Travel end
+        if pg:FindFirstChild("Travel") then roots[#roots + 1] = pg.Travel end
+    end
+    for _, root in ipairs(roots) do
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("GuiObject") and not d:IsA("TextLabel") then
+                local key = byDisplay[string.lower(d.Name)]
+                local num
+                for _, t in ipairs(d:GetChildren()) do
+                    if t:IsA("TextLabel") or t:IsA("TextButton") then
+                        key = key or byDisplay[string.lower(t.Text)]
+                        num = num or shortNumber(t.Text)
+                    end
+                end
+                if key and not map[key] then
+                    if not num then
+                        for _, t in ipairs(d:GetDescendants()) do
+                            if t:IsA("TextLabel") then num = shortNumber(t.Text) if num then break end end
+                        end
+                    end
+                    if not num and d.LayoutOrder > 0 then num = d.LayoutOrder end
+                    map[key] = num
+                end
+            end
+        end
+    end
+    return map
+end
+function Data.WorldNumber(name)
+    if not worldNumCache or os.clock() - worldNumTime > 10 then
+        local ok, res = pcall(buildWorldNumbers)
+        worldNumCache, worldNumTime = ok and res or {}, os.clock()
+    end
+    return worldNumCache[name]
+end
+
+-- dropdown label -> world key (labels are "22 Icy Wastes")
+local labelToWorld = {}
+function Data.WorldLabel(name)
+    local num, display = Data.WorldNumber(name), Data.WorldDisplay(name)
+    local label = num and (tostring(num) .. " " .. display) or display
+    if labelToWorld[label] and labelToWorld[label] ~= name then label = label .. " (" .. name .. ")" end
+    labelToWorld[label] = name
+    return label
 end
 
 function Data.FromLabel(label)
     if type(label) ~= "string" then return label end
-    return string.match(label, "| (.+)$") or label
-end
-
--- farm worlds in game order when WorldData has an order field
-function Data.FarmWorlds()
-    local list = {}
-    for _, f in ipairs(Worlds:GetChildren()) do
-        if Data.IsFarmWorld(f) then list[#list + 1] = f.Name end
-    end
-    local function order(n)
-        local info = Data.WorldInfo(n)
-        local o = info and (info.Order or info.Index or info.LayoutOrder or info.Id)
-        return type(o) == "number" and o or math.huge
-    end
-    table.sort(list, function(a, b)
-        local oa, ob = order(a), order(b)
-        if oa ~= ob then return oa < ob end
-        return a < b
-    end)
-    return list
-end
-
--- world order number from WorldData (nil when the game doesn't give one)
-function Data.WorldOrder(name)
-    local info = Data.WorldInfo(name)
-    local o = info and (info.Order or info.Index or info.LayoutOrder or info.Id)
-    return type(o) == "number" and o or nil
+    if labelToWorld[label] then return labelToWorld[label] end
+    if Worlds:FindFirstChild(label) then return label end
+    return string.match(label, "| (.+)$") or string.match(label, "%((.-)%)$") or label  -- old config labels
 end
 
 -- event world = name has "Event" / "Gamemode", or WorldData marks it as an event
@@ -315,26 +366,35 @@ function Data.IsEventWorld(name)
     return info ~= nil and (info.Event == true or info.IsEvent == true or info.Type == "Event")
 end
 
--- display order for dropdowns: event worlds on top, then newest update first
--- (highest WorldData order first; worlds with no order are treated as newest)
-function Data.SortForDisplay(list)
-    local function rank(n)
-        return Data.WorldOrder(n) or math.huge
+-- game order: world 1, 2, 3 ... (worlds without a number go last, A-Z)
+local function byNumber(a, b)
+    local na, nb = Data.WorldNumber(a) or math.huge, Data.WorldNumber(b) or math.huge
+    if na ~= nb then return na < nb end
+    return a < b
+end
+
+function Data.FarmWorlds()
+    local list = {}
+    for _, f in ipairs(Worlds:GetChildren()) do
+        if Data.IsFarmWorld(f) then list[#list + 1] = f.Name end
     end
+    table.sort(list, byNumber)
+    return list
+end
+
+-- display order for dropdowns: event worlds on top, then world 1, 2, 3 ...
+function Data.SortForDisplay(list)
     table.sort(list, function(a, b)
         local ea, eb = Data.IsEventWorld(a), Data.IsEventWorld(b)
         if ea ~= eb then return ea end
-        local ra, rb = rank(a), rank(b)
-        if ra ~= rb then return ra > rb end
-        return a < b
+        return byNumber(a, b)
     end)
     return list
 end
 
 function Data.FarmWorldLabels()
-    local list, out = {}, {}
-    for _, n in ipairs(Data.FarmWorlds()) do list[#list + 1] = n end
-    for _, n in ipairs(Data.SortForDisplay(list)) do out[#out + 1] = Data.WorldLabel(n) end
+    local out = {}
+    for _, n in ipairs(Data.SortForDisplay(Data.FarmWorlds())) do out[#out + 1] = Data.WorldLabel(n) end
     return out
 end
 
@@ -517,7 +577,6 @@ function Combat.Attack(e, wanted)
             root.CFrame = part.CFrame * CFrame.new(0, 0, 4)
         end
         if SendPet then pcall(SendPet.Fire, SendPet, e, true) end
-        if Combat.Options.Ult and Util.Every("ult", 1) then Net.Call("UseAbility") end
         task.wait()
     end
 end
@@ -1361,16 +1420,115 @@ function Features.NextWorld()
     end
 end
 
-function Features.Collect()
-    local root = Util.Root()
-    local effects = workspace:FindFirstChild("Effects")
-    if not root or not effects then return end
-    for _, drop in ipairs(effects:GetChildren()) do
-        if drop.Name == "Yen" or string.find(drop.Name, "Pickup", 1, true) or string.find(drop.Name, "Drop", 1, true) then
-            local part = drop:IsA("BasePart") and drop or drop:FindFirstChild("Base") or drop:FindFirstChildWhichIsA("BasePart")
-            if part then part.CFrame = root.CFrame end
+-- fire every client handler hooked to a GUI signal (executor getconnections / firesignal)
+local function fireGui(obj, signalNames)
+    for _, sig in ipairs(signalNames) do
+        local ok, signal = pcall(function() return obj[sig] end)
+        if ok and signal then
+            if firesignal then
+                pcall(firesignal, signal)
+            elseif getconnections then
+                pcall(function() for _, c in ipairs(getconnections(signal)) do c:Fire() end end)
+            end
         end
     end
+end
+Features.FireGui = fireGui
+
+local PICKUP_WORDS = { "Yen", "Pickup", "Drop", "Coin", "Orb", "Gem", "Item", "Fruit", "Ticket", "Shard", "Boost", "Key" }
+local function isPickup(name)
+    for _, w in ipairs(PICKUP_WORDS) do if string.find(name, w, 1, true) then return true end end
+    return false
+end
+local function touch(root, part)
+    if firetouchinterest then
+        pcall(firetouchinterest, root, part, 0)
+        pcall(firetouchinterest, root, part, 1)
+    end
+    if not part.Anchored or firetouchinterest == nil then pcall(function() part.CFrame = root.CFrame end) end
+end
+function Features.Collect()
+    local root = Util.Root()
+    if not root then return end
+    -- 1) drops in the world (workspace.Effects / any Pickups folder)
+    local folders = {}
+    local effects = workspace:FindFirstChild("Effects")
+    if effects then folders[#folders + 1] = effects end
+    for _, name in ipairs({ "Pickups", "Drops" }) do
+        local f = workspace:FindFirstChild(name)
+        if f then folders[#folders + 1] = f end
+    end
+    for _, folder in ipairs(folders) do
+        for _, drop in ipairs(folder:GetChildren()) do
+            if folder ~= effects or isPickup(drop.Name) then
+                if drop:IsA("BasePart") then touch(root, drop)
+                else
+                    for _, part in ipairs(drop:GetDescendants()) do
+                        if part:IsA("BasePart") then touch(root, part) end
+                    end
+                end
+            end
+        end
+    end
+    -- 2) on-screen pickups (PickupGui): run the game's own collect handlers
+    local pg = LP:FindFirstChild("PlayerGui")
+    local gui = pg and pg:FindFirstChild("PickupGui")
+    local holder = gui and gui:FindFirstChild("Pickups")
+    if holder then
+        for _, b in ipairs(holder:GetDescendants()) do
+            if b:IsA("GuiButton") then
+                fireGui(b, { "MouseEnter", "MouseButton1Down", "MouseButton1Click", "Activated" })
+            elseif b:IsA("GuiObject") and b.Parent == holder then
+                fireGui(b, { "MouseEnter" })
+            end
+        end
+    end
+end
+
+-- ULT ---------------------------------------------------------------------------------
+-- uses the ultimate the same way the player does: the R button on screen, the R key,
+-- and the UseAbility remote as a last resort
+local VIM = game:GetService("VirtualInputManager")
+function Features.Ult()
+    local mg = Data.MainGui()
+    local btn = mg and mg:FindFirstChild("R")
+    if btn then
+        local target = btn:IsA("GuiButton") and btn or btn:FindFirstChildWhichIsA("GuiButton", true)
+        if target then fireGui(target, { "MouseButton1Down", "MouseButton1Click", "Activated" }) end
+    end
+    pcall(function()
+        VIM:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+        task.wait(0.05)
+        VIM:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+    end)
+    Net.Call("UseAbility")
+end
+
+-- MOUNT -------------------------------------------------------------------------------
+local MountAssets = RS:FindFirstChild("ReplicatedAssets") and RS.ReplicatedAssets:FindFirstChild("Mounts")
+function Features.IsMounted()
+    local m = LP:FindFirstChild("Mounting")
+    if m and m:IsA("BoolValue") then return m.Value end
+    local hum, char = Util.Humanoid(), LP.Character
+    if hum and (hum.Sit or hum.SeatPart) then return true end
+    if char and MountAssets then
+        for _, c in ipairs(char:GetChildren()) do
+            if c:IsA("Model") and MountAssets:FindFirstChild(c.Name) then return true end
+        end
+    end
+    return false
+end
+function Features.Mount()
+    if Features.IsMounted() then return end
+    Net.Call("Mount", true)
+    task.wait(1.5)
+    if Features.IsMounted() then return end
+    local tm = Bindables:FindFirstChild("ToggleMount")
+    if tm then pcall(tm.Fire, tm) return end
+    local mg = Data.MainGui()
+    local frame = mg and mg:FindFirstChild("MountButtonFrame")
+    local b = frame and frame:FindFirstChildWhichIsA("GuiButton", true)
+    if b then fireGui(b, { "MouseButton1Click", "Activated" }) end
 end
 
 -- TIME TRIAL / TOWER ----------------------------------------------------------------
@@ -1914,14 +2072,6 @@ do
         if w then Net.Call("DiscoverWorld", Data.FromLabel(w)) end
     end })
     Refreshers[#Refreshers + 1] = function() drop:Refresh(Data.FarmWorldLabels()) end
-
-    local m = TTeleport:Card("Teleport Mode", "Right")
-    local modes = m:Dropdown({ Title = "Select Mode World", Items = Data.AllWorlds(), Flag = "TpMode" })
-    m:Button({ Title = "Teleport", Callback = function()
-        local w = F("TpMode")
-        if w then Travel.To(w, true) end
-    end })
-    Refreshers[#Refreshers + 1] = function() modes:Refresh(Data.AllWorlds()) end
 end
 
 -- TIME TRIAL / TOWER ----------------------------------------------------------------------
@@ -2268,7 +2418,8 @@ end
 
 loop(0.1, Brain)
 loop(0.05, function() if On("AutoClick") then Net.Call("Click") end end)
-loop(1, function() if On("AutoCollect") then Features.Collect() end end)
+loop(0.5, function() if On("AutoCollect") then Features.Collect() end end)
+loop(1, function() if On("AttackUlt") then Features.Ult() end end)
 loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") then Features.Hatch() end end)
 loop(3, function() if On("AutoFuse") then Features.Fuse() end end)
 loop(0.2, function() if On("AutoPassive") then Features.Passive() end end)
@@ -2278,10 +2429,7 @@ local lastWebhook = os.clock()
 loop(1, function()
     if On("AutoRebirth") and Util.Every("rebirth", 5) then Net.Call("Rebirth") end
     if On("AutoNextWorld") and Util.Every("nextworld", 15) then Features.NextWorld() end
-    if On("AutoMount") and Util.Every("mount", 10) then
-        local m = LP:FindFirstChild("Mounting")
-        if not m or not m.Value then Net.Call("Mount", true) end
-    end
+    if On("AutoMount") and Util.Every("mount", 5) then Features.Mount() end
     if On("AutoReEquip") and Util.Every("reequip", (F("ReEquipDelay") or 2) * 60) then Net.Call("ReEquipPets") end
     if On("AutoSpin") and Util.Every("spin", 60) then Net.Call("DailySpin") end
     if On("AutoTicket") and Util.Every("ticket", 60) then Net.Call("ClaimTicket") end
