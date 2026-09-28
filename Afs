@@ -81,6 +81,13 @@ local CFG = {
         Portal = true, MachineWorld = true,
     },
 
+    -- worlds pinned to the TOP of every world list, in this order.
+    -- write the name exactly as the list shows it (not case sensitive)
+    PinnedWorlds = {
+        "Patrick Event", "Christmas 2025", "Super Island",
+        "Easter Event 2026", "Beyond The Valentine", "Summer (2025) Island",
+    },
+
     -- worlds hidden from every world list (can't be teleported to any more).
     -- match = start of the name shown in the list, not case sensitive
     HiddenWorlds = {
@@ -498,9 +505,22 @@ function Data.FarmWorlds()
     return list
 end
 
--- display order for dropdowns: event worlds on top, then world 1, 2, 3 ...
+-- position in CFG.PinnedWorlds (nil = not pinned)
+function Data.PinIndex(name)
+    local d, k = string.lower(Data.WorldDisplay(name)), string.lower(name)
+    for i, p in ipairs(CFG.PinnedWorlds) do
+        local pl = string.lower(p)
+        if d == pl or k == pl then return i end
+    end
+    return nil
+end
+
+-- display order for dropdowns: CFG.PinnedWorlds first (in that order),
+-- then other event worlds, then world 1, 2, 3 ...
 function Data.SortForDisplay(list)
     table.sort(list, function(a, b)
+        local pa, pb = Data.PinIndex(a) or math.huge, Data.PinIndex(b) or math.huge
+        if pa ~= pb then return pa < pb end
         local ea, eb = Data.IsEventWorld(a), Data.IsEventWorld(b)
         if ea ~= eb then return ea end
         return byNumber(a, b)
