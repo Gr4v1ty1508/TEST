@@ -367,11 +367,16 @@ function Data.WorldNumber(name)
     return worldNumCache[name]
 end
 
--- dropdown label -> world key (labels are "22 Icy Wastes")
+-- worlds the game hasn't released yet show a placeholder name ("Locked?", "???")
+function Data.IsHiddenWorld(name)
+    local d = string.lower(Data.WorldDisplay(name))
+    return string.find(d, "lock", 1, true) ~= nil or string.match(d, "^[%?%s]*$") ~= nil
+end
+
+-- dropdown label -> world key (label = the world's name, sorted by game order)
 local labelToWorld = {}
 function Data.WorldLabel(name)
-    local num, display = Data.WorldNumber(name), Data.WorldDisplay(name)
-    local label = num and (tostring(num) .. " " .. display) or display
+    local label = Data.WorldDisplay(name)
     if labelToWorld[label] and labelToWorld[label] ~= name then label = label .. " (" .. name .. ")" end
     labelToWorld[label] = name
     return label
@@ -425,7 +430,7 @@ end
 function Data.FarmWorlds()
     local list = {}
     for _, f in ipairs(Worlds:GetChildren()) do
-        if Data.IsFarmWorld(f) then list[#list + 1] = f.Name end
+        if Data.IsFarmWorld(f) and not Data.IsHiddenWorld(f.Name) then list[#list + 1] = f.Name end
     end
     table.sort(list, byNumber)
     return list
@@ -450,7 +455,8 @@ end
 function Data.EventWorlds()
     local out = {}
     for _, f in ipairs(Worlds:GetChildren()) do
-        if f:IsA("Folder") and (string.find(f.Name, "Gamemode", 1, true) or string.find(f.Name, "Event", 1, true)) then
+        if f:IsA("Folder") and (string.find(f.Name, "Gamemode", 1, true) or string.find(f.Name, "Event", 1, true))
+            and not Data.IsHiddenWorld(f.Name) then
             out[#out + 1] = f.Name
         end
     end
