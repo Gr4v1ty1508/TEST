@@ -1856,6 +1856,15 @@ function Features.TimeTrial()
         if #trials > 0 and #Combat.List("Tower") == 0 and Stats.TrialFloor == 0 then
             Features.TryJoinTrial(trials)   -- lobby: join when the selected door is about to open
         end
+        -- like Yuto Hub: go to the middle of the current room ("Room N" on screen)
+        local center = Features.RoomCenter()
+        local root = Util.Root()
+        if center and root and (root.Position - center).Magnitude > 40 then
+            pcall(function() LP:RequestStreamAroundAsync(center) end)
+            Util.MoveTo(CFrame.new(center + Vector3.new(0, 5, 0)))
+            task.wait(0.6)
+            return true
+        end
         -- enemies of the current room exist but aren't loaded near us (the game only
         -- loads what's close): go to where they are so they load, then fight
         local waiting = Features.TowerEnemyTargets()
@@ -1915,6 +1924,52 @@ function Features.TrialCountdown()
     end
     if trialStartsAt and trialStartsAt - os.clock() > -5 then return trialStartsAt - os.clock() end
     return nil
+end
+
+-- current trial room number, read from the "Room N" text on screen
+function Features.CurrentRoom()
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("TextLabel") and d.Visible then
+            local n = string.match(d.Text, "^%s*Room%s*(%d+)%s*$")
+            if n then return tonumber(n) end
+        end
+    end
+    return nil
+end
+
+-- middle of the current room: a model / folder in the Tower named like "Room1",
+-- "Room 1", "Room_1" or "1" inside a Rooms folder. nil if the map doesn't have one.
+local roomCache = {}
+function Features.RoomCenter()
+    local n = Features.CurrentRoom()
+    local tower = Worlds:FindFirstChild("Tower")
+    if not n or not tower then return nil end
+    local hit = roomCache[n]
+    if not hit or not hit.Parent then
+        hit = nil
+        for _, d in ipairs(tower:GetDescendants()) do
+            if d:IsA("Model") or d:IsA("Folder") then
+                local num = string.match(d.Name, "^[Rr]oom[%s_]*(%d+)$")
+                    or (d.Parent and string.find(string.lower(d.Parent.Name), "room", 1, true) and string.match(d.Name, "^(%d+)$"))
+                if num and tonumber(num) == n then hit = d break end
+            end
+        end
+        roomCache[n] = hit
+    end
+    if not hit then return nil end
+    if hit:IsA("Model") then
+        local ok, cf = pcall(hit.GetBoundingBox, hit)
+        if ok and cf then return cf.Position end
+        local ok2, pv = pcall(hit.GetPivot, hit)
+        return ok2 and pv.Position or nil
+    end
+    local sum, count = Vector3.zero, 0
+    for _, p in ipairs(hit:GetDescendants()) do
+        if p:IsA("BasePart") then sum, count = sum + p.Position, count + 1 end
+    end
+    return count > 0 and sum / count or nil
 end
 
 -- positions of enemies in the Tower that exist but aren't loaded near us yet.
