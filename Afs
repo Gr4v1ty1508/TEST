@@ -61,6 +61,8 @@ local CFG = {
     TimeTrials   = { "Lesser", "Medium", "Greater", "Ultimate", "Ultra Hard", "Insane", "Godly", "Infinite" },
     RaidModes    = { "Normal", "Master" },
     DungeonSizes = { "Small", "Medium", "Large", "Insane", "Hellish" },
+    -- what SummonDungeon gets for each size (change to numbers 1-5 if Remote Spy shows numbers)
+    DungeonSizeArg = { Small = "Small", Medium = "Medium", Large = "Large", Insane = "Insane", Hellish = "Hellish" },
     GateRanks    = { "E", "D", "C", "B", "A", "S", "X", "Z", "Anniversary" },
     PassiveMachines = { "Normal", "Requiem", "Summer", "Christmas", "Valentine", "Patrick", "Easter" },
     RerollMethods   = { "Token", "Shard" },
@@ -108,6 +110,7 @@ local CFG = {
         JoinDefense     = { "TargetHubEvent",           function(world, friendsOnly) return { "Defense", world, friendsOnly } end },
         JoinGlobalBoss  = { "JoinGlobalBossArena",      function() return {} end },
 
+        DungeonLobby    = { "AttemptTravel",            function() return { "Dungeon" } end },
         SummonDungeon   = { "SummonDungeon",            function(size, world, useArtifact) return { size, world, useArtifact } end },
         JoinDungeon     = { "JoinDungeon",              function() return {} end },
         OpenDungeonDoor = { "OpenDungeonDoor",          function(door) return { door } end },
@@ -524,18 +527,61 @@ function Prompt.Use(p)
 end
 
 local Travel = { LoadEnemies = true }
-function Travel.To(world)
-    if not world or world == "" or Util.World() == world then return end
-    Net.Call("Travel", world)
-    task.wait(1.5)
-    if Travel.LoadEnemies then
-        local folder = Worlds:FindFirstChild(world)
-        local spawnPart = folder and (folder:FindFirstChild("Spawn", true) or folder:FindFirstChildWhichIsA("SpawnLocation", true))
-        if spawnPart and spawnPart:IsA("BasePart") then
-            pcall(function() LP:RequestStreamAroundAsync(spawnPart.Position) end)
-        end
-        task.wait(0.5)
+
+local function toCFrame(v)
+    local t = typeof(v)
+    if t == "CFrame" then return v end
+    if t == "Vector3" then return CFrame.new(v) end
+    if t == "Instance" then
+        if v:IsA("BasePart") then return v.CFrame end
+        if v:IsA("Model") then return v:GetPivot() end
     end
+    return nil
+end
+
+-- where to stand in a world: game's FindSpawn -> GetSpawn remote -> spawn part in the folder
+function Travel.SpawnCFrame(world)
+    local fs = Bindables:FindFirstChild("FindSpawn")
+    if fs and fs:IsA("BindableFunction") then
+        local ok, res = pcall(fs.Invoke, fs, world)
+        local cf = ok and toCFrame(res)
+        if cf then return cf end
+    end
+    local gs = Remotes:FindFirstChild("GetSpawn")
+    if gs and gs:IsA("RemoteFunction") then
+        local cf = toCFrame(Net.Raw("GetSpawn", { world }))
+        if cf then return cf end
+    end
+    local folder = Worlds:FindFirstChild(world)
+    if not folder then return nil end
+    for _, d in ipairs(folder:GetDescendants()) do
+        if d:IsA("BasePart") and string.find(string.lower(d.Name), "spawn", 1, true) then return d.CFrame end
+    end
+    local first = folder:FindFirstChildWhichIsA("BasePart", true)
+    return first and first.CFrame or nil
+end
+
+-- force = true moves the character even when already in that world (Teleport button)
+function Travel.To(world, force)
+    if not world or world == "" then return false end
+    local already = Util.World() == world
+    if already and not force then return true end
+    if not already then
+        Net.Call("Travel", world)
+        local t0 = os.clock()
+        while Util.World() ~= world and os.clock() - t0 < 4 do task.wait(0.1) end
+    end
+    local arrived = Util.World() == world
+    if arrived or force then
+        local cf = Travel.SpawnCFrame(world)
+        if cf then
+            pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
+            Util.MoveTo(cf + Vector3.new(0, 4, 0))
+        end
+        if Travel.LoadEnemies then task.wait(0.6) end
+    end
+    if not arrived then Util.Notify("Travel to " .. world .. " failed (locked?)") end
+    return arrived
 end
 
 ------------------------------------------------------------------------
@@ -1393,17 +1439,52 @@ function Features.Meteor()
 end
 
 -- DUNGEON / GATE / TIME CHAMBER ------------------------------------------------------------
+-- inside a dungeon run? world value, or the game's dungeon timer / minimap being shown
+function Features.InDungeon()
+    if Util.World() == "Dungeon" then
+        local mg = Data.MainGui()
+        local timer = mg and (mg:FindFirstChild("DungeonTimer") or mg:FindFirstChild("DungeonMinimap"))
+        if timer and timer:IsA("GuiObject") then return timer.Visible end
+        return #Combat.List("Dungeon") > 0
+    end
+    local mg = Data.MainGui()
+    for _, n in ipairs({ "DungeonTimer", "DungeonMinimap" }) do
+        local g = mg and mg:FindFirstChild(n)
+        if g and g:IsA("GuiObject") and g.Visible then return true end
+    end
+    return false
+end
+
+local dungeonStep = "lobby"
 function Features.Dungeon()
-    if Util.World() ~= "Dungeon" then
-        if Util.Every("dungeon-join", CFG.JoinCooldown) then
-            Net.Call("SummonDungeon", F("DungeonSize") or "Small", Data.FromLabel(F("DungeonWorld") or ""), On("DungeonArtifact"))
+    if not Features.InDungeon() then
+        if not Util.Every("dungeon-join", CFG.JoinCooldown) then return end
+        -- 1. go to the dungeon lobby first (summon only works there)
+        if Util.World() ~= "Dungeon" then
+            Net.Call("DungeonLobby")
+            local t0 = os.clock()
+            while Util.World() ~= "Dungeon" and os.clock() - t0 < 4 do task.wait(0.1) end
+            local cf = Travel.SpawnCFrame("Dungeon")
+            if cf then Util.MoveTo(cf + Vector3.new(0, 4, 0)) end
             task.wait(1)
-            Net.Call("JoinDungeon")
         end
+        -- 2. summon with the chosen size / world, 3. join
+        local size = F("DungeonSize") or "Small"
+        local world = Data.FromLabel(F("DungeonWorld") or "")
+        Net.Call("SummonDungeon", CFG.DungeonSizeArg[size] or size, world, On("DungeonArtifact"))
+        task.wait(1.5)
+        Net.Call("JoinDungeon")
+        -- 4. if the game uses a prompt / portal to enter, use it too
+        for _, p in ipairs(Prompt.Find(Worlds:FindFirstChild("Dungeon"), { "dungeon", "enter", "join", "start" })) do
+            Prompt.Use(p)
+            break
+        end
+        dungeonStep = "joining"
         return
     end
-    if Combat.Step("Dungeon", function() return On("AutoDungeon") end) then return end
-    local root = Worlds:FindFirstChild("Dungeon")
+    dungeonStep = "inside"
+    if Combat.Step(Util.World(), function() return On("AutoDungeon") end) then return end
+    local root = Worlds:FindFirstChild("Dungeon") or Worlds:FindFirstChild(Util.World())
     if not On("DungeonIgnoreChest") then
         for _, p in ipairs(Prompt.Find(root, { "chest", "treasure" })) do
             Prompt.Use(p)
@@ -1412,13 +1493,14 @@ function Features.Dungeon()
         end
     end
     if Util.Every("dungeon-door", 3) then
-        local door = Prompt.Find(root, { "door", "next", "open" })[1]
+        local door = Prompt.Find(root, { "door", "next", "open", "portal" })[1]
         if door then
             Prompt.Use(door)
             Net.Call("OpenDungeonDoor", door.Parent)
         end
     end
 end
+function Features.DungeonStep() return dungeonStep end
 
 local gateIndex = 0
 function Features.Gates()
@@ -1653,21 +1735,6 @@ function Features.OpenMenu(name, on)
 end
 
 -- SETTINGS ----------------------------------------------------------------------------------------
-function Features.PushSettings()
-    local sell, lock = {}, {}
-    for _, r in ipairs({ "Common", "Rare", "Epic", "Legendary", "Mythical" }) do
-        sell[r] = On("Sell_" .. r)
-        sell["Shiny" .. r] = On("Sell_Shiny" .. r)
-        lock[r], lock["Shiny" .. r] = false, false
-    end
-    Net.Call("SetSettings", {
-        AutoSell = sell, AutoLock = lock, OwnFX = On("OwnerEffect"),
-        AutoClicker = true, Flash = true, LegendAnnouncements = false, BoostPaused = false,
-        LowQuality = false, OtherFX = false, AllPets = true, AutoSprint = true,
-        MusicEnabled = true, SoundsEnabled = true, CriticalHits = true,
-    })
-end
-
 function Features.Webhook(title)
     local send = (syn and syn.request) or (http and http.request) or http_request or request
     local url = F("WebhookUrl") or ""
@@ -1742,6 +1809,7 @@ local TSettings = Window:Tab("Settings", true)
 local TUI       = Window:Tab("UI Settings")
 
 local Refreshers = {}   -- functions run when maps / pets change
+local SpyLog = {}
 
 -- MAIN ------------------------------------------------------------------------------------
 do
@@ -1789,7 +1857,7 @@ do
     local drop = c:Dropdown({ Title = "Select World", Items = Data.FarmWorldLabels(), Flag = "TpWorld" })
     c:Button({ Title = "Teleport", Callback = function()
         local w = F("TpWorld")
-        if w then Travel.To(Data.FromLabel(w)) else Util.Notify("Pick a world") end
+        if w then Travel.To(Data.FromLabel(w), true) else Util.Notify("Pick a world") end
     end })
     c:Button({ Title = "Unlock Selected World", Callback = function()
         local w = F("TpWorld")
@@ -1801,7 +1869,7 @@ do
     local modes = m:Dropdown({ Title = "Select Mode World", Items = Data.AllWorlds(), Flag = "TpMode" })
     m:Button({ Title = "Teleport", Callback = function()
         local w = F("TpMode")
-        if w then Travel.To(w) end
+        if w then Travel.To(w, true) end
     end })
     Refreshers[#Refreshers + 1] = function() modes:Refresh(Data.AllWorlds()) end
 end
@@ -1867,6 +1935,7 @@ do
     d:Toggle({ Title = "Use Dungeon Artifact To Open", Flag = "DungeonArtifact" })
     d:Toggle({ Title = "Auto Dungeon Selected", Flag = "AutoDungeon" })
     Features.DungeonLabel = runs
+    d:Button({ Title = "Teleport To Dungeon Lobby", Callback = function() Travel.To("Dungeon", true) end })
     Refreshers[#Refreshers + 1] = function() dw:Refresh(Data.FarmWorldLabels()) end
 
     local g = TDungeon:Card("Auto Gate !", "Right")
@@ -1987,20 +2056,19 @@ end
 
 -- SETTINGS -----------------------------------------------------------------------------------------
 do
-    local sell = TSettings:Card("Auto Sell", "Left")
-    for _, r in ipairs({ "Common", "Rare", "Epic", "Legendary", "Mythical" }) do
-        sell:Toggle({ Title = r, Flag = "Sell_" .. r, Callback = Features.PushSettings })
-        sell:Toggle({ Title = "Shiny " .. r, Flag = "Sell_Shiny" .. r, Callback = Features.PushSettings })
-    end
-
-    local g = TSettings:Card("Game", "Right")
-    g:Toggle({ Title = "Owner Effect", Flag = "OwnerEffect", Callback = Features.PushSettings })
+    local g = TSettings:Card("Game", "Left")
     g:Toggle({ Title = "Anti AFK", Default = true, Flag = "AntiAFK" })
     g:Slider({ Title = "Walk Speed", Min = 16, Max = 200, Default = 16, Flag = "WalkSpeed" })
     g:Button({ Title = "FPS Boost", Callback = Features.FpsBoost })
-    g:Toggle({ Title = "Remote Spy (F9)", Flag = "RemoteSpy", Callback = function(v)
+    local spy = TSettings:Card("Remote Spy", "Right")
+    spy:Paragraph({ Body = "Turn on, do the action once by hand (e.g. start a dungeon), then press Copy Log and send it to fix CFG.Calls. Log is also saved to RenHub/spy_log.txt." })
+    spy:Toggle({ Title = "Remote Spy", Flag = "RemoteSpy", Callback = function(v)
         if v and not hookmetamethod then Util.Notify("Executor has no hookmetamethod") end
     end })
+    spy:Button({ Title = "Copy Log", Callback = function()
+        if setclipboard then setclipboard(table.concat(SpyLog, "\n")) Util.Notify("Copied " .. #SpyLog .. " lines") else Util.Notify("No setclipboard") end
+    end })
+    spy:Button({ Title = "Clear Log", Callback = function() table.clear(SpyLog) Util.Notify("Log cleared") end })
 
     local w = TSettings:Card("Webhook", "Right")
     w:Input({ Title = "Webhook URL", Placeholder = "https://discord.com/api/webhooks/...", Flag = "WebhookUrl" })
@@ -2094,26 +2162,47 @@ track(LP.Idled:Connect(function()
     end
 end))
 
--- Remote Spy
+-- Remote Spy (outgoing calls + return values, kept in SpyLog and RenHub/spy_log.txt)
+local function describe(a)
+    local t = typeof(a)
+    if t == "Instance" then return a:GetFullName() end
+    if t == "table" then
+        local ok, j = pcall(HttpService.JSONEncode, HttpService, a)
+        return ok and j or tostring(a)
+    end
+    if t == "string" then return string.format("%q", a) end
+    return t .. " " .. tostring(a)
+end
+local function spyWrite(line)
+    SpyLog[#SpyLog + 1] = line
+    if #SpyLog > 400 then table.remove(SpyLog, 1) end
+    print(line)
+    if appendfile then
+        pcall(function()
+            if not isfolder(CFG.ConfigFolder) then makefolder(CFG.ConfigFolder) end
+            appendfile(CFG.ConfigFolder .. "/spy_log.txt", line .. "\n")
+        end)
+    end
+end
 if hookmetamethod and getnamecallmethod then
     local original
     original = hookmetamethod(game, "__namecall", function(self, ...)
-        if Flags.RemoteSpy and Flags.RemoteSpy:Get() and not (checkcaller and checkcaller()) then
-            local method = getnamecallmethod()
-            if (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance"
-               and self.Parent == Remotes and self.Name ~= "ClickerDamage" then
-                local parts = {}
-                for i, a in ipairs({ ... }) do
-                    local s
-                    if typeof(a) == "Instance" then s = a:GetFullName()
-                    elseif type(a) == "table" then
-                        local ok, j = pcall(HttpService.JSONEncode, HttpService, a)
-                        s = ok and j or tostring(a)
-                    else s = typeof(a) .. " " .. tostring(a) end
-                    parts[#parts + 1] = "[" .. i .. "] " .. s
-                end
-                print("[SPY] " .. self.Name .. ":" .. method .. "(" .. table.concat(parts, ", ") .. ")")
+        local method = getnamecallmethod()
+        if Flags.RemoteSpy and Flags.RemoteSpy:Get() and not (checkcaller and checkcaller())
+           and (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance"
+           and self.Parent == Remotes and self.Name ~= "ClickerDamage" then
+            local args = table.pack(...)
+            local parts = {}
+            for i = 1, args.n do parts[i] = "[" .. i .. "] " .. describe(args[i]) end
+            local head = "[SPY] " .. self.Name .. ":" .. method .. "(" .. table.concat(parts, ", ") .. ")"
+            if method == "InvokeServer" then
+                local res = table.pack(original(self, ...))
+                local outs = {}
+                for i = 1, res.n do outs[i] = describe(res[i]) end
+                task.spawn(spyWrite, head .. "  ->  " .. (res.n > 0 and table.concat(outs, ", ") or "nil"))
+                return table.unpack(res, 1, res.n)
             end
+            task.spawn(spyWrite, head)
         end
         return original(self, ...)
     end)
