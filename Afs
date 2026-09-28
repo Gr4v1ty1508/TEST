@@ -1767,42 +1767,49 @@ function Features.IsMounted()
     return nil
 end
 
--- like Yuto Hub: turn it on -> mount right away; get off the mount -> back on
--- right away. Reacts to the game's own "Mounting" value changing instead of
--- polling, and pauses itself if the game keeps throwing you off (no endless flip).
-local mountedValue, lastMountCall, mountBlockUntil, mountCalls = nil, 0, 0, {}
+-- The game mounts you on YOUR side (its own client script) and then tells the
+-- server with SetMounted(true / false). So we:
+--   * read the real state from the game's own SetMounted calls (hooked below)
+--   * mount the same way the mount button does (Bindable.ToggleMount), and only
+--     when we know you're off, so it can't flip back and forth
+Features.MountState = nil   -- true / false once the game has told us
+local lastMountCall, mountBlockUntil, mountCalls = 0, 0, {}
 local baseIsMounted = Features.IsMounted
 function Features.IsMounted()
-    local m = LP:FindFirstChild("Mounting")
-    if mountedValue ~= nil and m then return m.Value == mountedValue end
+    if Features.MountState ~= nil then return Features.MountState end
     return baseIsMounted()
+end
+local function pressMount()
+    local tm = Bindables:FindFirstChild("ToggleMount")
+    if tm and tm:IsA("BindableEvent") then pcall(tm.Fire, tm) return end
+    if tm and tm:IsA("BindableFunction") then task.spawn(pcall, tm.Invoke, tm) return end
+    local mg = Data.MainGui()
+    local frame = mg and mg:FindFirstChild("MountButtonFrame")
+    local b = frame and frame:FindFirstChildWhichIsA("GuiButton", true)
+    if b then fireGui(b, { "MouseButton1Down", "MouseButton1Click", "Activated" }) end
 end
 function Features.Mount()
     if not On("AutoMount") or os.clock() < mountBlockUntil then return end
     if Features.IsMounted() == true then return end
     local now = os.clock()
-    for k = #mountCalls, 1, -1 do if now - mountCalls[k] > 15 then table.remove(mountCalls, k) end end
-    if #mountCalls >= 3 then
+    if now - lastMountCall < 1.5 then return end          -- wait for the game to answer the last press
+    for k = #mountCalls, 1, -1 do if now - mountCalls[k] > 20 then table.remove(mountCalls, k) end end
+    if #mountCalls >= 4 then
         mountBlockUntil = now + 30
-        Util.Notify("Auto Mount paused 30s (game keeps dismounting)")
+        Util.Notify("Auto Mount paused 30s (can't stay mounted here)")
         return
     end
     mountCalls[#mountCalls + 1] = now
     lastMountCall = now
-    task.spawn(Net.Call, "Mount", true)
+    pressMount()
+end
+-- called by the hook whenever the game sends SetMounted
+function Features.OnGameMount(state)
+    Features.MountState = state == true
+    if not Features.MountState then task.delay(0.3, Features.Mount) end   -- got off -> back on
 end
 pcall(function()
-    local m = LP:WaitForChild("Mounting", 5)
-    if m and m:IsA("ValueBase") then
-        track(m.Changed:Connect(function()
-            -- the value the game sets right after our call = "mounted"
-            if os.clock() - lastMountCall < 3 and mountedValue == nil then mountedValue = m.Value end
-            task.delay(0.3, Features.Mount)   -- got off (or thrown off) -> back on
-        end))
-    end
-end)
-pcall(function()
-    track(LP.CharacterAdded:Connect(function() task.delay(2, Features.Mount) end))
+    track(LP.CharacterAdded:Connect(function() Features.MountState = false task.delay(2, Features.Mount) end))
     track(LP:WaitForChild("World", 5).Changed:Connect(function() task.delay(2, Features.Mount) end))
 end)
 
@@ -2912,6 +2919,11 @@ if hookmetamethod and getnamecallmethod then
     local original
     original = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
+        if method == "FireServer" and typeof(self) == "Instance" and self.Name == "SetMounted"
+           and self.Parent == Remotes and not (checkcaller and checkcaller()) then
+            local state = ...
+            task.defer(Features.OnGameMount, state)
+        end
         if (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance"
            and Learn.Watch[self.Name] and self.Parent == Remotes and not (checkcaller and checkcaller()) then
             local args = table.pack(...)
