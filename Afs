@@ -1889,6 +1889,8 @@ function Features.TimeTrial()
                 end
             end
         end
+        -- normal room cleared (no button here): go on to the next room
+        if Util.Every("trial-advance", 2) then Features.AdvanceRoom() end
         Features.DumpTowerOnce()
         return true
     end
@@ -1992,6 +1994,70 @@ function Features.RoomCenter()
     return count > 0 and sum / count or nil
 end
 
+-- TRIAL ROOMS: every room is a model named "StartRoom" in Tower.Map (no numbers).
+-- We find the room we're standing in, remember it as done, and go to the closest
+-- room we haven't been in yet (rooms of a run are next to each other).
+local roomBoxes = setmetatable({}, { __mode = "k" })
+local visitedRooms = setmetatable({}, { __mode = "k" })
+local function roomBox(m)
+    local b = roomBoxes[m]
+    if not b then
+        local ok, cf, size = pcall(m.GetBoundingBox, m)
+        if not ok or not cf then return nil end
+        b = { cf = cf, size = size }
+        roomBoxes[m] = b
+    end
+    return b
+end
+function Features.TrialRooms()
+    local tower = Worlds:FindFirstChild("Tower")
+    local map = tower and tower:FindFirstChild("Map")
+    local out = {}
+    for _, m in ipairs(map and map:GetChildren() or {}) do
+        if m.Name == "StartRoom" and m:IsA("Model") then out[#out + 1] = m end
+    end
+    return out
+end
+function Features.RoomAt(pos)
+    for _, m in ipairs(Features.TrialRooms()) do
+        local b = roomBox(m)
+        if b then
+            local rel = b.cf:PointToObjectSpace(pos)
+            if math.abs(rel.X) <= b.size.X / 2 + 3 and math.abs(rel.Z) <= b.size.Z / 2 + 3
+                and math.abs(rel.Y) <= b.size.Y / 2 + 15 then
+                return m
+            end
+        end
+    end
+    return nil
+end
+function Features.ResetTrialRooms() table.clear(visitedRooms) end
+function Features.AdvanceRoom()
+    local root = Util.Root()
+    if not root then return end
+    local cur = Features.RoomAt(root.Position)
+    if not cur then return end                 -- lobby, not in a run
+    visitedRooms[cur] = true
+    -- the closest room we haven't cleared yet
+    local cb = roomBox(cur)
+    if not cb then return end
+    local best, bestDist
+    for _, m in ipairs(Features.TrialRooms()) do
+        if m ~= cur and not visitedRooms[m] then
+            local b = roomBox(m)
+            if b then
+                local dist = (b.cf.Position - cb.cf.Position).Magnitude
+                if not bestDist or dist < bestDist then best, bestDist = m, dist end
+            end
+        end
+    end
+    if best then
+        local c = roomBox(best).cf.Position
+        pcall(function() LP:RequestStreamAroundAsync(c) end)
+        Util.MoveTo(CFrame.new(c + Vector3.new(0, 5, 0)))
+    end
+end
+
 -- positions of enemies in the Tower that exist but aren't loaded near us yet.
 -- A model's pivot is known even while its parts are streamed out.
 function Features.TowerEnemyTargets()
@@ -2017,10 +2083,15 @@ end
 
 -- stuck in a trial with nothing to do: save the Tower's layout once to
 -- GravityHub/AFS/tower_dump.txt so the room / door names can be checked
-local towerDumped = false
+local towerDumped, roomDumped = false, false
 function Features.DumpTowerOnce(force)
-    if not force and (towerDumped or not writefile or not Util.Every("tower-stuck", 15)) then return end
+    if not writefile then return end
+    local r = Util.Root()
+    local inRoom = r and Features.RoomAt(r.Position) ~= nil
+    -- once in the lobby and once more from inside a run room
+    if not force and ((towerDumped and not (inRoom and not roomDumped)) or not Util.Every("tower-stuck", 15)) then return end
     towerDumped = true
+    if inRoom then roomDumped = true end
     local tower = Worlds:FindFirstChild("Tower")
     if not tower then return end
     local lines = {}
@@ -2049,6 +2120,11 @@ function Features.DumpTowerOnce(force)
     end
     walk(tower, 0)
     local root = Util.Root()
+    local cur = root and Features.RoomAt(root.Position)
+    if cur then
+        lines[#lines + 1] = "=== ROOM YOU ARE IN ==="
+        walk(cur, 0)
+    end
     lines[#lines + 1] = "PLAYER @ " .. tostring(root and root.Position)
     pcall(writefile, CFG.ConfigFolder .. "/tower_dump.txt", table.concat(lines, "\n"))
 end
@@ -2194,6 +2270,7 @@ end
 function Features.JoinTrial(name, id)
     Stats.TrialName, Stats.TrialFloor = name, 0
     trialDoorId = id
+    Features.ResetTrialRooms()
     Net.Raw("JoinTimeTrial", { id })
     task.wait(0.3)
     local pos = Net.Raw("AttemptTravel", { "TowerDoor" .. id, true })
