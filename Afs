@@ -62,7 +62,11 @@ local CFG = {
     -- remotes the game spams every second while fighting; left out of Remote Spy
     SpyIgnore    = { ClickerDamage = true, SendPet = true, PetAttack = true, PetAbility = true,
                      DPS = true, DPSTest = true, UpdateLocalEnemyHealth = true, GetLocalEnemyHealth = true },
-    TrialGoAt    = 30,   -- go to the time trial room this many seconds before it starts
+    TrialGoAt    = 30,
+    -- the game joins a time trial by NUMBER (JoinTimeTrial(5)) and then travels to
+    -- "TowerDoor<number>". Fix a number here if a trial opens the wrong room.
+    TimeTrialIds = { Lesser = 1, Medium = 2, Greater = 3, Ultimate = 4, ["Ultra Hard"] = 5,
+                     Insane = 6, Godly = 7, Infinite = 8 },   -- go to the time trial room this many seconds before it starts
 
     TimeTrials   = { "Lesser", "Medium", "Greater", "Ultimate", "Ultra Hard", "Insane", "Godly", "Infinite" },
     RaidModes    = { "Normal", "Giant", "Massive" },
@@ -140,7 +144,7 @@ local CFG = {
         Click           = { "ClickerDamage",            function() return {} end },
         UseAbility      = { "UseAbility",               function() return {} end },
         Mount           = { "SetMounted",               function(on) return { on } end },
-        PetTeleport     = { "RequestPetTeleport",       function(enemy) return { enemy } end },
+        PetTeleport     = { "RequestPetTeleport",       function(pet) return { pet } end },
         Rebirth         = { "AttemptRebirth",           function() return {} end },
         StartQuest      = { "StartQuest",               function(quest) return { quest } end },
         FinishQuest     = { "FinishQuest",              function(quest) return { quest } end },
@@ -281,7 +285,7 @@ end
 -- GravityHub/AFS/learned_calls.json and reused, so the script sends what the
 -- game really expects instead of a guess.
 local Learn = { data = nil }
-Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true, JoinTimeTrial = true }
+Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true }
 Learn.File = CFG.ConfigFolder .. "/learned_calls.json"
 function Learn.Load()
     if Learn.data then return Learn.data end
@@ -797,7 +801,17 @@ Combat.Options = { Teleport = true, PetTP = false, Ult = false }
 
 function Combat.Attack(e, wanted)
     local t0 = os.clock()
-    if Combat.Options.PetTP then Net.Call("PetTeleport", e) end
+    if Combat.Options.PetTP then
+        -- RequestPetTeleport(pet): each of YOUR pets in workspace.Pets
+        local folder = workspace:FindFirstChild("Pets")
+        for _, pet in ipairs(folder and folder:GetChildren() or {}) do
+            local owner = pet:FindFirstChild("Owner") or pet:FindFirstChild("Player")
+            local ov = owner and owner.Value
+            if ov == nil or ov == LP or ov == LP.Name or ov == LP.UserId then
+                task.spawn(Net.Call, "PetTeleport", pet)
+            end
+        end
+    end
     while Combat.Alive(e) and wanted() and os.clock() - t0 < CFG.KillTimeout do
         local root, part = Util.Root(), e:FindFirstChild("HumanoidRootPart")
         if Combat.Options.Teleport and root and part and (root.Position - part.Position).Magnitude > 12 then
@@ -1820,6 +1834,7 @@ end)
 -- TIME TRIAL / TOWER ----------------------------------------------------------------
 local trialIndex = 0
 local trialForm, lastTrialTry = nil, nil
+local trialJoinedAt = 0
 function Features.TimeTrial()
     local world = Util.World()
     if world == "Tower" then
@@ -1859,13 +1874,12 @@ function Features.TimeTrial()
     if CFG.ModeWorlds[world] == nil then HomeWorld = world end
     -- 1. the waiting room opens 60 s before a trial starts: go there in the last
     --    CFG.TrialGoAt seconds and keep farming elsewhere until then
+    if os.clock() - trialJoinedAt < 75 then return true end
     local left = Features.TrialCountdown()
     local timeToGo = left == nil or (left > 0 and left <= CFG.TrialGoAt)
-    if timeToGo and Util.Every("trial-travel", 5) then
-        Util.Notify("Going to the Time Trial room" .. (left and (" (" .. math.floor(left) .. "s)") or ""))
-        Travel.To("Tower")   -- no position-teleport: the room is closed until 60 s before
-        if Util.World() == "Tower" then Features.JoinTrial(trials) end
-        return true
+    if timeToGo then
+        Features.JoinTrial(trials)
+        return os.clock() - trialJoinedAt < 75   -- stay put at the door until it starts
     end
     return false
 end
@@ -1898,30 +1912,25 @@ end
 -- ask to join the next selected trial (uses the game's real arguments once you
 -- have joined a trial by hand one time)
 function Features.JoinTrial(trials)
-    if not Util.Every("trial-join", 15) then return end
+    -- joined recently: we're at the door waiting for the start, don't ask again
+    if os.clock() - trialJoinedAt < 75 then return end
+    if not Util.Every("trial-join", 5) then return end
     trialIndex = trialIndex % #trials + 1
     local name = trials[trialIndex]
+    local id = CFG.TimeTrialIds[name]
+    if not id then Util.Notify("No trial number for " .. tostring(name)) return end
     Stats.TrialName, Stats.TrialFloor = name, 0
-    local tpl, n = Learn.Get("JoinTimeTrial")
-    if tpl then
-        for k = 1, n do
-            if type(tpl[k]) == "string" then
-                local full = string.find(tpl[k], "Time Trial", 1, true) ~= nil
-                for _, t in ipairs(CFG.TimeTrials) do
-                    if string.find(string.lower(tpl[k]), string.lower(t), 1, true) then
-                        tpl[k] = full and (name .. " Time Trial") or name
-                        break
-                    end
-                end
-            end
-        end
-        Net.Raw("JoinTimeTrial", tpl)
-        return
+    -- exactly what the game does: JoinTimeTrial(n) -> AttemptTravel("TowerDoor<n>", true)
+    Net.Raw("JoinTimeTrial", { id })
+    task.wait(0.3)
+    local pos = Net.Raw("AttemptTravel", { "TowerDoor" .. id, true })
+    local cf = toCFrame(pos)
+    if cf then
+        pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
+        Util.MoveTo(cf + Vector3.new(0, 4, 0))
+        trialJoinedAt = os.clock()
+        Util.Notify("Waiting for " .. name .. " Time Trial")
     end
-    -- not learned yet: "Godly Time Trial" first, then "Godly", keep whichever works
-    local form = trialForm or (lastTrialTry == "full" and "short" or "full")
-    lastTrialTry = form
-    Net.Call("JoinTimeTrial", form == "full" and (name .. " Time Trial") or name)
 end
 
 function Features.InfinityTower()
