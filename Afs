@@ -299,9 +299,40 @@ function Data.FarmWorlds()
     return list
 end
 
+-- world order number from WorldData (nil when the game doesn't give one)
+function Data.WorldOrder(name)
+    local info = Data.WorldInfo(name)
+    local o = info and (info.Order or info.Index or info.LayoutOrder or info.Id)
+    return type(o) == "number" and o or nil
+end
+
+-- event world = name has "Event" / "Gamemode", or WorldData marks it as an event
+function Data.IsEventWorld(name)
+    if string.find(name, "Event", 1, true) or string.find(name, "Gamemode", 1, true) then return true end
+    local info = Data.WorldInfo(name)
+    return info ~= nil and (info.Event == true or info.IsEvent == true or info.Type == "Event")
+end
+
+-- display order for dropdowns: event worlds on top, then newest update first
+-- (highest WorldData order first; worlds with no order are treated as newest)
+function Data.SortForDisplay(list)
+    local function rank(n)
+        return Data.WorldOrder(n) or math.huge
+    end
+    table.sort(list, function(a, b)
+        local ea, eb = Data.IsEventWorld(a), Data.IsEventWorld(b)
+        if ea ~= eb then return ea end
+        local ra, rb = rank(a), rank(b)
+        if ra ~= rb then return ra > rb end
+        return a < b
+    end)
+    return list
+end
+
 function Data.FarmWorldLabels()
-    local out = {}
-    for _, n in ipairs(Data.FarmWorlds()) do out[#out + 1] = Data.WorldLabel(n) end
+    local list, out = {}, {}
+    for _, n in ipairs(Data.FarmWorlds()) do list[#list + 1] = n end
+    for _, n in ipairs(Data.SortForDisplay(list)) do out[#out + 1] = Data.WorldLabel(n) end
     return out
 end
 
@@ -312,15 +343,13 @@ function Data.EventWorlds()
             out[#out + 1] = f.Name
         end
     end
-    table.sort(out)
-    return out
+    return Data.SortForDisplay(out)
 end
 
 function Data.AllWorlds()
     local out = {}
     for _, f in ipairs(Worlds:GetChildren()) do if f:IsA("Folder") then out[#out + 1] = f.Name end end
-    table.sort(out)
-    return out
+    return Data.SortForDisplay(out)
 end
 
 -- stars / eggs: every model named ...Egg or ...Star in any world -> "Name | World"
