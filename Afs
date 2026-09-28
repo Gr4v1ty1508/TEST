@@ -84,15 +84,38 @@ local CFG = {
     -- worlds pinned to the TOP of every world list, in this order.
     -- write the name exactly as the list shows it (not case sensitive)
     PinnedWorlds = {
-        "Patrick Event", "Christmas 2025", "Super Island",
-        "Easter Event 2026", "Beyond The Valentine", "Summer (2025) Island",
+        "Summer (2025) Island", "Anniversary (2024) Island", "Patrick Event", "Christmas 2025",
+        "Easter Event 2026", "Beyond The Valentine", "Summer (2024) Island", "Winter (2023) Island",
+        "Super Island",
+    },
+
+    -- normal worlds in game order (world 1 -> newest). Worlds the game adds later
+    -- and that are not in this list are placed after it automatically.
+    WorldOrder = {
+        "Ninja Village", "Crazy Town", "Fruits Island", "Hero University", "Walled City",
+        "Slayer Army", "Ghoul Town", "Chimera Jungle", "Virtual Castle", "Empty Dimension",
+        "Cursed High", "XYZ Metropolis", "9 Crimes Island", "Destiny Island", "Lucky Kingdom",
+        "Land of Alchemy", "Slimey Island", "Flame City", "Divine Colosseum", "Kingdom of Four",
+        "Icy Wastes", "The Underworld", "Psychic City", "The Hole", "Ninja City",
+        "Time Travel Tokyo", "Orca Road Prison", "World of Games", "Fashion Empire", "Land of Guts",
+        "Hero Village", "Sorcerer Empire", "Soul Academy", "World at War", "The Abyss",
+        "False Paradise", "Land of Wanzo", "Slayers Forest", "Thousand Year War", "Martial World",
+        "Sorcerers World", "Mystic Island", "Steel Ball Island", "Magic Continent", "Solo Isles",
+        "Useless Isekai", "Paranormal Liberation", "Haunted Battleground", "Eminence Garden", "Demon Isekai",
+        "Viking Saga", "Corrupt City", "Ego Zone", "Hunters Classroom", "Magic Muscle Academy",
+        "Primal Island", "Reincarnation Highschool", "Boxers Paradise", "Demons Exorcist", "Royal City",
+        "Isekai MMO", "Mecha Island", "Vampires Kingdom", "Slayer's Village", "Saint's Ruined Temple",
+        "Unluck Tokyo", "One Strike City", "Inferno City", "Assassins Park", "Spiders Hideout",
+        "Cleaners HQ", "Ninjas HQ", "Mafia Town", "Desolate Town", "Arena Of Hell",
+        "Tokyo No.", "Demon City", "Lion Kingdom", "Twilight Territory", "Midnight Ward",
+        "Awakening Ruins", "Fate Broken Battlefield", "Magic Academy", "Spiral Wasteland", "Shattered Soul Society",
+        "Daikoku High", "Barren Planet", "Watergate",
     },
 
     -- worlds hidden from every world list (can't be teleported to any more).
     -- match = start of the name shown in the list, not case sensitive
     HiddenWorlds = {
-        "Anniversary (2024) Island", "Winter (2023) Island", "Spring (2024) Island",
-        "Summer (2024) Island", "Prismatic Journey", "Solo Dungeon",
+        "Spring (2024) Island", "Prismatic Journey", "Solo Dungeon",
     },
 
     -- in-game menus for the Open UI tab (label = MainGui frame name)
@@ -249,6 +272,53 @@ function Net.Listen(name, fn)
     end
 end
 
+-- LEARNED CALLS: when you do something by hand once (summon a dungeon, set
+-- friend only, ...), the exact arguments the game sent are saved to
+-- GravityHub/AFS/learned_calls.json and reused, so the script sends what the
+-- game really expects instead of a guess.
+local Learn = { data = nil }
+Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true }
+Learn.File = CFG.ConfigFolder .. "/learned_calls.json"
+function Learn.Load()
+    if Learn.data then return Learn.data end
+    local ok, t = pcall(function()
+        if not (isfile and readfile) or not isfile(Learn.File) then return {} end
+        return HttpService:JSONDecode(readfile(Learn.File))
+    end)
+    Learn.data = (ok and type(t) == "table") and t or {}
+    return Learn.data
+end
+function Learn.Record(name, args)
+    local list = {}
+    for i = 1, args.n do
+        local t = type(args[i])
+        if t ~= "string" and t ~= "number" and t ~= "boolean" and args[i] ~= nil then return end
+        list[i] = args[i] == nil and "__nil" or args[i]
+    end
+    Learn.Load()[name] = { args = list, n = args.n }
+    pcall(function()
+        if not writefile then return end
+        local cur = ""
+        for part in string.gmatch(CFG.ConfigFolder, "[^/]+") do
+            cur = cur == "" and part or (cur .. "/" .. part)
+            if isfolder and makefolder and not isfolder(cur) then makefolder(cur) end
+        end
+        writefile(Learn.File, HttpService:JSONEncode(Learn.data))
+    end)
+end
+-- returns a copy of the learned args (or nil)
+function Learn.Get(name)
+    local t = Learn.Load()[name]
+    if type(t) ~= "table" or type(t.args) ~= "table" then return nil end
+    local out, n = {}, tonumber(t.n) or #t.args
+    for i = 1, n do
+        local v = t.args[i]
+        if v == "__nil" then v = nil end
+        out[i] = v
+    end
+    return out, n
+end
+
 ------------------------------------------------------------------------
 -- GAME DATA (read from the game's own modules, fallbacks if blocked)
 ------------------------------------------------------------------------
@@ -315,6 +385,7 @@ end
 -- world number as shown in the game's travel list ("22 Icy Wastes").
 -- 1) a number field in WorldData, 2) the travel GUI (badge text / LayoutOrder)
 local worldNumCache, worldNumTime = nil, 0
+local orderCache = {}
 local NUMBER_FIELDS = { "WorldNumber", "Number", "Num", "Order", "Index", "LayoutOrder", "WorldIndex", "Id", "ID" }
 local function shortNumber(text)
     if type(text) ~= "string" or #text > 14 then return nil end
@@ -420,6 +491,7 @@ local function buildWorldNumbers()
     return map
 end
 function Data.ResetWorldCache()
+    table.clear(orderCache)
     worldNumCache = nil
     worldDataHits = nil
 end
@@ -489,9 +561,28 @@ function Data.IsEventWorld(name)
     return info ~= nil and (info.Event == true or info.IsEvent == true or info.Type == "Event")
 end
 
--- game order: world 1, 2, 3 ... (worlds without a number go last, A-Z)
+-- position of a name in a CFG list (exact name, or the list entry is the start of it)
+local function listIndex(listTbl, name)
+    local d, k = string.lower(Data.WorldDisplay(name)), string.lower(name)
+    for i, entry in ipairs(listTbl) do
+        local e = string.lower(entry)
+        if d == e or k == e or (#e >= 6 and string.sub(d, 1, #e) == e) then return i end
+    end
+    return nil
+end
+function Data.OrderRank(name)
+    local r = orderCache[name]
+    if r == nil then
+        local idx = listIndex(CFG.WorldOrder, name)
+        r = idx or (10000 + (Data.WorldNumber(name) or 1e6))
+        orderCache[name] = r
+    end
+    return r
+end
+
+-- game order: CFG.WorldOrder first, then new worlds by the game's own number, then A-Z
 local function byNumber(a, b)
-    local na, nb = Data.WorldNumber(a) or math.huge, Data.WorldNumber(b) or math.huge
+    local na, nb = Data.OrderRank(a), Data.OrderRank(b)
     if na ~= nb then return na < nb end
     return a < b
 end
@@ -507,12 +598,7 @@ end
 
 -- position in CFG.PinnedWorlds (nil = not pinned)
 function Data.PinIndex(name)
-    local d, k = string.lower(Data.WorldDisplay(name)), string.lower(name)
-    for i, p in ipairs(CFG.PinnedWorlds) do
-        local pl = string.lower(p)
-        if d == pl or k == pl then return i end
-    end
-    return nil
+    return listIndex(CFG.PinnedWorlds, name)
 end
 
 -- display order for dropdowns: CFG.PinnedWorlds first (in that order),
@@ -779,13 +865,29 @@ function Travel.SpawnCFrame(world)
         local cf = toCFrame(Net.Raw("GetSpawn", { world }))
         if cf then return cf end
     end
+    -- a position stored in WorldData (works even when the map isn't loaded yet)
+    local info = Data.WorldInfo(world)
+    if info then
+        for _, k in ipairs({ "Spawn", "SpawnPosition", "SpawnCFrame", "Position", "CFrame", "TeleportPosition", "Location" }) do
+            local cf = toCFrame(info[k])
+            if cf then return cf end
+        end
+    end
     local folder = Worlds:FindFirstChild(world)
     if not folder then return nil end
+    local best
     for _, d in ipairs(folder:GetDescendants()) do
-        if d:IsA("BasePart") and string.find(string.lower(d.Name), "spawn", 1, true) then return d.CFrame end
+        if d:IsA("SpawnLocation") then return d.CFrame end
+        if not best and d:IsA("BasePart") then
+            local n = string.lower(d.Name)
+            if string.find(n, "spawn", 1, true) or string.find(n, "teleport", 1, true) then best = d end
+        end
     end
+    if best then return best.CFrame end
     local first = folder:FindFirstChildWhichIsA("BasePart", true)
-    return first and first.CFrame or nil
+    if first then return first.CFrame end
+    local model = folder:FindFirstChildWhichIsA("Model", true)
+    return model and model:GetPivot() or nil
 end
 
 -- force = true moves the character even when already in that world (Teleport button)
@@ -799,16 +901,19 @@ function Travel.To(world, force)
         while Util.World() ~= world and os.clock() - t0 < 4 do task.wait(0.1) end
     end
     local arrived = Util.World() == world
+    local moved = false
     if arrived or force then
+        -- the game said no (old event islands): still move there by position, like other hubs do
         local cf = Travel.SpawnCFrame(world)
         if cf then
             pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
             Util.MoveTo(cf + Vector3.new(0, 4, 0))
+            moved = true
         end
         if Travel.LoadEnemies then task.wait(0.6) end
     end
-    if not arrived then Util.Notify("Travel to " .. world .. " failed (locked?)") end
-    return arrived
+    if not arrived and not moved then Util.Notify("Travel to " .. Data.WorldDisplay(world) .. " failed (locked?)") end
+    return arrived or moved
 end
 
 ------------------------------------------------------------------------
@@ -1801,35 +1906,102 @@ function Features.InDungeon()
 end
 
 local dungeonStep = "lobby"
-function Features.Dungeon()
-    if not Features.InDungeon() then
-        if not Util.Every("dungeon-join", CFG.JoinCooldown) then return end
-        -- 1. go to the dungeon lobby first (summon only works there)
-        if Util.World() ~= "Dungeon" then
-            Net.Call("DungeonLobby")
-            local t0 = os.clock()
-            while Util.World() ~= "Dungeon" and os.clock() - t0 < 4 do task.wait(0.1) end
-            local cf = Travel.SpawnCFrame("Dungeon")
-            if cf then Util.MoveTo(cf + Vector3.new(0, 4, 0)) end
-            task.wait(1)
+local nextSummon, roomIndex = 0, 0
+local ROOM_WORDS = { "StartRoom", "NormalRoom", "BossRoom", "CursedRoom", "TreasureRoom", "FinalTreasureRoom" }
+
+function Features.DungeonRoot()
+    return Worlds:FindFirstChild("Dungeon") or Worlds:FindFirstChild(Util.World())
+end
+
+-- every generated room in the running dungeon (models named like the game's room assets)
+function Features.DungeonRooms()
+    local out, root = {}, Features.DungeonRoot()
+    if not root then return out end
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("Model") then
+            for _, w in ipairs(ROOM_WORDS) do
+                if string.find(d.Name, w, 1, true) then out[#out + 1] = d break end
+            end
         end
-        -- 2. summon with the chosen size / world, 3. join
-        local size = F("DungeonSize") or "Small"
-        local world = Data.FromLabel(F("DungeonWorld") or "")
-        Net.Call("SummonDungeon", CFG.DungeonSizeArg[size] or size, world, On("DungeonArtifact"))
-        task.wait(1.5)
-        Net.Call("JoinDungeon")
-        -- 4. if the game uses a prompt / portal to enter, use it too
-        for _, p in ipairs(Prompt.Find(Worlds:FindFirstChild("Dungeon"), { "dungeon", "enter", "join", "start" })) do
-            Prompt.Use(p)
-            break
+    end
+    return out
+end
+
+-- send exactly what the game sent when you did it by hand; fall back to a guess
+local function summonArgs(size, world, artifact)
+    local tpl, n = Learn.Get("SummonDungeon")
+    if not tpl then return { size, world, artifact } end
+    local bools = 0
+    for i = 1, n do if type(tpl[i]) == "boolean" then bools = bools + 1 end end
+    for i = 1, n do
+        local v = tpl[i]
+        if type(v) == "string" then
+            local lv = string.lower(v)
+            for _, sz in ipairs(CFG.DungeonSizes) do
+                if lv == string.lower(sz) then tpl[i] = (v == lv) and string.lower(size) or size break end
+            end
+            if tpl[i] == v then
+                if Worlds:FindFirstChild(v) then tpl[i] = world
+                else
+                    for _, f in ipairs(Worlds:GetChildren()) do
+                        if Data.WorldDisplay(f.Name) == v then tpl[i] = Data.WorldDisplay(world) break end
+                    end
+                end
+            end
+        elseif type(v) == "boolean" and bools == 1 then
+            tpl[i] = artifact
         end
-        dungeonStep = "joining"
+    end
+    return tpl
+end
+local function friendArgs(on)
+    local tpl, n = Learn.Get("SetDungeonSetting")
+    if not tpl then return { "FriendsOnly", on } end
+    for i = 1, n do if type(tpl[i]) == "boolean" then tpl[i] = on end end
+    return tpl
+end
+
+function Features.OpenDungeon()
+    if os.clock() < nextSummon then
+        -- a dungeon was just summoned: keep trying to get in instead of summoning again
+        if Util.Every("dungeon-rejoin", 5) then
+            Net.Raw("JoinDungeon", Learn.Get("JoinDungeon") or {})
+        end
         return
     end
+    -- 1. dungeon lobby (summon only works there)
+    if Util.World() ~= "Dungeon" then
+        Net.Call("DungeonLobby")
+        local t0 = os.clock()
+        while Util.World() ~= "Dungeon" and os.clock() - t0 < 4 do task.wait(0.1) end
+        local cf = Travel.SpawnCFrame("Dungeon")
+        if cf then Util.MoveTo(cf + Vector3.new(0, 4, 0)) end
+        task.wait(1)
+    end
+    -- 2. friend only, 3. summon, 4. join
+    Net.Raw("SetDungeonSetting", friendArgs(On("DungeonFriends")))
+    local size = F("DungeonSize") or "Small"
+    local world = Data.FromLabel(F("DungeonWorld") or "")
+    if world == "" then Util.Notify("Pick a dungeon world") nextSummon = os.clock() + 10 return end
+    Net.Raw("SummonDungeon", summonArgs(CFG.DungeonSizeArg[size] or size, world, On("DungeonArtifact")))
+    task.wait(1.5)
+    Net.Raw("JoinDungeon", Learn.Get("JoinDungeon") or {})
+    for _, p in ipairs(Prompt.Find(Worlds:FindFirstChild("Dungeon"), { "dungeon", "enter", "join", "start" })) do
+        Prompt.Use(p)
+        break
+    end
+    nextSummon = os.clock() + 45
+    dungeonStep = "joining"
+end
+
+function Features.FarmDungeon()
     dungeonStep = "inside"
-    if Combat.Step(Util.World(), function() return On("AutoDungeon") end) then return end
-    local root = Worlds:FindFirstChild("Dungeon") or Worlds:FindFirstChild(Util.World())
+    nextSummon = 0
+    local wanted = function() return On("AutoFarmDungeon") end
+    local worldName = Features.DungeonRoot() and Features.DungeonRoot().Name or Util.World()
+    if Combat.Step(worldName, wanted) then return end
+    local root = Features.DungeonRoot()
+    -- chests
     if not On("DungeonIgnoreChest") then
         for _, p in ipairs(Prompt.Find(root, { "chest", "treasure" })) do
             Prompt.Use(p)
@@ -1837,13 +2009,34 @@ function Features.Dungeon()
             task.wait(0.3)
         end
     end
-    if Util.Every("dungeon-door", 3) then
-        local door = Prompt.Find(root, { "door", "next", "open", "portal" })[1]
-        if door then
-            Prompt.Use(door)
-            Net.Call("OpenDungeonDoor", door.Parent)
+    -- doors
+    local door = Prompt.Find(root, { "door", "next", "open", "portal", "gate" })[1]
+    if door then
+        Prompt.Use(door)
+        Net.Call("OpenDungeonDoor", door.Parent)
+        task.wait(0.5)
+        return
+    end
+    -- nothing loaded near us: visit the rooms one by one so their enemies load in
+    if On("DungeonLoadAll") then
+        local rooms = Features.DungeonRooms()
+        if #rooms > 0 then
+            roomIndex = roomIndex % #rooms + 1
+            local cf = rooms[roomIndex]:GetPivot()
+            pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
+            Util.MoveTo(cf + Vector3.new(0, 5, 0))
+            task.wait(0.6)
         end
     end
+end
+
+function Features.Dungeon()
+    if Features.InDungeon() then
+        if On("AutoFarmDungeon") then Features.FarmDungeon() end
+        return
+    end
+    dungeonStep = "lobby"
+    if On("AutoOpenDungeon") then Features.OpenDungeon() end
 end
 function Features.DungeonStep() return dungeonStep end
 
@@ -2204,7 +2397,7 @@ end
 -- BRAIN: one owner of the character at a time ----------------------------------------------------
 local function Brain()
     if On("AutoInf") then return Features.InfinityTower() end
-    if On("AutoDungeon") then return Features.Dungeon() end
+    if On("AutoOpenDungeon") or (On("AutoFarmDungeon") and Features.InDungeon()) then return Features.Dungeon() end
     if On("AutoGate") then return Features.Gates() end
     if On("AutoTrial") and Features.TimeTrial() then return end
     if On("AutoRaid") and Features.Raid() then return end
@@ -2280,22 +2473,39 @@ end
 
 -- TELEPORT -------------------------------------------------------------------------------
 do
-    local c = TTeleport:Card("Teleport World", "Left")
-    local drop = c:Dropdown({ Title = "Select World", Items = Data.FarmWorldLabels(), Flag = "TpWorld" })
-    c:Button({ Title = "Teleport", Callback = function()
-        local w = F("TpWorld")
-        if w then Travel.To(Data.FromLabel(w), true) else Util.Notify("Pick a world") end
-    end })
-    c:Button({ Title = "Unlock Selected World", Callback = function()
-        local w = F("TpWorld")
-        if w then Net.Call("DiscoverWorld", Data.FromLabel(w)) end
-    end })
-    Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(drop, Data.FarmWorldLabels()) end
-    c:Button({ Title = "Refresh World List", Callback = function()
+    -- one button per world, split over two columns (like Yuto Hub)
+    local top = TTeleport:Card("Teleport World", "Left")
+    top:Button({ Title = "Refresh World List", Callback = function()
         Data.ResetWorldCache()
         for _, fn in ipairs(Refreshers) do pcall(fn) end
         Util.Notify(#Data.FarmWorlds() .. " worlds loaded")
     end })
+    local function column(side)
+        local card = TTeleport:Card(nil, side)
+        card._order = card._order + 1
+        local holder = make("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = card._order, Parent = card.Body }, { list(8) })
+        return setmetatable({ Body = holder, _order = 0 }, Elements)
+    end
+    local cols = { column("Left"), column("Right") }
+    local shown = ""
+    local function build()
+        local worlds = Data.SortForDisplay(Data.FarmWorlds())
+        local sig = table.concat(worlds, ",")
+        if sig == shown then return end
+        shown = sig
+        for _, col in ipairs(cols) do
+            for _, ch in ipairs(col.Body:GetChildren()) do if not ch:IsA("UIListLayout") then ch:Destroy() end end
+            col._order = 0
+        end
+        local half = math.ceil(#worlds / 2)
+        for i, w in ipairs(worlds) do
+            local col = i <= half and cols[1] or cols[2]
+            col:Button({ Title = Data.WorldDisplay(w), Callback = function() Travel.To(w, true) end })
+        end
+    end
+    build()
+    Refreshers[#Refreshers + 1] = function() shown = "" build() end
 end
 
 -- TIME TRIAL / TOWER ----------------------------------------------------------------------
@@ -2352,13 +2562,15 @@ end
 -- DUNGEON / GATE / TIME ----------------------------------------------------------------------------
 do
     local d = TDungeon:Card("Auto Dungeon !", "Left")
-    local runs = d:Label("Runs : 0")
     d:Dropdown({ Title = "Select Difficulty", Items = CFG.DungeonSizes, Default = "Small", Required = true, Flag = "DungeonSize" })
     local dw = d:Dropdown({ Title = "Select World", Items = Data.FarmWorldLabels(), Flag = "DungeonWorld" })
     d:Toggle({ Title = "Ignore Chest", Flag = "DungeonIgnoreChest" })
     d:Toggle({ Title = "Use Dungeon Artifact To Open", Flag = "DungeonArtifact" })
-    d:Toggle({ Title = "Auto Dungeon Selected", Flag = "AutoDungeon" })
-    Features.DungeonLabel = runs
+    d:Toggle({ Title = "Friend Only", Flag = "DungeonFriends" })
+    d:Toggle({ Title = "Auto Open Dungeon", Flag = "AutoOpenDungeon" })
+    d:Toggle({ Title = "Teleport To Load All Dungeon", Default = true, Flag = "DungeonLoadAll" })
+    d:Toggle({ Title = "Auto Farm Dungeon", Flag = "AutoFarmDungeon" })
+    Features.DungeonLabel = d:Label("Runs : 0")
     d:Button({ Title = "Teleport To Dungeon Lobby", Callback = function() Travel.To("Dungeon", true) end })
     Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(dw, Data.FarmWorldLabels()) end
 
@@ -2617,6 +2829,11 @@ if hookmetamethod and getnamecallmethod then
     local original
     original = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
+        if (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance"
+           and Learn.Watch[self.Name] and self.Parent == Remotes and not (checkcaller and checkcaller()) then
+            local args = table.pack(...)
+            task.spawn(Learn.Record, self.Name, args)
+        end
         if Flags.RemoteSpy and Flags.RemoteSpy:Get() and not (checkcaller and checkcaller())
            and (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance"
            and self.Parent == Remotes and self.Name ~= "ClickerDamage" then
