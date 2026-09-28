@@ -1851,6 +1851,8 @@ function Features.TimeTrial()
                 return true
             end
         end
+        -- our door just opened: walk into its teleporter to get into the run
+        if Features.EnterTrialDoor() then return true end
         if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest") then return true end
         local tower = Worlds:FindFirstChild("Tower")
         local trials = Util.SetToList(F("Trials"))
@@ -2290,6 +2292,32 @@ function Features.DoorCountdown(id)
         return start - now
     end
     return nil
+end
+
+-- When the run starts the door opens (MainDoor lifts, Door<n>.StartRoom is set)
+-- and you get in by stepping into Door<n>.Teleporter.TriggerPart - the same as
+-- walking through the door. Keep touching it until we're up in the run.
+function Features.EnterTrialDoor()
+    if not trialDoorId or os.clock() - trialJoinedAt > 240 then return false end
+    local root = Util.Root()
+    local door = Features.DoorModel(trialDoorId)
+    local tp = door and door:FindFirstChild("Teleporter")
+    local trigger = tp and tp:FindFirstChild("TriggerPart")
+    if not root or not trigger then return false end
+    if (root.Position - trigger.Position).Magnitude > 400 then return false end   -- already up in the run
+    local sr = door:FindFirstChild("StartRoom")
+    local open = (sr and sr:IsA("ObjectValue") and sr.Value ~= nil)
+    local secs = Features.DoorCountdown(trialDoorId)
+    local main = door:FindFirstChild("MainDoor")
+    if main and door:FindFirstChild("TimeSymbol") and main.Position.Y - door.TimeSymbol.Position.Y > 5 then open = true end
+    if not open and not (secs and secs <= 1) then return false end
+    Util.MoveTo(trigger.CFrame)
+    if firetouchinterest then
+        pcall(firetouchinterest, root, trigger, 0)
+        pcall(firetouchinterest, root, trigger, 1)
+    end
+    task.wait(0.3)
+    return true
 end
 
 -- join exactly like the game: JoinTimeTrial(n) -> AttemptTravel("TowerDoor<n>", true)
