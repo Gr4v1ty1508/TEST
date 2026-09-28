@@ -1767,19 +1767,10 @@ function Features.IsMounted()
     return nil
 end
 
--- sends the mount call ONCE per world / respawn and then waits, so even if the
--- game's SetMounted works like an on/off switch it can't flip you forever.
--- When LP.Mounting changes right after our call, that value is remembered as
--- "mounted" and used from then on.
-local mountTries, mountWorld, mountedValue, lastMountCall = 0, nil, nil, 0
-pcall(function()
-    local m = LP:WaitForChild("Mounting", 5)
-    if m and m:IsA("ValueBase") then
-        track(m.Changed:Connect(function()
-            if os.clock() - lastMountCall < 3 then mountedValue = m.Value end
-        end))
-    end
-end)
+-- like Yuto Hub: turn it on -> mount right away; get off the mount -> back on
+-- right away. Reacts to the game's own "Mounting" value changing instead of
+-- polling, and pauses itself if the game keeps throwing you off (no endless flip).
+local mountedValue, lastMountCall, mountBlockUntil, mountCalls = nil, 0, 0, {}
 local baseIsMounted = Features.IsMounted
 function Features.IsMounted()
     local m = LP:FindFirstChild("Mounting")
@@ -1787,16 +1778,32 @@ function Features.IsMounted()
     return baseIsMounted()
 end
 function Features.Mount()
-    local world = Util.World()
-    if world ~= mountWorld then mountWorld, mountTries = world, 0 end  -- teleport / new world: try again
-    if Features.IsMounted() == true then mountTries = 0 return end
-    if mountTries >= 1 then return end
-    mountTries = mountTries + 1
-    lastMountCall = os.clock()
-    Net.Call("Mount", true)
+    if not On("AutoMount") or os.clock() < mountBlockUntil then return end
+    if Features.IsMounted() == true then return end
+    local now = os.clock()
+    for k = #mountCalls, 1, -1 do if now - mountCalls[k] > 15 then table.remove(mountCalls, k) end end
+    if #mountCalls >= 3 then
+        mountBlockUntil = now + 30
+        Util.Notify("Auto Mount paused 30s (game keeps dismounting)")
+        return
+    end
+    mountCalls[#mountCalls + 1] = now
+    lastMountCall = now
+    task.spawn(Net.Call, "Mount", true)
 end
 pcall(function()
-    track(LP.CharacterAdded:Connect(function() mountTries = 0 end))
+    local m = LP:WaitForChild("Mounting", 5)
+    if m and m:IsA("ValueBase") then
+        track(m.Changed:Connect(function()
+            -- the value the game sets right after our call = "mounted"
+            if os.clock() - lastMountCall < 3 and mountedValue == nil then mountedValue = m.Value end
+            task.delay(0.3, Features.Mount)   -- got off (or thrown off) -> back on
+        end))
+    end
+end)
+pcall(function()
+    track(LP.CharacterAdded:Connect(function() task.delay(2, Features.Mount) end))
+    track(LP:WaitForChild("World", 5).Changed:Connect(function() task.delay(2, Features.Mount) end))
 end)
 
 -- TIME TRIAL / TOWER ----------------------------------------------------------------
@@ -2498,7 +2505,9 @@ do
     f:Toggle({ Title = "Auto Click ( No Visual Effect )", Flag = "AutoClick" })
     f:Toggle({ Title = "Auto Collect", Flag = "AutoCollect" })
     f:Toggle({ Title = "Attack While Ulti", Flag = "AttackUlt", Callback = function(v) Combat.Options.Ult = v end })
-    f:Toggle({ Title = "Auto Mount", Flag = "AutoMount" })
+    f:Toggle({ Title = "Auto Mount", Flag = "AutoMount", Callback = function(v)
+        if v then task.spawn(Features.Mount) end
+    end })
     f:Toggle({ Title = "TP Pet (Pet need passive)", Flag = "PetTP", Callback = function(v) Combat.Options.PetTP = v end })
     f:Toggle({ Title = "Auto Unlock And Tp Next World", Flag = "AutoNextWorld" })
     f:Toggle({ Title = "Auto Rebirth", Flag = "AutoRebirth" })
@@ -2920,7 +2929,8 @@ local lastWebhook = os.clock()
 loop(1, function()
     if On("AutoRebirth") and Util.Every("rebirth", 5) then Net.Call("Rebirth") end
     if On("AutoNextWorld") and Util.Every("nextworld", 15) then Features.NextWorld() end
-    if On("AutoMount") and Util.Every("mount", 8) then Features.Mount() end
+    -- backup check; only acts when we can actually tell you're not mounted
+    if On("AutoMount") and Util.Every("mount", 3) and Features.IsMounted() == false then Features.Mount() end
     if On("AutoReEquip") and Util.Every("reequip", (F("ReEquipDelay") or 2) * 60) then Net.Call("ReEquipPets") end
     if On("AutoSpin") and Util.Every("spin", 60) then Net.Call("DailySpin") end
     if On("AutoTicket") and Util.Every("ticket", 60) then Net.Call("ClaimTicket") end
