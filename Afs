@@ -59,6 +59,7 @@ local CFG = {
     ConfigFolder = "GravityHub/AFS",
     KillTimeout  = 25,
     JoinCooldown = 8,
+    TrialGoAt    = 30,   -- go to the time trial room this many seconds before it starts
 
     TimeTrials   = { "Lesser", "Medium", "Greater", "Ultimate", "Ultra Hard", "Insane", "Godly", "Infinite" },
     RaidModes    = { "Normal", "Giant", "Massive" },
@@ -1853,13 +1854,42 @@ function Features.TimeTrial()
     local trials = Util.SetToList(F("Trials"))
     if #trials == 0 then return false end
     if CFG.ModeWorlds[world] == nil then HomeWorld = world end
-    -- 1. go to the time trial waiting room (Tower) first
-    if Util.Every("trial-travel", 10) then
-        Util.Notify("Going to the Time Trial room")
-        Travel.To("Tower", true)
+    -- 1. the waiting room opens 60 s before a trial starts: go there in the last
+    --    CFG.TrialGoAt seconds and keep farming elsewhere until then
+    local left = Features.TrialCountdown()
+    local timeToGo = left == nil or (left > 0 and left <= CFG.TrialGoAt)
+    if timeToGo and Util.Every("trial-travel", 5) then
+        Util.Notify("Going to the Time Trial room" .. (left and (" (" .. math.floor(left) .. "s)") or ""))
+        Travel.To("Tower")   -- no position-teleport: the room is closed until 60 s before
         if Util.World() == "Tower" then Features.JoinTrial(trials) end
+        return true
     end
     return false
+end
+
+-- seconds until the next time trial starts, from the countdown board in the
+-- Tower ("1:23", "01:02:03", "45s", "1m 5s"). Remembers the start time so it
+-- still knows when the board isn't loaded (you're in another world).
+local trialStartsAt = nil
+local function parseClock(t)
+    if type(t) ~= "string" then return nil end
+    local h, m, sec = string.match(t, "(%d+):(%d+):(%d+)")
+    if h then return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(sec) end
+    m, sec = string.match(t, "(%d+):(%d+)")
+    if m then return tonumber(m) * 60 + tonumber(sec) end
+    local mm, ss = string.match(t, "(%d+)%s*m"), string.match(t, "(%d+)%s*s")
+    if mm or ss then return (tonumber(mm) or 0) * 60 + (tonumber(ss) or 0) end
+    return nil
+end
+function Features.TrialCountdown()
+    local ok, txt = pcall(function() return Worlds.Tower.Countdown.SurfaceGui.Background.Time.Text end)
+    local secs = ok and parseClock(txt) or nil
+    if secs then
+        trialStartsAt = os.clock() + secs
+        return secs
+    end
+    if trialStartsAt and trialStartsAt - os.clock() > -5 then return trialStartsAt - os.clock() end
+    return nil
 end
 
 -- ask to join the next selected trial (uses the game's real arguments once you
