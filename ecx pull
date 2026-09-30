@@ -1,1 +1,1 @@
-https://raw.githubusercontent.com/Gr4v1ty1508/TEST/refs/heads/main/Pull
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Gr4v1ty1508/TEST/refs/heads/main/Pull"))()
