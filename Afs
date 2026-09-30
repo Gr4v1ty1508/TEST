@@ -982,8 +982,19 @@ function Combat.Attack(e, wanted)
 end
 
 -- one attack step; false when nothing is left
-function Combat.Step(worldName, wanted, names, mode)
-    local target = Combat.Pick(Combat.List(worldName, names), mode or "Nearest")
+function Combat.Step(worldName, wanted, names, mode, maxDist)
+    local list = Combat.List(worldName, names)
+    if maxDist then
+        -- only enemies near us (the Tower holds every player's trial run in one map)
+        local root = Util.Root()
+        local near = {}
+        for _, e in ipairs(list) do
+            local pos = Combat.Pos(e)
+            if root and pos and (pos - root.Position).Magnitude <= maxDist then near[#near + 1] = e end
+        end
+        list = near
+    end
+    local target = Combat.Pick(list, mode or "Nearest")
     if not target then return false end
     Combat.Attack(target, wanted)
     return true
@@ -2028,7 +2039,10 @@ function Features.TimeTrial()
             if #trials > 0 then Features.TryJoinTrial(trials) end
             return os.clock() - trialJoinedAt < 75   -- waiting at our door, else let other modes run
         end
-        if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest") then return true end
+        -- 1. fight what's in our room (only near us: every player's run is in the same map)
+        if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest", 450) then return true end
+        -- 2. room cleared: its ConfirmPart has a prompt -> press it to go to the next room
+        if Features.PressNextRoom() then return true end
         -- like Yuto Hub: go to the middle of the current room ("Room N" on screen)
         local center = Features.RoomCenter()
         local root = Util.Root()
@@ -2050,25 +2064,6 @@ function Features.TimeTrial()
         end
         if not On("TrialIgnoreChest") then
             for _, p in ipairs(Prompt.Find(tower, { "chest" })) do Prompt.Use(p) task.wait(0.2) end
-        end
-        -- room cleared: press the button that sends us to the next room (in RestRooms)
-        local confirmParts = {}
-        for _, room in ipairs(Features.TrialRooms({ RestRoom = true })) do
-            local c = room:FindFirstChild("ConfirmPart", true)
-            local root = Util.Root()
-            -- only our own room (other players' runs are in the same map)
-            if c and c:IsA("BasePart") and root and (c.Position - root.Position).Magnitude < 250 then
-                confirmParts[#confirmParts + 1] = c
-            end
-        end
-        for _, obj in ipairs(confirmParts) do
-            do
-                local p = obj:FindFirstChildOfClass("ProximityPrompt")
-                if p and p.Enabled and Util.Every("trial-room", 2) then
-                    Prompt.Use(p)
-                    Stats.TrialFloor = Stats.TrialFloor + 1
-                end
-            end
         end
         -- normal room cleared (no button here): go on to the next room
         if Util.Every("trial-advance", 2) then Features.AdvanceRoom() end
@@ -2189,6 +2184,65 @@ function Features.RoomCenter()
         if p:IsA("BasePart") then sum, count = sum + p.Position, count + 1 end
     end
     return count > 0 and sum / count or nil
+end
+
+-- NEXT ROOM BUTTON: when a trial room is cleared the game puts a ProximityPrompt on a
+-- part named "ConfirmPart" in Tower.Map. Pressing it sends you to the next room.
+-- (Same as the old AFS scripts: stand on the ConfirmPart and press E until the prompt
+-- is gone.) Parts are collected once and then kept up to date with DescendantAdded,
+-- so the huge map isn't searched every tick.
+local confirmParts, confirmWatch = {}, nil
+local function watchConfirmParts()
+    if confirmWatch then return end
+    local tower = Worlds:FindFirstChild("Tower")
+    local map = tower and tower:FindFirstChild("Map")
+    if not map then return end
+    for _, d in ipairs(map:GetDescendants()) do
+        if d.Name == "ConfirmPart" then confirmParts[d] = true end
+    end
+    confirmWatch = track(map.DescendantAdded:Connect(function(d)
+        if d.Name == "ConfirmPart" then confirmParts[d] = true
+        elseif d:IsA("ProximityPrompt") and d.Parent and d.Parent.Name == "ConfirmPart" then confirmParts[d.Parent] = true end
+    end))
+end
+-- nearest ConfirmPart that has its prompt (= our cleared room)
+function Features.NextRoomButton(maxDist)
+    watchConfirmParts()
+    local root = Util.Root()
+    if not root then return nil end
+    local best, bestPrompt, bestDist
+    for part in pairs(confirmParts) do
+        if not part.Parent then
+            confirmParts[part] = nil
+        else
+            local p = part:FindFirstChildWhichIsA("ProximityPrompt", true)
+            local pos = part:IsA("BasePart") and part.Position or (part:IsA("Model") and part:GetPivot().Position)
+            if p and p.Enabled and pos then
+                local d = (pos - root.Position).Magnitude
+                if d <= (maxDist or 1500) and (not bestDist or d < bestDist) then best, bestPrompt, bestDist = part, p, d end
+            end
+        end
+    end
+    return best, bestPrompt
+end
+function Features.PressNextRoom()
+    local part, prompt = Features.NextRoomButton(450)
+    if not part then return false end
+    local cf = part:IsA("BasePart") and part.CFrame or part:GetPivot()
+    local t0 = os.clock()
+    repeat
+        Util.MoveTo(cf + Vector3.new(0, 3, 0))
+        task.wait(0.1)
+        if fireproximityprompt then pcall(fireproximityprompt, prompt) end
+        pcall(function()
+            VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+            task.wait(math.max(prompt.HoldDuration, 0.05))
+            VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        end)
+        task.wait(0.25)
+    until not prompt.Parent or not prompt.Enabled or not part.Parent or os.clock() - t0 > 6 or not On("AutoTrial")
+    Stats.TrialFloor = Stats.TrialFloor + 1
+    return true
 end
 
 -- TRIAL ROOMS: a run is built from models in Tower.Map named "BattleRoom" (fight)
@@ -2527,7 +2581,12 @@ function Features.InTrialRun()
     local tower = Worlds:FindFirstChild("Tower")
     local spawn = tower and tower:FindFirstChild("Spawns") and tower.Spawns:FindFirstChildWhichIsA("BasePart")
     local root = Util.Root()
-    return (spawn and root and (root.Position - spawn.Position).Magnitude > 600) and true or false
+    if not (spawn and root) then return false end
+    local fromLobby = (root.Position - spawn.Position).Magnitude
+    if fromLobby > 400 then return true end
+    -- a cleared room's button right next to us also means we're in a run
+    if fromLobby > 150 and Features.NextRoomButton(120) then return true end
+    return false
 end
 
 -- join exactly like the game: JoinTimeTrial(n) -> AttemptTravel("TowerDoor<n>", true)
