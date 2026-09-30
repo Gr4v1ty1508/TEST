@@ -1,0 +1,504 @@
+--[[====================================================================
+    GRAVITY DUMPER  -  Anime Fighters Simulator
+    Saves what the game looks like from your client so Gravity Hub can be
+    fixed from real data instead of guesses.
+
+    Everything goes to:  <executor workspace>/GravityHub/AFS/dump/
+      summary.txt      executor, place, your world, counts, missing functions
+      remotes.txt      every RemoteEvent / RemoteFunction / Bindable (path + class)
+      player.txt       your player: values, attributes, pets (first 3 in full)
+      gui.txt          PlayerGui.MainGui (visible / hidden, button + label text)
+      world.txt        the world you're standing in, deep, + one enemy in full
+      modes.txt        Dungeon / Raid / Tower / InfinityTower / GatesMode / ... maps
+      replicated.txt   ReplicatedStorage tree
+      workspace.txt    Workspace tree (same-named things grouped)
+      modules/<name>.txt   data of every ModuleScripts module (require)
+      calls.txt        RECORD: every remote call you make + what the server
+                       sends back, while recording is on
+
+    How to use
+      1. Run this (Gravity Hub can stay open).
+      2. Press "Dump All" where you normally farm. Wait for "done".
+      3. Press "Record", then do by hand ONE of each thing that is broken:
+         open a dungeon, join a time trial, join a raid / defense / gate,
+         start a quest, mount, hatch a star. Then press "Stop + Save".
+      4. Send the dump folder (or tell Claude where it is on your PC).
+======================================================================]]
+
+if getgenv and getgenv().GravityDumper then pcall(getgenv().GravityDumper) end
+
+local Players     = game:GetService("Players")
+local RS          = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local LP          = Players.LocalPlayer
+
+local ROOT = "GravityHub/AFS/dump"
+local MAX_LINES = 60000
+local SPAM = { ClickerDamage = true, SendPet = true, PetAttack = true, PetAbility = true, DPS = true, DPSTest = true,
+    TrackDPS = true, EnemyDamagedEffect = true, UpdateLocalEnemyHealth = true, GetLocalEnemyHealth = true,
+    HandlePlayerHealth = true, CreatePickups = true, DestroyPickup = true, RegisterPickup = true, Pickup = true,
+    UpdateBpGui = true, TowerTimer = true, InfinityTowerTimer = true, GatesModeTimer = true, GlobalBossTimer = true,
+    UpdateDungeonTimer = true, CreateGems = true, CreateItems = true, DropPXP = true, Yen = true }
+
+local running = true
+local conns = {}
+
+------------------------------------------------------------------------
+-- files
+------------------------------------------------------------------------
+local function ensureFolder(path)
+    if not (isfolder and makefolder) then return end
+    local cur = ""
+    for part in string.gmatch(path, "[^/]+") do
+        cur = cur == "" and part or (cur .. "/" .. part)
+        pcall(function() if not isfolder(cur) then makefolder(cur) end end)
+    end
+end
+local function save(name, lines)
+    if not writefile then return false end
+    ensureFolder(ROOT .. (string.find(name, "/") and ("/" .. string.match(name, "^(.*)/")) or ""))
+    local text = type(lines) == "table" and table.concat(lines, "\n") or tostring(lines)
+    return pcall(writefile, ROOT .. "/" .. name, text)
+end
+
+------------------------------------------------------------------------
+-- small helpers
+------------------------------------------------------------------------
+local function path(obj)
+    local ok, p = pcall(function() return obj:GetFullName() end)
+    return ok and p or tostring(obj)
+end
+
+local function valueText(v)
+    local t = typeof(v)
+    if t == "Instance" then return "<" .. v.ClassName .. "> " .. path(v) end
+    if t == "string" then return string.format("%q", string.sub(v, 1, 200)) end
+    if t == "table" then return "{table}" end
+    return tostring(v)
+end
+
+local function attrs(obj)
+    local ok, a = pcall(function() return obj:GetAttributes() end)
+    if not ok or type(a) ~= "table" or next(a) == nil then return "" end
+    local parts = {}
+    for k, v in pairs(a) do parts[#parts + 1] = k .. "=" .. valueText(v) end
+    table.sort(parts)
+    return "  @{" .. table.concat(parts, ", ") .. "}"
+end
+
+local function describe(obj)
+    local s = obj.Name .. "  <" .. obj.ClassName .. ">"
+    pcall(function()
+        if obj:IsA("ValueBase") then s = s .. " = " .. valueText(obj.Value) end
+        if obj:IsA("GuiObject") then s = s .. (obj.Visible and "  [visible]" or "  [hidden]") end
+        if obj:IsA("LayerCollector") then s = s .. (obj.Enabled and "  [enabled]" or "  [disabled]") end
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+            if obj.Text ~= "" then s = s .. '  "' .. string.sub(obj.Text, 1, 60) .. '"' end
+        end
+        if obj:IsA("ProximityPrompt") then s = s .. '  prompt "' .. obj.ActionText .. '" / "' .. obj.ObjectText .. '" hold=' .. obj.HoldDuration end
+        if obj:IsA("BasePart") then
+            local p = obj.Position
+            s = s .. string.format("  pos(%.0f, %.0f, %.0f)", p.X, p.Y, p.Z)
+        end
+        if obj:IsA("Model") and obj.PrimaryPart then s = s .. "  primary=" .. obj.PrimaryPart.Name end
+    end)
+    return s .. attrs(obj)
+end
+
+-- tree with same-named siblings grouped ("x40 of: Enemy <Model>") so it stays readable
+local function tree(obj, depth, out, indent, maxKinds)
+    indent = indent or ""
+    if #out >= MAX_LINES then return end
+    if not obj then out[#out + 1] = indent .. "(missing)" return end
+    local kids = {}
+    pcall(function() kids = obj:GetChildren() end)
+    out[#out + 1] = indent .. describe(obj) .. (#kids > 0 and ("  (" .. #kids .. ")") or "")
+    if depth <= 0 or #kids == 0 then return end
+    local groups, order = {}, {}
+    for _, c in ipairs(kids) do
+        local key = c.Name .. "<" .. c.ClassName .. ">"
+        if not groups[key] then groups[key] = { first = c, n = 0 } order[#order + 1] = key end
+        groups[key].n = groups[key].n + 1
+    end
+    for i, key in ipairs(order) do
+        if i > (maxKinds or 80) then out[#out + 1] = indent .. "  ... " .. (#order - i + 1) .. " more kinds" break end
+        local g = groups[key]
+        if g.n > 1 then out[#out + 1] = indent .. "  x" .. g.n .. " of:" end
+        tree(g.first, depth - 1, out, indent .. "  ", maxKinds)
+        if #out >= MAX_LINES then out[#out + 1] = "... (cut, file too long)" return end
+    end
+end
+
+-- table -> readable text (cycle safe, depth / size limited)
+local function ser(v, depth, seen, indent)
+    indent = indent or ""
+    local t = typeof(v)
+    if t ~= "table" then
+        if t == "function" then return "<function>" end
+        return valueText(v)
+    end
+    if seen[v] then return "<cycle>" end
+    if depth <= 0 then return "{...}" end
+    seen[v] = true
+    local keys = {}
+    for k in pairs(v) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b)
+        if type(a) == type(b) and (type(a) == "number" or type(a) == "string") then return a < b end
+        return type(a) < type(b)
+    end)
+    local lines = { "{" }
+    for i, k in ipairs(keys) do
+        if i > 400 then lines[#lines + 1] = indent .. "  ... " .. (#keys - 400) .. " more" break end
+        local ks = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
+        lines[#lines + 1] = indent .. "  " .. ks .. " = " .. ser(v[k], depth - 1, seen, indent .. "  ")
+    end
+    lines[#lines + 1] = indent .. "}"
+    seen[v] = nil
+    return table.concat(lines, "\n")
+end
+
+local function argsText(args, n)
+    local parts = {}
+    for i = 1, n do
+        local a = args[i]
+        if typeof(a) == "table" then
+            parts[i] = "[" .. i .. "] " .. string.gsub(ser(a, 4, {}, "      "), "\n%s*", " ")
+        else
+            parts[i] = "[" .. i .. "] " .. valueText(a)
+        end
+    end
+    return table.concat(parts, ", ")
+end
+
+------------------------------------------------------------------------
+-- dumps
+------------------------------------------------------------------------
+local status = function() end
+
+local function dumpSummary()
+    local out = {}
+    local exec = "?"
+    pcall(function() exec = table.concat({ identifyexecutor() }, " ") end)
+    out[#out + 1] = "Gravity Dumper  " .. os.date("%Y-%m-%d %H:%M:%S")
+    out[#out + 1] = "executor: " .. exec .. "   place: " .. tostring(game.PlaceId) .. "   job: " .. tostring(game.JobId)
+    local w = LP:FindFirstChild("World")
+    out[#out + 1] = "World value: " .. (w and valueText(w.Value) or "(no World value)")
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then out[#out + 1] = string.format("you are at (%.0f, %.0f, %.0f)", root.Position.X, root.Position.Y, root.Position.Z) end
+    local fns = {}
+    for _, n in ipairs({ "hookmetamethod", "getnamecallmethod", "checkcaller", "getconnections", "firesignal",
+        "fireproximityprompt", "firetouchinterest", "fireclickdetector", "writefile", "appendfile", "readfile",
+        "setclipboard", "gethui", "getgc", "getsenv", "decompile", "request", "identifyexecutor" }) do
+        fns[#fns + 1] = n .. "=" .. tostring(getfenv()[n] ~= nil)
+    end
+    out[#out + 1] = "functions: " .. table.concat(fns, " ")
+    local worlds = workspace:FindFirstChild("Worlds")
+    out[#out + 1] = "Worlds folders: " .. (worlds and #worlds:GetChildren() or 0)
+    save("summary.txt", out)
+end
+
+local function dumpRemotes()
+    local out = {}
+    for _, root in ipairs({ RS, workspace, LP, game:GetService("StarterGui") }) do
+        for _, d in ipairs(root:GetDescendants()) do
+            if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") or d:IsA("UnreliableRemoteEvent")
+                or d:IsA("BindableEvent") or d:IsA("BindableFunction") then
+                out[#out + 1] = string.format("%-22s %s", d.ClassName, path(d))
+            end
+        end
+    end
+    table.sort(out)
+    save("remotes.txt", out)
+end
+
+local function dumpPlayer()
+    local out = {}
+    for _, c in ipairs(LP:GetChildren()) do
+        if c.Name ~= "PlayerGui" and c.Name ~= "PlayerScripts" and c.Name ~= "Backpack" and c.Name ~= "Pets" then
+            tree(c, 3, out)
+        end
+    end
+    out[#out + 1] = "player attributes:" .. attrs(LP)
+    local pets = LP:FindFirstChild("Pets")
+    out[#out + 1] = ""
+    out[#out + 1] = "Pets: " .. (pets and #pets:GetChildren() or 0)
+    if pets then
+        for i, p in ipairs(pets:GetChildren()) do
+            if i > 3 then break end
+            tree(p, 4, out, "  ")
+        end
+    end
+    save("player.txt", out)
+end
+
+local function dumpGui()
+    local out = {}
+    local pg = LP:FindFirstChild("PlayerGui")
+    for _, g in ipairs(pg and pg:GetChildren() or {}) do
+        tree(g, g.Name == "MainGui" and 5 or 2, out, "", 120)
+    end
+    save("gui.txt", out)
+end
+
+local function dumpWorld()
+    local out = {}
+    local worlds = workspace:FindFirstChild("Worlds")
+    local wv = LP:FindFirstChild("World")
+    local name = wv and tostring(wv.Value) or ""
+    local w = worlds and worlds:FindFirstChild(name)
+    out[#out + 1] = "current world: " .. name
+    tree(w, 6, out, "", 60)
+    -- first enemy-looking model in full
+    if w then
+        for _, d in ipairs(w:GetDescendants()) do
+            if d:IsA("Model") and d:FindFirstChild("HumanoidRootPart") and (d:FindFirstChild("Health") or d:FindFirstChild("DisplayName") or d:GetAttribute("Health")) then
+                out[#out + 1] = ""
+                out[#out + 1] = "first enemy (" .. path(d) .. "):"
+                tree(d, 4, out, "  ", 60)
+                break
+            end
+        end
+    end
+    local eff = workspace:FindFirstChild("Effects")
+    out[#out + 1] = ""
+    out[#out + 1] = "workspace.Effects:"
+    tree(eff, 3, out, "  ", 40)
+    save("world.txt", out)
+end
+
+local function dumpModes()
+    local out = {}
+    local worlds = workspace:FindFirstChild("Worlds")
+    for _, n in ipairs({ "Dungeon", "Raid", "Tower", "InfinityTower", "GatesMode", "TimeChamber", "GlobalBoss", "Titan", "EventHub", "Portal" }) do
+        out[#out + 1] = ""
+        out[#out + 1] = "######## " .. n
+        tree(worlds and worlds:FindFirstChild(n), 5, out, "", 50)
+    end
+    save("modes.txt", out)
+end
+
+local function dumpBig()
+    local out = {}
+    tree(RS, 4, out, "", 150)
+    save("replicated.txt", out)
+    task.wait()
+    out = {}
+    tree(workspace, 3, out, "", 150)
+    save("workspace.txt", out)
+end
+
+local SKIP_MODULES = { GameAnalytics = true, MarketplaceHandler = true, PlayerInputModule = true, LocalizationHandler = true }
+local function dumpModules()
+    local folder = RS:FindFirstChild("ModuleScripts")
+    if not folder then save("modules/_none.txt", "no ReplicatedStorage.ModuleScripts") return end
+    local index = {}
+    for _, m in ipairs(folder:GetChildren()) do
+        if m:IsA("ModuleScript") and not SKIP_MODULES[m.Name] then
+            status("module " .. m.Name)
+            local done, ok, res = false, false, nil
+            task.spawn(function()
+                ok, res = pcall(require, m)
+                done = true
+            end)
+            local t0 = os.clock()
+            while not done and os.clock() - t0 < 3 do task.wait() end
+            local text
+            if not done then text = "(require timed out)"
+            elseif not ok then text = "(require failed) " .. tostring(res)
+            else text = ser(res, 7, {}, "") end
+            save("modules/" .. m.Name .. ".txt", text)
+            index[#index + 1] = string.format("%-28s %s", m.Name, (not done and "timeout") or (ok and typeof(res)) or "failed")
+        end
+    end
+    save("modules/_index.txt", index)
+end
+
+local function dumpAll()
+    local steps = {
+        { "summary", dumpSummary }, { "remotes", dumpRemotes }, { "player", dumpPlayer },
+        { "gui", dumpGui }, { "world", dumpWorld }, { "modes", dumpModes },
+        { "trees", dumpBig }, { "modules", dumpModules },
+    }
+    local errs = {}
+    for _, s in ipairs(steps) do
+        status("dumping " .. s[1] .. "...")
+        local ok, e = pcall(s[2])
+        if not ok then errs[#errs + 1] = s[1] .. ": " .. tostring(e) end
+        task.wait()
+    end
+    if #errs > 0 then save("dump_errors.txt", errs) end
+    status(#errs == 0 and "done - saved to " .. ROOT or ("done with " .. #errs .. " errors (dump_errors.txt)"))
+end
+
+------------------------------------------------------------------------
+-- recorder: your remote calls (+ return values) and what the server sends
+------------------------------------------------------------------------
+local recording = false
+local calls = {}
+local lastIncoming = {}
+local function rec(line)
+    if #calls >= 5000 then return end
+    calls[#calls + 1] = string.format("%8.2f  %s", os.clock() - (calls.t0 or os.clock()), line)
+end
+
+if hookmetamethod and getnamecallmethod then
+    local original
+    original = hookmetamethod(game, "__namecall", function(self, ...)
+        if recording and running and not (checkcaller and checkcaller()) then
+            local method = getnamecallmethod()
+            if (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance" and not SPAM[self.Name] then
+                local args = table.pack(...)
+                local head = "OUT " .. self.Name .. ":" .. method .. "(" .. argsText(args, args.n) .. ")"
+                if method == "InvokeServer" then
+                    local res = table.pack(original(self, ...))
+                    task.spawn(rec, head .. "  ->  " .. (res.n > 0 and argsText(res, res.n) or "nil"))
+                    return table.unpack(res, 1, res.n)
+                end
+                task.spawn(rec, head)
+            end
+        end
+        return original(self, ...)
+    end)
+end
+
+-- server -> you
+local remoteFolder = RS:FindFirstChild("Remote")
+for _, r in ipairs(remoteFolder and remoteFolder:GetChildren() or {}) do
+    if r:IsA("RemoteEvent") and not SPAM[r.Name] then
+        conns[#conns + 1] = r.OnClientEvent:Connect(function(...)
+            if not recording then return end
+            local args = table.pack(...)
+            local line = "IN  " .. r.Name .. "(" .. argsText(args, args.n) .. ")"
+            if lastIncoming[r.Name] == line then return end   -- same message again
+            lastIncoming[r.Name] = line
+            rec(line)
+        end)
+    end
+end
+-- world changes while recording
+local wv = LP:FindFirstChild("World")
+if wv then
+    conns[#conns + 1] = wv.Changed:Connect(function(v) if recording then rec("WORLD -> " .. tostring(v)) end end)
+end
+
+local function startRecord()
+    calls = { t0 = os.clock() }
+    lastIncoming = {}
+    recording = true
+    rec("recording started in world " .. (wv and tostring(wv.Value) or "?"))
+    status(hookmetamethod and "recording... do the actions by hand" or "recording (no hookmetamethod: only server -> you)")
+end
+local function stopRecord()
+    recording = false
+    rec("recording stopped")
+    local stamp = os.date("%H%M%S")
+    save("calls_" .. stamp .. ".txt", calls)
+    status("saved calls_" .. stamp .. ".txt (" .. #calls .. " lines)")
+end
+
+------------------------------------------------------------------------
+-- tiny window
+------------------------------------------------------------------------
+local parent
+pcall(function() parent = gethui and gethui() end)
+if not parent then pcall(function() parent = game:GetService("CoreGui") local _ = parent.Name end) end
+parent = parent or LP:WaitForChild("PlayerGui")
+local old = parent:FindFirstChild("GravityDumper")
+if old then old:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "GravityDumper"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 1000
+gui.Parent = parent
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromOffset(260, 170)
+frame.Position = UDim2.new(1, -280, 0, 80)
+frame.BackgroundColor3 = Color3.fromRGB(19, 19, 20)
+frame.Active = true
+frame.Draggable = true
+frame.Parent = gui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+local st = Instance.new("UIStroke", frame)
+st.Color = Color3.fromRGB(45, 45, 48)
+
+local title = Instance.new("TextLabel")
+title.BackgroundTransparency = 1
+title.Position = UDim2.fromOffset(14, 8)
+title.Size = UDim2.new(1, -40, 0, 20)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 14
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.TextColor3 = Color3.fromRGB(235, 235, 240)
+title.Text = "Gravity Dumper"
+title.Parent = frame
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.BackgroundTransparency = 1
+statusLabel.Position = UDim2.fromOffset(14, 134)
+statusLabel.Size = UDim2.new(1, -28, 0, 28)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 11
+statusLabel.TextWrapped = true
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.TextColor3 = Color3.fromRGB(150, 150, 158)
+statusLabel.Text = writefile and "ready" or "this executor has no writefile - can't save"
+statusLabel.Parent = frame
+status = function(t) statusLabel.Text = t end
+
+local function button(text, y, fn)
+    local b = Instance.new("TextButton")
+    b.Position = UDim2.fromOffset(14, y)
+    b.Size = UDim2.new(1, -28, 0, 30)
+    b.BackgroundColor3 = Color3.fromRGB(29, 29, 31)
+    b.AutoButtonColor = true
+    b.Font = Enum.Font.GothamMedium
+    b.TextSize = 13
+    b.TextColor3 = Color3.fromRGB(232, 232, 236)
+    b.Text = text
+    b.Parent = frame
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 7)
+    b.MouseButton1Click:Connect(function() task.spawn(fn, b) end)
+    return b
+end
+
+local close = Instance.new("TextButton")
+close.BackgroundTransparency = 1
+close.Position = UDim2.new(1, -30, 0, 6)
+close.Size = UDim2.fromOffset(24, 24)
+close.Text = "x"
+close.Font = Enum.Font.GothamBold
+close.TextSize = 14
+close.TextColor3 = Color3.fromRGB(150, 150, 158)
+close.Parent = frame
+
+local busy = false
+button("Dump All", 36, function()
+    if busy then return end
+    busy = true
+    dumpAll()
+    busy = false
+end)
+local recBtn
+recBtn = button("Record", 72, function()
+    if recording then
+        stopRecord()
+        recBtn.Text = "Record"
+    else
+        startRecord()
+        recBtn.Text = "Stop + Save"
+    end
+end)
+button("Save Summary Only", 108, function() dumpSummary() status("summary.txt saved") end).Size = UDim2.new(1, -28, 0, 22)
+
+local function unload()
+    if recording then pcall(stopRecord) end
+    running = false
+    recording = false
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    pcall(function() gui:Destroy() end)
+end
+close.MouseButton1Click:Connect(unload)
+if getgenv then getgenv().GravityDumper = unload end
