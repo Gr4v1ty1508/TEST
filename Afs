@@ -1,5 +1,5 @@
 --[[====================================================================
-    AFS MAIN  -  REN HUB V3  (Anime Fighters Simulator)
+    AFS MAIN  -  GRAVITY HUB V3  (Anime Fighters Simulator)
     Written from scratch.
 
     Tabs
@@ -18,14 +18,27 @@
       UI Settings       key, scale, accent (settings auto-save per account
                         to GravityHub/AFS/CONFIG/<player>.json)
 
-    Click the floating R icon (or press RightControl) to open / close.
+    Extras (Main / Raid / Shop / Hatch / UI Settings)
+                        auto equip saved teams per activity, fast pet ability,
+                        pull pets, pet speed boost, buy world gate, smart raid
+                        target + results, free gifts, multi open, FPS / ping,
+                        time trial: joins through the game popup, real floor
+    Dungeon           equips a chosen artifact (e.g. one that cuts the opening
+                        time) before every summon
+
+    Click the floating G icon (or press RightControl) to open / close.
 
     Remote arguments: the game dump only lists remote NAMES. Every call goes
     through CFG.Calls. If something does nothing: Settings > Remote Spy, do
     the action once by hand, read F9, fix that line in CFG.Calls.
 ======================================================================]]
 
-if getgenv and getgenv().RenHubV3 then pcall(getgenv().RenHubV3) end
+-- unload a running copy first (also the old REN HUB name)
+if getgenv then
+    for _, k in ipairs({ "GravityHubV3", "RenHubV3" }) do
+        if getgenv()[k] then pcall(getgenv()[k]) getgenv()[k] = nil end
+    end
+end
 
 ------------------------------------------------------------------------
 -- SERVICES
@@ -53,7 +66,7 @@ local function track(conn) Connections[#Connections + 1] = conn return conn end
 -- CONFIG
 ------------------------------------------------------------------------
 local CFG = {
-    Name         = "REN HUB V3",
+    Name         = "GRAVITY HUB V3",
     Game         = "Anime Fighter Simulator",
     ToggleKey    = Enum.KeyCode.RightControl,
     ConfigFolder = "GravityHub/AFS",
@@ -74,13 +87,16 @@ local CFG = {
     DungeonSizes = { "Small", "Medium", "Large", "Insane", "Hellish" },
     -- what SummonDungeon gets for each size (change to numbers 1-5 if Remote Spy shows numbers)
     DungeonSizeArg = { Small = "Small", Medium = "Medium", Large = "Large", Insane = "Insane", Hellish = "Hellish" },
+    -- force which SummonDungeon argument is the "use artifact" switch (nil = find it by itself)
+    DungeonArtifactSlot = nil,
     GateRanks    = { "E", "D", "C", "B", "A", "S", "X", "Z", "Anniversary" },
     PassiveMachines = { "Normal", "Requiem", "Summer", "Christmas", "Valentine", "Patrick", "Easter" },
     RerollMethods   = { "Token", "Shard" },
     PetRarities     = { "Common", "Rare", "Epic", "Legendary", "Mythical", "Secret", "Divine" },
     FallbackPassiveRarities = { "Divine", "Secret", "Mythical", "Legendary", "Epic", "Rare", "Common" },
     Codes        = { "1milfaves", "DivineColosseum", "Thanks600k", "2k22" },
-    HatchAmount  = { Single = 1, Multiple = 3, Max = 6 },
+    HatchAmount  = { Single = 1, Multiple = 3, Max = 6 },   -- Max is replaced by the number on the game's Open button
+    FreeGiftCount = 21,   -- ClaimGift(1..21), cycled until the gift window says all claimed
     TargetModes  = { "Nearest", "Weakest", "Strongest" },
     MeteorNames  = { Meteor = true, ["Fallen Star"] = true, FallenStar = true },
 
@@ -182,7 +198,15 @@ local CFG = {
         ClaimBoost      = { "ClaimBoost",               function() return {} end },
         RedeemCode      = { "RedeemCode",               function(code) return { code } end },
         SetSettings     = { "SetSettings",              function(settings) return { settings } end },
+        EquipArtifact   = { "EquipArtefact",            function(name, slot) return { name, slot } end },
     },
+
+    -- artifacts: { name shown in the game, name the game uses }
+    Artifacts = {
+        { "Yen", "Yen" }, { "Passive", "Dreams" }, { "Time", "Time" }, { "Drops", "Drops" },
+        { "Equip", "Equip" }, { "Attack", "Damage" }, { "Key", "Dungeon" }, { "Luck", "Luck" },
+    },
+    ArtifactSlots = { ["1"] = "CurrentArtefact", ["2"] = "CurrentSecondArtefact" },
 }
 
 ------------------------------------------------------------------------
@@ -248,7 +272,7 @@ local Net = {}
 local function invokeSafe(remote, args, timeout)
     local done, result = false, nil
     task.spawn(function()
-        local ok, res = pcall(remote.InvokeServer, remote, table.unpack(args))
+        local ok, res = pcall(remote.InvokeServer, remote, table.unpack(args, 1, args.n or #args))
         if ok then result = res else warn("[" .. CFG.Name .. "] " .. remote.Name .. ": " .. tostring(res)) end
         done = true
     end)
@@ -259,9 +283,13 @@ end
 
 function Net.Raw(name, args)
     local r = Remotes:FindFirstChild(name)
-    if not r then warn("[" .. CFG.Name .. "] missing remote " .. name) return nil end
+    if not r then
+        Net.Missing = Net.Missing or {}
+        if not Net.Missing[name] then Net.Missing[name] = true warn("[" .. CFG.Name .. "] missing remote " .. name) end
+        return nil
+    end
     if r:IsA("RemoteFunction") then return invokeSafe(r, args) end
-    pcall(r.FireServer, r, table.unpack(args))
+    pcall(r.FireServer, r, table.unpack(args, 1, args.n or #args))
     return nil
 end
 
@@ -297,14 +325,71 @@ function Learn.Load()
     Learn.data = (ok and type(t) == "table") and t or {}
     return Learn.data
 end
+-- values are saved as JSON: tables and Instances (as their path) are kept too,
+-- so calls like SummonDungeon({ ... }) or SummonDungeon(worldFolder, ...) are learned
+local function learnSer(v, depth)
+    local t = typeof(v)
+    if v == nil then return "__nil" end
+    if t == "string" or t == "number" or t == "boolean" then return v end
+    if t == "Instance" then return "__inst:" .. v:GetFullName() end
+    if t == "EnumItem" then return "__enum:" .. tostring(v) end
+    if t == "table" and depth < 4 then
+        local o = {}
+        for k, x in pairs(v) do
+            if type(k) == "string" or type(k) == "number" then
+                o[#o + 1] = { k = k, v = learnSer(x, depth + 1) }
+            end
+        end
+        return { __tbl = o }
+    end
+    return "__nil"
+end
+local function learnDe(v)
+    if v == "__nil" then return nil end
+    if type(v) == "string" then
+        local path = string.match(v, "^__inst:(.+)$")
+        if path then
+            local obj = game
+            for part in string.gmatch(path, "[^%.]+") do
+                obj = obj and obj:FindFirstChild(part)
+            end
+            return obj
+        end
+        local enum = string.match(v, "^__enum:Enum%.(.+)$")
+        if enum then
+            local ok, e = pcall(function()
+                local a, b = string.match(enum, "^(.-)%.(.+)$")
+                return Enum[a][b]
+            end)
+            return ok and e or nil
+        end
+        return v
+    end
+    if type(v) == "table" and v.__tbl then
+        local o = {}
+        for _, kv in ipairs(v.__tbl) do o[kv.k] = learnDe(kv.v) end
+        return o
+    end
+    return v
+end
+Learn.Ser, Learn.De = learnSer, learnDe
+
 function Learn.Record(name, args)
     local list = {}
-    for i = 1, args.n do
-        local t = type(args[i])
-        if t ~= "string" and t ~= "number" and t ~= "boolean" and args[i] ~= nil then return end
-        list[i] = args[i] == nil and "__nil" or args[i]
+    for i = 1, args.n do list[i] = learnSer(args[i], 0) end
+    local entry = Learn.Load()[name] or {}
+    entry.args, entry.n = list, args.n
+    -- keep the last few different calls: what changes between them tells which
+    -- argument is the artifact / size / world switch
+    entry.hist = type(entry.hist) == "table" and entry.hist or {}
+    local sig = HttpService:JSONEncode(list)
+    local dup = false
+    for _, h in ipairs(entry.hist) do if HttpService:JSONEncode(h) == sig then dup = true break end end
+    if not dup then
+        table.insert(entry.hist, 1, list)
+        while #entry.hist > 8 do table.remove(entry.hist) end
     end
-    Learn.Load()[name] = { args = list, n = args.n }
+    Learn.data[name] = entry
     pcall(function()
         if not writefile then return end
         local cur = ""
@@ -314,18 +399,20 @@ function Learn.Record(name, args)
         end
         writefile(Learn.File, HttpService:JSONEncode(Learn.data))
     end)
+    if Learn.OnRecord then pcall(Learn.OnRecord, name) end
 end
 -- returns a copy of the learned args (or nil)
 function Learn.Get(name)
     local t = Learn.Load()[name]
     if type(t) ~= "table" or type(t.args) ~= "table" then return nil end
     local out, n = {}, tonumber(t.n) or #t.args
-    for i = 1, n do
-        local v = t.args[i]
-        if v == "__nil" then v = nil end
-        out[i] = v
-    end
+    for i = 1, n do out[i] = learnDe(t.args[i]) end
     return out, n
+end
+-- raw saved history (serialized form)
+function Learn.History(name)
+    local t = Learn.Load()[name]
+    return type(t) == "table" and type(t.hist) == "table" and t.hist or {}
 end
 
 ------------------------------------------------------------------------
@@ -652,7 +739,13 @@ function Data.Stars()
     for _, world in ipairs(Worlds:GetChildren()) do
         for _, obj in ipairs(world:GetChildren()) do
             local n = obj.Name
-            if (string.sub(n, -3) == "Egg" or string.sub(n, -4) == "Star") and not seen[world.Name .. n] then
+            -- EggStats lists every star (some aren't named ...Egg / ...Star); Robux-only ones are skipped
+            local es = Data.Module("EggStats")
+            local info = es and es[n]
+            local isStar
+            if es then isStar = type(info) == "table" and info.Currency ~= "Robux"
+            else isStar = string.sub(n, -3) == "Egg" or string.sub(n, -4) == "Star" end
+            if isStar and obj:IsA("Model") and not seen[world.Name .. n] then
                 seen[world.Name .. n] = true
                 out[#out + 1] = n .. " | " .. world.Name
             end
@@ -703,22 +796,53 @@ function Data.RebirthBosses()
     return set
 end
 
--- pets: "Name [id]" when the pet has a readable name, else the id
+-- PETS: LocalPlayer.Pets only holds ObjectValues pointing at your EQUIPPED pet models
+-- in workspace.Pets (named after the pet type, so two Kannas have the same name).
+-- The real id is in the model's Data folder (Data.UID).
+function Data.EquippedPets()
+    local out, folder = {}, LP:FindFirstChild("Pets")
+    for _, v in ipairs(folder and folder:GetChildren() or {}) do
+        local m = v:IsA("ObjectValue") and v.Value or nil
+        if m then out[#out + 1] = m end
+    end
+    return out
+end
+-- a value of a pet model: its Data folder first, then the model itself
+function Data.PetValue(model, names)
+    local d = model and model:FindFirstChild("Data")
+    local v = d and Util.Value(d, names)
+    if v == nil then v = Util.Value(model, names) end
+    return v
+end
+function Data.PetUID(model)
+    local v = Data.PetValue(model, { "UID", "Uid", "Id", "ID", "PetId", "PetID" })
+    return v ~= nil and tostring(v) or nil
+end
+function Data.PetLabel(model)
+    local uid = Data.PetUID(model)
+    return uid and (model.Name .. " [" .. uid .. "]") or model.Name
+end
 function Data.PetId(label) return string.match(label, "%[(.-)%]$") or label end
 function Data.Pets()
-    local out = {}
-    local folder = LP:FindFirstChild("Pets")
-    if not folder then return out end
-    for _, pet in ipairs(folder:GetChildren()) do
-        local n = Util.Value(pet, { "PetName", "Name", "DisplayName", "Type" })
-        out[#out + 1] = (type(n) == "string" and n ~= pet.Name) and (n .. " [" .. pet.Name .. "]") or pet.Name
+    local out, seen = {}, {}
+    for _, m in ipairs(Data.EquippedPets()) do
+        out[#out + 1] = Data.PetLabel(m)
+        seen[Data.PetUID(m) or m.Name] = true
+    end
+    -- plus the inventory, when it can be read (Data.Inventory is defined further down)
+    if Data.Inventory then
+        for _, p in ipairs(Data.Inventory()) do
+            if not seen[p.id] then seen[p.id] = true out[#out + 1] = p.name .. " [" .. p.id .. "]" end
+        end
     end
     table.sort(out)
     return out
 end
 function Data.PetObject(id)
-    local folder = LP:FindFirstChild("Pets")
-    return folder and folder:FindFirstChild(id)
+    for _, m in ipairs(Data.EquippedPets()) do
+        if Data.PetUID(m) == tostring(id) or m.Name == id then return m end
+    end
+    return nil
 end
 
 function Data.MainGui()
@@ -744,10 +868,21 @@ end
 local Combat = {}
 local SendPet = Bindables:FindFirstChild("SendPet")
 
+-- Enemies far from you are streamed out: the model, its DisplayName / Health values
+-- and its pivot exist, but its parts (HumanoidRootPart) don't until you get close.
+-- So an enemy is alive by its Health value, and found by its pivot position.
 function Combat.Alive(e)
-    if not e or not e.Parent or not e:FindFirstChild("HumanoidRootPart") then return false end
+    if not e or not e.Parent then return false end
     local hp = e:FindFirstChild("Health")
-    return hp == nil or hp.Value > 0
+    if hp then return hp.Value > 0 end
+    return e:FindFirstChild("HumanoidRootPart") ~= nil
+end
+function Combat.Pos(e)
+    local part = e and e:FindFirstChild("HumanoidRootPart")
+    if part then return part.Position, part end
+    local ok, cf = pcall(function() return e:GetPivot() end)
+    if ok and cf then return cf.Position, nil end
+    return nil, nil
 end
 function Combat.Name(e)
     local t = e:FindFirstChild("DisplayName")
@@ -758,22 +893,40 @@ function Combat.HP(e)
     return hp and hp.Value or 0
 end
 
+-- the "Enemies" folders of a world. Big maps (the Tower has hundreds of rooms) are only
+-- searched every 5 s instead of on every attack step.
+local enemyFolderCache = {}
+function Combat.EnemyFolders(world)
+    local c = enemyFolderCache[world]
+    if c and os.clock() - c.at < 5 then
+        local alive = {}
+        for _, f in ipairs(c.list) do if f.Parent then alive[#alive + 1] = f end end
+        return alive
+    end
+    local list = {}
+    local direct = world:FindFirstChild("Enemies")
+    if direct then list[1] = direct end
+    for _, obj in ipairs(world:GetDescendants()) do
+        if obj.Name == "Enemies" and obj ~= direct and obj:IsA("Folder") then list[#list + 1] = obj end
+    end
+    enemyFolderCache[world] = { at = os.clock(), list = list }
+    return list
+end
+
 -- names = set of names to keep (nil = all)
 function Combat.List(worldName, names)
     local out = {}
     local world = Worlds:FindFirstChild(worldName or "")
     if not world then return out end
     local function consider(e)
-        if Combat.Alive(e) and (not names or names[Combat.Name(e)]) then out[#out + 1] = e end
+        if Combat.Alive(e) and (not names or names[Combat.Name(e)] or names[e.Name]) then out[#out + 1] = e end
     end
-    local folders = false
-    for _, obj in ipairs(world:GetDescendants()) do
-        if obj.Name == "Enemies" and obj:IsA("Folder") then
-            folders = true
-            for _, e in ipairs(obj:GetChildren()) do consider(e) end
-        end
+    -- every world keeps its enemies in <World>.Enemies (dungeon / trial rooms may nest more)
+    local folders = Combat.EnemyFolders(world)
+    for _, f in ipairs(folders) do
+        for _, e in ipairs(f:GetChildren()) do consider(e) end
     end
-    if not folders then
+    if #folders == 0 then
         for _, e in ipairs(world:GetDescendants()) do
             if e:FindFirstChild("DisplayName") then consider(e) end
         end
@@ -790,8 +943,8 @@ function Combat.Pick(list, mode)
         if mode == "Weakest" then s = Combat.HP(e)
         elseif mode == "Strongest" then s = -Combat.HP(e)
         else
-            local p = e:FindFirstChild("HumanoidRootPart")
-            s = (root and p) and (p.Position - root.Position).Magnitude or 0
+            local pos = Combat.Pos(e)
+            s = (root and pos) and (pos - root.Position).Magnitude or math.huge
         end
         if not score or s < score then best, score = e, s end
     end
@@ -803,22 +956,27 @@ Combat.Options = { Teleport = true, PetTP = false, Ult = false }
 function Combat.Attack(e, wanted)
     local t0 = os.clock()
     if Combat.Options.PetTP then
-        -- RequestPetTeleport(pet): each of YOUR pets in workspace.Pets
-        local folder = workspace:FindFirstChild("Pets")
-        for _, pet in ipairs(folder and folder:GetChildren() or {}) do
-            local owner = pet:FindFirstChild("Owner") or pet:FindFirstChild("Player")
-            local ov = owner and owner.Value
-            if ov == nil or ov == LP or ov == LP.Name or ov == LP.UserId then
-                task.spawn(Net.Call, "PetTeleport", pet)
+        -- RequestPetTeleport(pet): each of YOUR equipped pet models
+        for _, pet in ipairs(Data.EquippedPets()) do task.spawn(Net.Call, "PetTeleport", pet) end
+    end
+    local streamedAt = 0
+    while Combat.Alive(e) and wanted() and os.clock() - t0 < CFG.KillTimeout do
+        local root = Util.Root()
+        local pos, part = Combat.Pos(e)
+        if Combat.Options.Teleport and root and pos and (root.Position - pos).Magnitude > 12 then
+            if part then
+                root.CFrame = part.CFrame * CFrame.new(0, 0, 4)
+            else
+                -- not loaded yet: go to where it is and ask the game to load that area
+                root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 4))
+                if os.clock() - streamedAt > 2 then
+                    streamedAt = os.clock()
+                    task.spawn(pcall, function() LP:RequestStreamAroundAsync(pos) end)
+                end
             end
         end
-    end
-    while Combat.Alive(e) and wanted() and os.clock() - t0 < CFG.KillTimeout do
-        local root, part = Util.Root(), e:FindFirstChild("HumanoidRootPart")
-        if Combat.Options.Teleport and root and part and (root.Position - part.Position).Magnitude > 12 then
-            root.CFrame = part.CFrame * CFrame.new(0, 0, 4)
-        end
-        if SendPet then pcall(SendPet.Fire, SendPet, e, true) end
+        -- pets need the enemy's parts to walk to it
+        if SendPet and e:FindFirstChild("HumanoidRootPart") then pcall(SendPet.Fire, SendPet, e, true) end
         task.wait()
     end
 end
@@ -936,7 +1094,7 @@ function Travel.To(world, force)
 end
 
 ------------------------------------------------------------------------
--- UI LIBRARY  (REN UI)
+-- UI LIBRARY  (GRAVITY UI)
 ------------------------------------------------------------------------
 local Library = { Flags = {}, Theme = {} }
 local Theme = Library.Theme
@@ -1334,13 +1492,13 @@ end
 ------------------------------------------------------------------------
 function Library:Window(opt)
     local parent = guiParent()
-    for _, n in ipairs({ "RenHubV3", "RenHubUI" }) do
+    for _, n in ipairs({ "GravityHubV3", "RenHubV3", "RenHubUI" }) do
         local old = parent:FindFirstChild(n)
         if old then old:Destroy() end
     end
 
     local W = { Tabs = {}, Size = Vector2.new(opt.Width or 780, opt.Height or 520), Open = true, UserScale = 1 }
-    local gui = make("ScreenGui", { Name = "RenHubV3", ResetOnSpawn = false, IgnoreGuiInset = true,
+    local gui = make("ScreenGui", { Name = "GravityHubV3", ResetOnSpawn = false, IgnoreGuiInset = true,
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999, Parent = parent })
     W.Gui = gui
 
@@ -1459,7 +1617,7 @@ function Library:Window(opt)
     local d = diamond(iconInner, 20, false)
     d.AnchorPoint = Vector2.new(0.5, 0.5)
     d.Position = UDim2.fromScale(0.5, 0.5)
-    text({ Text = "R", Font = Enum.Font.GothamBlack, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Center,
+    text({ Text = "G", Font = Enum.Font.GothamBlack, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Center,
         Size = UDim2.fromScale(1, 1), Parent = iconInner })
     local iconScale = make("UIScale", { Parent = icon })
     local iconHit = make("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = icon })
@@ -1623,6 +1781,15 @@ function Features.Farm()
         if next(bosses) and Combat.Step(world, wanted, bosses, "Nearest") then return end
     end
 
+    -- Auto Quest on: the mobs the current quest asks for come first
+    if On("AutoQuest") and Features.QuestTargets then
+        local qWorld, targets = Features.QuestTargets()
+        if targets and next(targets) then
+            if qWorld and qWorld ~= world and Data.IsFarmWorldName(qWorld) then Travel.To(qWorld) return end
+            if Combat.Step(world, wanted, targets, "Nearest") then return end
+        end
+    end
+
     local mode = F("FarmMode") or "Nearest"
     if mode == "Mobs Selected" then
         local mobs = F("FarmMobs") or {}
@@ -1674,8 +1841,8 @@ function Features.NextWorld()
             if not nxt then return end
             Net.Call("DiscoverWorld", nxt)
             task.wait(1)
-            local discovered = LP:FindFirstChild("Discovered")
-            if not discovered or discovered:FindFirstChild(nxt) then Travel.To(nxt) end
+            -- LocalPlayer.Discovered is a number, not a folder: just try; Travel.To says if it's locked
+            Travel.To(nxt)
             return
         end
     end
@@ -1853,12 +2020,15 @@ function Features.TimeTrial()
         end
         -- our door just opened: walk into its teleporter to get into the run
         if Features.EnterTrialDoor() then return true end
-        if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest") then return true end
         local tower = Worlds:FindFirstChild("Tower")
         local trials = Util.SetToList(F("Trials"))
-        if #trials > 0 and #Combat.List("Tower") == 0 and Stats.TrialFloor == 0 then
-            Features.TryJoinTrial(trials)   -- lobby: join when the selected door is about to open
+        -- LOBBY (not in a run): only wait at / join the door. The Tower is also the lobby
+        -- of the dungeon and Infinity Tower, so nothing else is done here.
+        if not Features.InTrialRun() then
+            if #trials > 0 then Features.TryJoinTrial(trials) end
+            return os.clock() - trialJoinedAt < 75   -- waiting at our door, else let other modes run
         end
+        if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest") then return true end
         -- like Yuto Hub: go to the middle of the current room ("Room N" on screen)
         local center = Features.RoomCenter()
         local root = Util.Root()
@@ -1881,9 +2051,18 @@ function Features.TimeTrial()
         if not On("TrialIgnoreChest") then
             for _, p in ipairs(Prompt.Find(tower, { "chest" })) do Prompt.Use(p) task.wait(0.2) end
         end
-        -- room cleared: press the button that sends us to the next room
-        for _, obj in ipairs(tower and tower:GetDescendants() or {}) do
-            if obj.Name == "ConfirmPart" then
+        -- room cleared: press the button that sends us to the next room (in RestRooms)
+        local confirmParts = {}
+        for _, room in ipairs(Features.TrialRooms({ RestRoom = true })) do
+            local c = room:FindFirstChild("ConfirmPart", true)
+            local root = Util.Root()
+            -- only our own room (other players' runs are in the same map)
+            if c and c:IsA("BasePart") and root and (c.Position - root.Position).Magnitude < 250 then
+                confirmParts[#confirmParts + 1] = c
+            end
+        end
+        for _, obj in ipairs(confirmParts) do
+            do
                 local p = obj:FindFirstChildOfClass("ProximityPrompt")
                 if p and p.Enabled and Util.Every("trial-room", 2) then
                     Prompt.Use(p)
@@ -1932,13 +2111,27 @@ function Features.TrialCountdown()
 end
 
 -- current trial room number, read from the "Room N" text on screen
+-- the "Room N" label is found once (PlayerGui has thousands of objects) and then just read
+local roomLabel, roomLabelScan = nil, -math.huge
 function Features.CurrentRoom()
+    if roomLabel and roomLabel.Parent then
+        if roomLabel.Visible then
+            local n = string.match(roomLabel.Text, "^%s*Room%s*(%d+)%s*$")
+            if n then return tonumber(n) end
+        end
+        return nil
+    end
+    if os.clock() - roomLabelScan < 3 then return nil end
+    roomLabelScan = os.clock()
     local pg = LP:FindFirstChild("PlayerGui")
     if not pg then return nil end
     for _, d in ipairs(pg:GetDescendants()) do
-        if d:IsA("TextLabel") and d.Visible then
+        if d:IsA("TextLabel") then
             local n = string.match(d.Text, "^%s*Room%s*(%d+)%s*$")
-            if n then return tonumber(n) end
+            if n then
+                roomLabel = d
+                return d.Visible and tonumber(n) or nil
+            end
         end
     end
     return nil
@@ -1971,6 +2164,7 @@ function Features.RoomCenter()
     end
     if not n then return nil end
     local hit = roomCache[n]
+    if hit == false and os.clock() - (roomCache["miss" .. n] or 0) < 15 then return nil end
     if not hit or not hit.Parent then
         hit = nil
         for _, d in ipairs(tower:GetDescendants()) do
@@ -1980,7 +2174,8 @@ function Features.RoomCenter()
                 if num and tonumber(num) == n then hit = d break end
             end
         end
-        roomCache[n] = hit
+        roomCache[n] = hit or false
+        if not hit then roomCache["miss" .. n] = os.clock() end
     end
     if not hit then return nil end
     if hit:IsA("Model") then
@@ -2000,7 +2195,9 @@ end
 -- and "RestRoom" (every 5th, has the ConfirmPart button); the first room is the
 -- door's StartRoom. The game keeps adding the next room as the run goes on, so
 -- the room to be in is the NEWEST one of our run.
-local ROOM_TYPES = { BattleRoom = true, RestRoom = true, StartRoom = true }
+-- (Tower.Map also holds ~600 spare "StartRoom" models; a run's own start room is
+-- found through Door<n>.StartRoom instead)
+local ROOM_TYPES = { BattleRoom = true, RestRoom = true }
 local roomBoxes = setmetatable({}, { __mode = "k" })
 local visitedRooms = setmetatable({}, { __mode = "k" })
 local roomBorn = setmetatable({}, { __mode = "k" })
@@ -2088,8 +2285,8 @@ end
 function Features.TowerEnemyTargets()
     local out, tower = {}, Worlds:FindFirstChild("Tower")
     if not tower then return out end
-    for _, f in ipairs(tower:GetDescendants()) do
-        if f.Name == "Enemies" and f:IsA("Folder") then
+    for _, f in ipairs(Combat.EnemyFolders(tower)) do
+        do
             for _, e in ipairs(f:GetChildren()) do
                 if e:IsA("Model") and not e:FindFirstChild("HumanoidRootPart") then
                     local hp = e:FindFirstChild("Health")
@@ -2320,6 +2517,19 @@ function Features.EnterTrialDoor()
     return true
 end
 
+-- in a run = the game's TowerTimer is on screen, or the "Room N" label, or we're
+-- far above / away from the lobby
+function Features.InTrialRun()
+    local mg = Data.MainGui()
+    local tt = mg and mg:FindFirstChild("TowerTimer")
+    if tt and tt:IsA("GuiObject") and tt.Visible then return true end
+    if Features.CurrentRoom() then return true end
+    local tower = Worlds:FindFirstChild("Tower")
+    local spawn = tower and tower:FindFirstChild("Spawns") and tower.Spawns:FindFirstChildWhichIsA("BasePart")
+    local root = Util.Root()
+    return (spawn and root and (root.Position - spawn.Position).Magnitude > 600) and true or false
+end
+
 -- join exactly like the game: JoinTimeTrial(n) -> AttemptTravel("TowerDoor<n>", true)
 function Features.JoinTrial(name, id)
     Stats.TrialName, Stats.TrialFloor = name, 0
@@ -2329,6 +2539,13 @@ function Features.JoinTrial(name, id)
     task.wait(0.3)
     local pos = Net.Raw("AttemptTravel", { "TowerDoor" .. id, true })
     local cf = toCFrame(pos)
+    if not cf then
+        -- no answer: be in the Tower and stand at the door's teleporter ourselves
+        if Util.World() ~= "Tower" then Travel.To("Tower", true) end
+        local door = Features.DoorModel(id)
+        local trig = door and door:FindFirstChild("TriggerPart", true)
+        if trig then cf = trig.CFrame * CFrame.new(0, 0, 6) end
+    end
     if cf then
         if not doorPos[id] then doorPos[id] = cf.Position saveDoors() end
         pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
@@ -2382,13 +2599,24 @@ function Features.Raid()
         return true
     end
     if not Util.Every("raid-join", CFG.JoinCooldown) then return false end
+    -- Worlds.Raid.RaidData: CurrentWorld / CurrentRaid (StringValue, "" = none),
+    -- Giant / Massive (BoolValue) = the mode; each world's RaidBeacon has @Active
     local active, mode
     pcall(function()
         local rd = Worlds.Raid.RaidData
-        local w = rd:FindFirstChild("CurrentWorld") or rd:FindFirstChild("CurrentRaid")
-        local m = rd:FindFirstChild("CurrentMode") or rd:FindFirstChild("Mode") or rd:FindFirstChild("Difficulty")
-        active, mode = w and w.Value, m and m.Value
+        for _, n in ipairs({ "CurrentWorld", "CurrentRaid" }) do
+            local v = rd:FindFirstChild(n)
+            if v and v.Value ~= nil and tostring(v.Value) ~= "" then active = tostring(v.Value) break end
+        end
+        local massive, giant = rd:FindFirstChild("Massive"), rd:FindFirstChild("Giant")
+        mode = (massive and massive.Value and "Massive") or (giant and giant.Value and "Giant") or "Normal"
     end)
+    if not active then
+        for _, f in ipairs(Worlds:GetChildren()) do
+            local b = f:FindFirstChild("RaidBeacon")
+            if b and b:GetAttribute("Active") == true then active = f.Name break end
+        end
+    end
     local worlds, modes = worldsFrom("RaidWorlds"), F("RaidModes") or {}
     local worldOk = On("RaidAllWorlds") or contains(worlds, active)
     local modeOk = not next(modes) or mode == nil or modes[mode]
@@ -2399,6 +2627,26 @@ function Features.Raid()
     end
     if active and worldOk and modeOk then
         Net.Call("JoinRaid", active, mode)
+        task.wait(1.5)
+        -- still outside: walk into the active world's raid beacon like a player
+        if Util.World() ~= "Raid" then
+            local w = Worlds:FindFirstChild(active)
+            local beacon = w and w:FindFirstChild("RaidBeacon")
+            if beacon then
+                if Util.World() ~= active then Travel.To(active) end
+                local p = beacon:FindFirstChildWhichIsA("ProximityPrompt", true)
+                if p then Prompt.Use(p) else
+                    local part = beacon:FindFirstChildWhichIsA("BasePart", true)
+                    local root = Util.Root()
+                    if part and root then
+                        Util.MoveTo(part.CFrame)
+                        if firetouchinterest then
+                            pcall(firetouchinterest, root, part, 0) task.wait(0.1) pcall(firetouchinterest, root, part, 1)
+                        end
+                    end
+                end
+            end
+        end
         return true
     end
     return false
@@ -2479,37 +2727,149 @@ function Features.DungeonRooms()
 end
 
 -- send exactly what the game sent when you did it by hand; fall back to a guess
-local function summonArgs(size, world, artifact)
-    local tpl, n = Learn.Get("SummonDungeon")
-    if not tpl then return { size, world, artifact } end
-    local bools = 0
-    for i = 1, n do if type(tpl[i]) == "boolean" then bools = bools + 1 end end
+-- SUMMON ARGUMENTS ---------------------------------------------------------------------------------
+-- Built from the call the game made when you summoned by hand (learned_calls.json),
+-- with size / world / artifact swapped for what's picked in the hub.
+--   * a boolean slot that CHANGED between your hand-made summons = the artifact switch
+--   * keys named like artifact / size / difficulty / world inside a table are swapped by name
+--   * otherwise: a size word, a world name / folder, a lone boolean, a size number 1-5
+local function summonRoles()
+    local roles, hist = {}, Learn.History("SummonDungeon")
+    if #hist < 2 then return roles end
+    local n = 0
+    for _, h in ipairs(hist) do n = math.max(n, #h) end
     for i = 1, n do
-        local v = tpl[i]
-        if type(v) == "string" then
-            local lv = string.lower(v)
-            for _, sz in ipairs(CFG.DungeonSizes) do
-                if lv == string.lower(sz) then tpl[i] = (v == lv) and string.lower(size) or size break end
+        local seen, count, allBool = {}, 0, true
+        for _, h in ipairs(hist) do
+            local v = h[i]
+            if type(v) ~= "boolean" then allBool = false end
+            if not seen[tostring(v)] then seen[tostring(v)] = true count = count + 1 end
+        end
+        if count > 1 and allBool then roles[i] = "artifact" end
+    end
+    return roles
+end
+local function fillSummon(v, key, ctx)
+    local lk = type(key) == "string" and string.lower(key) or ""
+    local t = typeof(v)
+    if lk ~= "" then
+        if string.find(lk, "artifact", 1, true) or string.find(lk, "artefact", 1, true) then
+            ctx.artifactHit = true
+            if t == "boolean" then return ctx.artifact end
+            return ctx.artifact and v or nil
+        end
+        if string.find(lk, "size", 1, true) or string.find(lk, "difficult", 1, true) or string.find(lk, "tier", 1, true) then
+            ctx.sizeHit = true
+            if t == "number" then return ctx.sizeIndex end
+            if t == "string" then return ctx.size end
+        end
+        if string.find(lk, "world", 1, true) or string.find(lk, "map", 1, true) then
+            ctx.worldHit = true
+            if t == "Instance" then return Worlds:FindFirstChild(ctx.world) or v end
+            if t == "string" then
+                if Worlds:FindFirstChild(v) then return ctx.world end
+                return Data.WorldDisplay(ctx.world)
             end
-            if tpl[i] == v then
-                if Worlds:FindFirstChild(v) then tpl[i] = world
-                else
-                    for _, f in ipairs(Worlds:GetChildren()) do
-                        if Data.WorldDisplay(f.Name) == v then tpl[i] = Data.WorldDisplay(world) break end
-                    end
-                end
-            end
-        elseif type(v) == "boolean" and bools == 1 then
-            tpl[i] = artifact
         end
     end
-    return tpl
+    if t == "table" then
+        local o = {}
+        for k, x in pairs(v) do o[k] = fillSummon(x, k, ctx) end
+        return o
+    elseif t == "string" then
+        local lv = string.lower(v)
+        for _, sz in ipairs(CFG.DungeonSizes) do
+            if lv == string.lower(sz) then ctx.sizeHit = true return (v == lv) and string.lower(ctx.size) or ctx.size end
+        end
+        if Worlds:FindFirstChild(v) and not CFG.ModeWorlds[v] then ctx.worldHit = true return ctx.world end
+        for _, f in ipairs(Worlds:GetChildren()) do
+            if Data.WorldDisplay(f.Name) == v and not CFG.ModeWorlds[f.Name] then
+                ctx.worldHit = true
+                return Data.WorldDisplay(ctx.world)
+            end
+        end
+    elseif t == "Instance" and v.Parent == Worlds and not CFG.ModeWorlds[v.Name] then
+        ctx.worldHit = true
+        return Worlds:FindFirstChild(ctx.world) or v
+    end
+    return v
 end
+-- returns args, source ("learned" / "guess"), artifact slot text
+local function summonArgs(size, world, artifact)
+    local sizeIndex = table.find(CFG.DungeonSizes, size) or 1
+    local tpl, n = Learn.Get("SummonDungeon")
+    if not tpl then
+        local a = { CFG.DungeonSizeArg[size] or size, world, artifact }
+        a.n = 3
+        return a, "guess", "3 (guess)"
+    end
+    local ctx = { size = size, sizeIndex = sizeIndex, world = world, artifact = artifact }
+    local roles = summonRoles()
+    local artSlot = nil
+    for i = 1, n do
+        if roles[i] == "artifact" then tpl[i] = artifact artSlot = tostring(i)
+        else tpl[i] = fillSummon(tpl[i], nil, ctx) end
+    end
+    if ctx.artifactHit then artSlot = artSlot or "by name" end
+    if not artSlot then
+        local bools = {}
+        for i = 1, n do if type(tpl[i]) == "boolean" then bools[#bools + 1] = i end end
+        if #bools == 1 then tpl[bools[1]] = artifact artSlot = tostring(bools[1]) end
+    end
+    if CFG.DungeonArtifactSlot then tpl[CFG.DungeonArtifactSlot] = artifact artSlot = tostring(CFG.DungeonArtifactSlot) end
+    -- the game sent the size as a number (1 = Small ... 5 = Hellish)
+    if not ctx.sizeHit then
+        for i = 1, n do
+            local v = tpl[i]
+            if type(v) == "number" and v >= 1 and v <= #CFG.DungeonSizes and v % 1 == 0 then tpl[i] = sizeIndex break end
+        end
+    end
+    tpl.n = n
+    return tpl, "learned", artSlot or "not found"
+end
+Features.SummonArgs = summonArgs
 local function friendArgs(on)
     local tpl, n = Learn.Get("SetDungeonSetting")
     if not tpl then return { "FriendsOnly", on } end
     for i = 1, n do if type(tpl[i]) == "boolean" then tpl[i] = on end end
     return tpl
+end
+
+-- ARTIFACT FOR OPENING DUNGEONS ------------------------------------------------------------------
+-- EquipArtefact(name, "CurrentArtefact" / "CurrentSecondArtefact"), sent before summoning.
+-- Labels are "Key | Dungeon" (shown name | game name); a plain label is both.
+function Data.ArtifactLabels()
+    local out, seen = {}, {}
+    for _, a in ipairs(CFG.Artifacts) do
+        out[#out + 1] = a[1] == a[2] and a[1] or (a[1] .. " | " .. a[2])
+        seen[a[2]] = true
+    end
+    -- artifacts a game update added (ArtefactData keys not in the list above)
+    local extra = {}
+    for k, v in pairs(Data.Module("ArtefactData") or {}) do
+        if type(k) == "string" and type(v) == "table" and not seen[k] then extra[#extra + 1] = k end
+    end
+    table.sort(extra)
+    for _, k in ipairs(extra) do out[#out + 1] = k end
+    return out
+end
+
+local openArtifactSent = nil   -- "slot:name" last sent, so it isn't re-sent every summon
+function Features.ResetOpenArtifact() openArtifactSent = nil end
+function Features.EquipOpenArtifact(force)
+    local label = F("DungeonOpenArtifact")
+    if type(label) ~= "string" or label == "" then
+        if Util.Every("open-art-note", 60) then Util.Notify("Dungeon: pick the artifact to equip before opening") end
+        return false
+    end
+    local name = string.match(label, "| (.+)$") or label
+    local slotKey = tostring(F("DungeonOpenArtifactSlot") or "1")
+    local key = slotKey .. ":" .. name
+    if not force and openArtifactSent == key then return true end
+    Net.Call("EquipArtifact", name, CFG.ArtifactSlots[slotKey] or CFG.ArtifactSlots["1"])
+    openArtifactSent = key
+    task.wait(0.5)
+    return true
 end
 
 function Features.OpenDungeon()
@@ -2529,13 +2889,45 @@ function Features.OpenDungeon()
         if cf then Util.MoveTo(cf + Vector3.new(0, 4, 0)) end
         task.wait(1)
     end
-    -- 2. friend only, 3. summon, 4. join
+    -- 2. artifact that cuts the opening time, 3. friend only, 4. summon, 5. join
+    if On("DungeonEquipArtifact") then Features.EquipOpenArtifact() end
     Net.Raw("SetDungeonSetting", friendArgs(On("DungeonFriends")))
     local size = F("DungeonSize") or "Small"
     local world = Data.FromLabel(F("DungeonWorld") or "")
     if world == "" then Util.Notify("Pick a dungeon world") nextSummon = os.clock() + 10 return end
-    Net.Raw("SummonDungeon", summonArgs(CFG.DungeonSizeArg[size] or size, world, On("DungeonArtifact")))
+    local artifact = On("DungeonArtifact")
+    local args, source, artSlot = summonArgs(size, world, artifact)
+    local answer
+    if source == "guess" and Learn.Get("Bindable.SummonDungeon") then
+        -- only the game's own summon button was learned: fire it the same way,
+        -- the game's client then sends the real SummonDungeon call itself
+        local b = Bindables:FindFirstChild("SummonDungeon")
+        local bargs = Learn.Get("Bindable.SummonDungeon")
+        local ctx = { size = size, sizeIndex = table.find(CFG.DungeonSizes, size) or 1, world = world, artifact = artifact }
+        for i, v in pairs(bargs) do bargs[i] = fillSummon(v, nil, ctx) end
+        if b and b:IsA("BindableEvent") then pcall(b.Fire, b, table.unpack(bargs, 1, #bargs)) end
+        source = "game button"
+    else
+        answer = Net.Raw("SummonDungeon", args)
+    end
+    Features.LastSummon = { source = source, artifact = artSlot, answer = answer, at = os.clock() }
+    if source == "guess" and Util.Every("summon-guess-note", 120) then
+        Util.Notify("Dungeon: summon ONE dungeon by hand so the hub learns the real call")
+    end
+    if answer ~= nil and answer ~= true then
+        local txt = type(answer) == "table" and select(2, pcall(HttpService.JSONEncode, HttpService, answer)) or tostring(answer)
+        Util.Notify("Summon answer: " .. tostring(txt))
+    end
+    if artifact and artSlot == "not found" and Util.Every("summon-art-note", 120) then
+        Util.Notify("Artifact slot unknown: summon by hand once WITH and once WITHOUT artifact")
+    end
     task.wait(1.5)
+    -- the game may ask "go to dungeon?" first
+    local dt = Data.MainGui() and Data.MainGui():FindFirstChild("DungeonTravel")
+    if dt and dt:IsA("GuiObject") and dt.Visible then
+        local yes = dt:FindFirstChild("Yes", true)
+        if yes and yes:IsA("GuiButton") then Features.FireGui(yes, { "Activated" }) end
+    end
     Net.Raw("JoinDungeon", Learn.Get("JoinDungeon") or {})
     for _, p in ipairs(Prompt.Find(Worlds:FindFirstChild("Dungeon"), { "dungeon", "enter", "join", "start" })) do
         Prompt.Use(p)
@@ -2630,7 +3022,10 @@ function Features.GlobalBoss()
         Combat.Step("GlobalBoss", function() return On("AutoGlobalBoss") end, nil, "Strongest")
         return true
     end
-    if Util.Every("gboss-join", 20) then Net.Call("JoinGlobalBoss") end
+    -- only while the boss is up (Worlds.GlobalBoss.Settings.Running)
+    local running = true
+    pcall(function() running = Worlds.GlobalBoss.Settings.Running.Value end)
+    if running and Util.Every("gboss-join", 20) then Net.Call("JoinGlobalBoss") end
     return false
 end
 
@@ -2643,8 +3038,9 @@ function Features.Hatch()
     local modes = F("HatchModes") or {}
     local amount = modes["Summon Max Star"] and CFG.HatchAmount.Max
         or modes["Summon Multiple Star"] and CFG.HatchAmount.Multiple or CFG.HatchAmount.Single
+    -- the game only opens a star in the world it's in
+    if Util.World() ~= worldName then Travel.To(worldName) end
     if On("HatchTp") then
-        if Util.World() ~= worldName then Travel.To(worldName) end
         local w = Worlds:FindFirstChild(worldName)
         local star = w and w:FindFirstChild(starName)
         local root = Util.Root()
@@ -2659,33 +3055,74 @@ end
 
 function Data.PetTypes()
     local set = {}
-    local folder = LP:FindFirstChild("Pets")
-    for _, pet in ipairs(folder and folder:GetChildren() or {}) do
-        local n = Util.Value(pet, { "PetName", "Name", "DisplayName", "Type" })
-        set[type(n) == "string" and n or pet.Name] = true
-    end
+    for _, m in ipairs(Data.EquippedPets()) do set[m.Name] = true end
+    for _, p in ipairs(Data.Inventory()) do if p.name then set[p.name] = true end end
     return Util.SetToList(set)
+end
+
+-- whole inventory: the game keeps it on the server; GetPetData (RemoteFunction) is
+-- asked once a minute. Whatever shape it answers with, pets are read as
+-- { id, name, rarity, shiny, locked, equipped } when those fields can be found.
+local inventoryCache, inventoryAt = {}, -999
+function Data.Inventory(force)
+    if not force and os.clock() - inventoryAt < 60 then return inventoryCache end
+    inventoryAt = os.clock()
+    local ok, reply = pcall(Net.Raw, "GetPetData", {})
+    local out = {}
+    local function field(t, names)
+        for _, n in ipairs(names) do if t[n] ~= nil then return t[n] end end
+        return nil
+    end
+    local function scan(t, keyId, depth)
+        if type(t) ~= "table" or depth > 3 then return end
+        local name = field(t, { "Name", "PetName", "Type", "Pet" })
+        local id = field(t, { "UID", "Uid", "Id", "ID", "PetId" }) or keyId
+        if type(name) == "string" and id ~= nil then
+            out[#out + 1] = { id = tostring(id), name = name, rarity = field(t, { "Rarity", "Tier" }),
+                shiny = field(t, { "Shiny", "IsShiny" }), locked = field(t, { "Locked", "Lock", "IsLocked" }),
+                equipped = field(t, { "Equipped", "IsEquipped" }) }
+            return
+        end
+        for k, v in pairs(t) do scan(v, (type(k) == "string" or type(k) == "number") and k or nil, depth + 1) end
+    end
+    if ok then scan(reply, nil, 0) end
+    -- the game's own Pets menu (MainGui.Pets.Main.Scroll): one PetBox per pet with
+    -- UID (IntValue), PetName, Equipped / Locked icons. Filled after the menu was opened once.
+    if #out == 0 then
+        pcall(function()
+            local scroll = Data.MainGui().Pets.Main.Scroll
+            for _, box in ipairs(scroll:GetChildren()) do
+                local uid, name = box:FindFirstChild("UID"), box:FindFirstChild("PetName")
+                if uid and name and uid.Value ~= 0 then
+                    local eq, lk = box:FindFirstChild("Equipped"), box:FindFirstChild("Locked")
+                    out[#out + 1] = { id = tostring(uid.Value), name = name.Text,
+                        equipped = eq and eq.Visible or false, locked = lk and lk.Visible or false }
+                end
+            end
+        end)
+    end
+    inventoryCache = out
+    return out
 end
 
 function Features.Fuse()
     local types, rarities = F("FusePets") or {}, F("FuseRarity") or {}
     if not next(types) then return end
-    local folder = LP:FindFirstChild("Pets")
+    -- only pets from the inventory list (GetPetData); equipped pets are never fused
     local ids = {}
-    for _, pet in ipairs(folder and folder:GetChildren() or {}) do
-        local n = Util.Value(pet, { "PetName", "Name", "DisplayName", "Type" })
-        n = type(n) == "string" and n or pet.Name
-        local rarity = Util.Value(pet, { "Rarity", "Tier" })
-        local shiny = Util.Value(pet, { "Shiny", "IsShiny" })
-        local locked = Util.Value(pet, { "Locked", "Lock", "IsLocked" })
-        local equipped = Util.Value(pet, { "Equipped", "IsEquipped" })
-        if types[n] and not locked and not equipped
-           and (not next(rarities) or rarity == nil or rarities[rarity])
-           and (On("FuseShiny") or not shiny) then
-            ids[#ids + 1] = pet.Name
+    for _, p in ipairs(Data.Inventory()) do
+        if types[p.name] and not p.locked and not p.equipped
+           and (not next(rarities) or p.rarity == nil or rarities[tostring(p.rarity)])
+           and (On("FuseShiny") or not p.shiny) then
+            ids[#ids + 1] = p.id
         end
     end
-    if #ids > 1 then Net.Call("FusePets", ids) end
+    if #ids > 1 then
+        Net.Call("FusePets", ids)
+        Data.Inventory(true)
+    elseif #Data.Inventory() == 0 and Util.Every("fuse-note", 120) then
+        Util.Notify("Fuse: can't read your inventory yet - send a Gravity Dumper report")
+    end
 end
 
 -- PASSIVE ------------------------------------------------------------------------------------
@@ -2695,10 +3132,10 @@ local PassiveStatus
 local function readPassive(petId, slot, reply)
     local pet = Data.PetObject(petId)
     if pet then
-        local v = Util.Value(pet, { "Passive" .. slot, "Passive_" .. slot, "PassiveSlot" .. slot })
-        if v == nil and slot == 1 then v = Util.Value(pet, { "Passive", "PassiveName" }) end
+        local v = Data.PetValue(pet, { "Passive" .. slot, "Passive_" .. slot, "PassiveSlot" .. slot })
+        if v == nil and slot == 1 then v = Data.PetValue(pet, { "Passive", "PassiveName" }) end
         if v == nil then
-            local folder = pet:FindFirstChild("Passives")
+            local folder = (pet:FindFirstChild("Data") and pet.Data:FindFirstChild("Passives")) or pet:FindFirstChild("Passives")
             local c = folder and (folder:FindFirstChild(tostring(slot)) or folder:GetChildren()[slot])
             if c then v = c:IsA("ValueBase") and c.Value or c.Name end
         end
@@ -2945,7 +3382,748 @@ function Features.Disable3D(off)
     pcall(function() RunService:Set3dRenderingEnabled(not off) end)
 end
 
+------------------------------------------------------------------------
+-- EXTRAS  (ideas from other public AFS scripts, rewritten for GRAVITY HUB)
+--   teams per activity, free gifts, multi open + real max hatch amount,
+--   fast pet ability, pull pets, raid boss/forcefield targeting + results,
+--   game "join?" popups for raid / infinity tower, world gate purchase,
+--   SetWindowOpen for menus, Teleported after travel, pet speed boost
+------------------------------------------------------------------------
+local Extras = { Fighting = false }
+
+-- MainGui child by dotted path: "Pets.TeamsList.Main.Scroll"
+local function mainChild(path)
+    local obj = Data.MainGui()
+    for part in string.gmatch(path, "[^%.]+") do
+        if not obj then return nil end
+        obj = obj:FindFirstChild(part)
+    end
+    return obj
+end
+local function isShown(g) return g ~= nil and g:IsA("GuiObject") and g.Visible end
+
+-- press a game button ONCE (first handler only, like a real click)
+local function pressOnce(btn)
+    if not btn then return false end
+    if not btn:IsA("GuiButton") then btn = btn:FindFirstChildWhichIsA("GuiButton", true) end
+    if not btn then return false end
+    for _, sig in ipairs({ "Activated", "MouseButton1Click", "MouseButton1Down" }) do
+        local ok, signal = pcall(function() return btn[sig] end)
+        if ok and signal then
+            if getconnections then
+                local okc, conns = pcall(getconnections, signal)
+                if okc and conns and #conns > 0 then
+                    pcall(function() conns[1]:Fire() end)
+                    return true
+                end
+            elseif firesignal then
+                pcall(firesignal, signal)
+                return true
+            end
+        end
+    end
+    return false
+end
+Extras.PressOnce = pressOnce
+
+-- TEAMS -------------------------------------------------------------------------------------------
+-- the game's saved teams: MainGui.Pets.TeamsList.Main.Scroll.TeamTemplate (TeamName + Button)
+local currentTeam = nil
+function Extras.TeamButtons()
+    local out = {}
+    local scroll = mainChild("Pets.TeamsList.Main.Scroll")
+    for _, t in ipairs(scroll and scroll:GetChildren() or {}) do
+        local label, btn = t:FindFirstChild("TeamName"), t:FindFirstChild("Button")
+        if label and btn and label:IsA("TextLabel") and label.Text ~= "" then out[label.Text] = btn end
+    end
+    return out
+end
+function Extras.TeamNames()
+    local out = {}
+    for name in pairs(Extras.TeamButtons()) do out[#out + 1] = name end
+    table.sort(out)
+    return out
+end
+function Extras.EquipTeam(name)
+    if not name or name == "" or name == currentTeam then return end
+    local btn = Extras.TeamButtons()[name]
+    if btn and pressOnce(btn) then
+        currentTeam = name
+        task.wait(0.3)
+    end
+end
+function Extras.ResetTeam() currentTeam = nil end
+-- which saved team fits what we're doing right now
+function Extras.TeamFor(target)
+    local world = Util.World()
+    local slot = "TeamFarm"
+    if world == "Raid" then slot = "TeamRaid"
+    elseif world == "Dungeon" or world == "InfinityTower" or world == "Tower" or world == "GatesMode" then slot = "TeamDungeon"
+    elseif world == "TimeChamber" then slot = "TeamChamber" end
+    local name = F(slot)
+    if target and string.find(string.lower(target.Name), "chest", 1, true) and F("TeamChest") then name = F("TeamChest") end
+    Extras.EquipTeam(name)
+end
+
+-- PETS --------------------------------------------------------------------------------------------
+local function equippedPetModels() return Data.EquippedPets() end
+-- PetAttack + PetAbility for every equipped pet = ult without waiting for the animation
+function Extras.PetAbility()
+    for _, pet in ipairs(equippedPetModels()) do
+        task.spawn(Net.Raw, "PetAttack", { pet })
+        task.spawn(Net.Raw, "PetAbility", { pet })
+    end
+end
+-- move your pets onto you (they start attacking right away after a teleport)
+function Extras.PullPets()
+    local root = Util.Root()
+    if not root then return end
+    for _, pet in ipairs(equippedPetModels()) do
+        for _, n in ipairs({ "TargetPart", "HumanoidRootPart" }) do
+            local p = pet:FindFirstChild(n)
+            if p and p:IsA("BasePart") then pcall(function() p.CFrame = root.CFrame end) end
+        end
+    end
+end
+-- client-side: raise the Speed effect of every passive (takes effect after re-equip)
+function Extras.BoostPetSpeed()
+    local ps = Data.Module("PassiveStats")
+    for _, t in pairs(ps or {}) do
+        if type(t) == "table" and type(t.Effects) == "table" then t.Effects.Speed = 20 end
+    end
+end
+
+-- attack wrapper: right team first, pets pulled in, and "fighting" flag for the team loop
+local baseAttack = Combat.Attack
+function Combat.Attack(e, wanted)
+    Extras.Fighting = true
+    if On("AutoTeams") then pcall(Extras.TeamFor, e) end
+    if On("PullPets") then
+        local root, pos = Util.Root(), e and Combat.Pos(e)
+        if Combat.Options.Teleport and root and pos then root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 4)) end
+        pcall(Extras.PullPets)
+    end
+    local ok, err = pcall(baseAttack, e, wanted)
+    Extras.Fighting = false
+    if not ok then warn("[" .. CFG.Name .. "] " .. tostring(err)) end
+end
+
+-- FREE GIFTS --------------------------------------------------------------------------------------
+local giftIndex = 1
+function Extras.FreeGifts()
+    local fg = mainChild("FreeGifts")
+    if fg then
+        local reset = fg:FindFirstChild("Reset")
+        if isShown(reset) and Util.Every("gift-reset", 30) then Net.Raw("ResetFreeGifts", {}) end
+        local label = fg:FindFirstChild("ClaimedText")
+        local a, b = string.match(label and label.Text or "", "(%d+)%s*/%s*(%d+)")
+        a, b = tonumber(a), tonumber(b)
+        if a and b and a >= b then return end          -- all claimed for now
+    end
+    Net.Raw("ClaimGift", { giftIndex })
+    giftIndex = giftIndex % CFG.FreeGiftCount + 1
+end
+
+-- HATCH -------------------------------------------------------------------------------------------
+-- the game's multi open (gamepass) for the star picked in Hatch / Fuse
+function Extras.MultiOpen()
+    local pick = F("HatchStar")
+    local starName = pick and string.match(pick, "^(.-) | ")
+    if starName then Net.Raw("AttemptMultiOpen", { starName }) end
+end
+-- "Summon Max Star" uses the number the game shows on its Open button
+function Extras.MaxHatch()
+    local price = mainChild("Hatch.Buttons.Open.Price")
+    local n = price and tonumber(string.match(price.Text or "", "(%d+)"))
+    if n and n >= 1 and n <= 100 then CFG.HatchAmount.Max = n end
+end
+
+-- RAID --------------------------------------------------------------------------------------------
+-- forcefield up = kill the minions first, forcefield down = go for the boss
+function Extras.RaidTarget()
+    local raid = Worlds:FindFirstChild("Raid")
+    local rd = raid and raid:FindFirstChild("RaidData")
+    local list = Combat.List("Raid")
+    if not rd then return Combat.Pick(list, "Nearest") end
+    local bossId = rd:FindFirstChild("BossId")
+    local ff = rd:FindFirstChild("Forcefield")
+    bossId, ff = bossId and tostring(bossId.Value), ff and ff.Value
+    local minions, boss = {}, nil
+    for _, e in ipairs(list) do
+        if bossId and e.Name == bossId then boss = e else minions[#minions + 1] = e end
+    end
+    if ff == true then return Combat.Pick(minions, "Nearest") end
+    return boss or Combat.Pick(minions, "Nearest")
+end
+-- raid over: press Confirm on the results screen
+function Extras.RaidResults()
+    local pg = LP:FindFirstChild("PlayerGui")
+    local gui = pg and pg:FindFirstChild("RaidGui")
+    local res = gui and gui:FindFirstChild("RaidResults")
+    if not isShown(res) then return false end
+    pressOnce(res:FindFirstChild("Confirm"))
+    return true
+end
+local function pressPopup(name)
+    local g = mainChild(name)
+    if not isShown(g) then return false end
+    local main = g:FindFirstChild("Main")
+    return pressOnce((main and main:FindFirstChild("Yes")) or g:FindFirstChild("Yes", true))
+end
+
+local baseRaid = Features.Raid
+function Features.Raid()
+    if Util.World() == "Raid" then
+        if On("RaidAutoConfirm") and Extras.RaidResults() then
+            task.wait(1)
+            if On("RaidReturn") and HomeWorld ~= "" and not CFG.ModeWorlds[HomeWorld] then Travel.To(HomeWorld) end
+            return true
+        end
+        if On("RaidSmartTarget") then
+            local t = Extras.RaidTarget()
+            if t then Combat.Attack(t, function() return On("AutoRaid") end) end
+            return true
+        end
+    end
+    local joining = baseRaid()
+    -- the game may ask "join raid?" first
+    if joining and Util.World() ~= "Raid" then pressPopup("RaidTransport") end
+    return joining
+end
+
+local baseInf = Features.InfinityTower
+function Features.InfinityTower()
+    baseInf()
+    if Util.World() ~= "InfinityTower" then
+        if not pressPopup("InfinityTowerTeleport") then pressPopup("InfinityTowerTransport") end
+    end
+end
+
+-- TIME TRIAL --------------------------------------------------------------------------------------
+-- The game's own trial GUI (paths from Beaast Hub + the game dump):
+--   MainGui.TowerTimer            shown while you're in a run (Main.Time, CurrentFloor)
+--   MainGui.TimeTrialTeleport     "teleport to the time trial?" popup  -> Yes
+--   MainGui.TowerTransport        same kind of popup                   -> Yes
+--   MainGui.TowerLose             run over screen                      -> close it
+function Extras.InTrialRun() return isShown(mainChild("TowerTimer")) end
+function Extras.TrialFloor()
+    local tt = mainChild("TowerTimer")
+    if not isShown(tt) then return nil end
+    local cf = tt:FindFirstChild("CurrentFloor", true)
+    if not cf then return nil end
+    local v
+    if cf:IsA("ValueBase") then v = cf.Value
+    elseif cf:IsA("TextLabel") then v = cf.Text
+    else
+        local lbl = cf:FindFirstChildWhichIsA("TextLabel", true)
+        v = lbl and lbl.Text
+    end
+    return tonumber(string.match(tostring(v or ""), "(%d+)"))
+end
+function Extras.TrialTimeLeft()
+    local tt = mainChild("TowerTimer")
+    local t = isShown(tt) and tt:FindFirstChild("Main") and tt.Main:FindFirstChild("Time")
+    return t and t:IsA("TextLabel") and t.Text or nil
+end
+
+local baseTrial = Features.TimeTrial
+function Features.TimeTrial()
+    -- the game asks before sending you into the run: say yes
+    if pressPopup("TimeTrialTeleport") or pressPopup("TowerTransport") then
+        task.wait(1)
+        return true
+    end
+    -- run over: close the result screen so the next run / farming can go on
+    local lose = mainChild("TowerLose")
+    if isShown(lose) then
+        pressOnce(lose)
+        Stats.TrialFloor = 0
+        task.wait(0.5)
+    end
+    -- real floor number from the game instead of counting button presses
+    local floor = Extras.TrialFloor()
+    if floor then Stats.TrialFloor = floor end
+    return baseTrial()
+end
+
+-- QUEST -------------------------------------------------------------------------------------------
+-- The game shows the running quest in MainGui.Quest: Title = the quest's DisplayName,
+-- Objectives = "[0/4] Kill 4 ...", and a "Turn in & continue" button (TurnIn) once done.
+-- QuestData[world].Quests[n] = { DisplayName, Targets = { EnemyModelName = amount } }.
+-- FinishQuest / StartQuest are RemoteEvents (no answer), so the GUI is what tells us.
+
+-- a real click: every handler on the button's click signals
+function Extras.Press(btn)
+    if not btn then return false end
+    if not btn:IsA("GuiButton") then btn = btn:FindFirstChildWhichIsA("GuiButton", true) end
+    if not btn then return false end
+    local fired = false
+    for _, sig in ipairs({ "Activated", "MouseButton1Click" }) do
+        local ok, signal = pcall(function() return btn[sig] end)
+        if ok and signal then
+            if getconnections then
+                local okc, conns = pcall(getconnections, signal)
+                if okc and conns then
+                    for _, c in ipairs(conns) do pcall(function() c:Fire() end) fired = true end
+                end
+            elseif firesignal then
+                pcall(firesignal, signal)
+                fired = true
+            end
+        end
+    end
+    return fired
+end
+
+local Quest = { startTries = 0, lastWorld = nil }
+function Quest.Frame() return mainChild("Quest") end
+function Quest.Active() return isShown(Quest.Frame()) end
+function Quest.Title()
+    local f = Quest.Frame()
+    local t = f and f:FindFirstChild("Title")
+    return t and t:IsA("TextLabel") and t.Text or nil
+end
+-- world + quest entry of the quest on screen
+function Quest.Find()
+    local title = Quest.Title()
+    local qd = Data.Module("QuestData")
+    if not title or not qd then return nil end
+    for w, info in pairs(qd) do
+        if type(info) == "table" and type(info.Quests) == "table" then
+            for i, q in pairs(info.Quests) do
+                if type(q) == "table" and q.DisplayName == title then return w, q, i end
+            end
+        end
+    end
+    return nil
+end
+function Quest.ReadyToTurnIn()
+    local f = Quest.Frame()
+    local b = f and f:FindFirstChild("TurnIn")
+    if isShown(b) then return b end
+    -- every objective box checked
+    local obj = f and f:FindFirstChild("Objectives")
+    local any, all = false, true
+    for _, o in ipairs(obj and obj:GetChildren() or {}) do
+        if o:IsA("TextLabel") then
+            any = true
+            local done, total = string.match(o.Text, "%[(%d+)/(%d+)%]")
+            if not done or tonumber(done) < tonumber(total) then all = false end
+        end
+    end
+    return (any and all) and true or nil
+end
+-- mobs to kill for the quest on screen (model names from QuestData + names from the text)
+function Features.QuestTargets()
+    if not Quest.Active() then return nil, nil end
+    local w, q = Quest.Find()
+    local set = {}
+    for name in pairs(q and q.Targets or {}) do set[tostring(name)] = true end
+    local obj = Quest.Frame():FindFirstChild("Objectives")
+    for _, o in ipairs(obj and obj:GetChildren() or {}) do
+        if o:IsA("TextLabel") then
+            local done, total, what = string.match(o.Text, "%[(%d+)/(%d+)%]%s*Kill%s+%d+%s+(.-)s?$")
+            if what and tonumber(done) < tonumber(total) then set[what] = true end
+        end
+    end
+    return w, set
+end
+
+-- the quest NPC of a world (QuestData[world].DisplayName, e.g. "Birdie") and its prompt
+function Quest.GiverPrompt(world)
+    local qd = Data.Module("QuestData")
+    local npcName = qd and type(qd[world]) == "table" and qd[world].DisplayName
+    local folder = Worlds:FindFirstChild(world or "")
+    if not folder then return nil end
+    for _, p in ipairs(folder:GetDescendants()) do
+        if p:IsA("ProximityPrompt") and p.Enabled then
+            local m = p:FindFirstAncestorOfClass("Model")
+            local hay = string.lower((m and m.Name or "") .. " " .. p.ObjectText .. " " .. p.ActionText)
+            if (npcName and m and (m.Name == npcName or string.find(hay, string.lower(npcName), 1, true)))
+                or string.find(hay, "quest", 1, true) then
+                return p
+            end
+        end
+    end
+    return nil
+end
+
+function Features.Quest()
+    local world = Util.World()
+    if not Data.IsFarmWorldName(world) then return end
+    if Quest.lastWorld ~= world then Quest.lastWorld, Quest.startTries = world, 0 end
+
+    if Quest.Active() then
+        Quest.startTries = 0
+        local ready = Quest.ReadyToTurnIn()
+        if ready and Util.Every("quest-turnin", 3) then
+            if typeof(ready) == "Instance" then Extras.Press(ready) end
+            Net.Call("FinishQuest", world)
+        elseif On("SkipQuest") and Util.Every("quest-skip", 15) then
+            Net.Call("SkipQuest")
+        end
+        return
+    end
+
+    -- no quest on screen: ask for one (remote, then the NPC's prompt)
+    if not Util.Every("quest-start", 6) then return end
+    Quest.startTries = Quest.startTries + 1
+    Net.Call("FinishQuest", world)
+    Net.Call("StartQuest", world)
+    if Quest.startTries >= 2 then
+        local p = Quest.GiverPrompt(world)
+        if p then Prompt.Use(p) end
+    end
+    -- nothing after several tries: this world's quests are done
+    if Quest.startTries >= 5 and On("NextQuestWorld") then
+        Quest.startTries = 0
+        local order, discovered = Data.FarmWorlds(), LP:FindFirstChild("Discovered")
+        for i, w in ipairs(order) do
+            if w == world then
+                local nxt = order[i + 1]
+                if nxt then Travel.To(nxt) end
+                break
+            end
+        end
+    end
+end
+
+-- DUNGEON (open it like a player) -------------------------------------------------------------------
+-- The dungeon door is in the Tower lobby: Worlds.Tower.DungeonDoor.MainDoor has the "Open"
+-- prompt. It shows MainGui.DungeonSummon: ConfigButton -> Config.Main.Worlds.<world> ->
+-- Close ("Confirm"), then "Public" or "Friends Only". MainGui.DungeonTravel then asks
+-- "enter this dungeon?" -> Yes. Pressing the game's own buttons means we send exactly
+-- what the game sends. If the window never shows up, the learned-remote way is used.
+local DungeonGui = {}
+function DungeonGui.Door()
+    local tower = Worlds:FindFirstChild("Tower")
+    return tower and tower:FindFirstChild("DungeonDoor")
+end
+function DungeonGui.Prompt()
+    local door = DungeonGui.Door()
+    if not door then return nil end
+    for _, p in ipairs(door:GetDescendants()) do
+        if p:IsA("ProximityPrompt") and p.Enabled then return p end
+    end
+    return nil
+end
+-- stand in front of the door (toward the lobby spawn)
+function DungeonGui.GoToDoor()
+    if Util.World() ~= "Tower" then
+        Travel.To("Tower", true)
+        local t0 = os.clock()
+        while Util.World() ~= "Tower" and os.clock() - t0 < 5 do task.wait(0.2) end
+    end
+    local door = DungeonGui.Door()
+    local main = door and door:FindFirstChild("MainDoor")
+    if not main then return false end
+    local spawn = Worlds.Tower:FindFirstChild("Spawns") and Worlds.Tower.Spawns:FindFirstChildWhichIsA("BasePart")
+    local toward = spawn and (spawn.Position - main.Position) or Vector3.new(1, 0, 0)
+    toward = Vector3.new(toward.X, 0, toward.Z)
+    if toward.Magnitude < 1 then toward = Vector3.new(1, 0, 0) end
+    local pos = main.Position + toward.Unit * 9
+    local y = spawn and spawn.Position.Y + 4 or main.Position.Y - 8
+    Util.MoveTo(CFrame.new(Vector3.new(pos.X, y, pos.Z), Vector3.new(main.Position.X, y, main.Position.Z)))
+    task.wait(0.4)
+    return true
+end
+function DungeonGui.Window() return mainChild("DungeonSummon") end
+function DungeonGui.WaitShown(g, secs)
+    local t0 = os.clock()
+    while os.clock() - t0 < (secs or 3) do
+        if isShown(g) then return true end
+        task.wait(0.1)
+    end
+    return false
+end
+function DungeonGui.PickWorld(world)
+    local win = DungeonGui.Window()
+    local cfgBtn = win and win:FindFirstChild("ConfigButton", true)
+    if not cfgBtn then return false end
+    Extras.Press(cfgBtn)
+    local cfg = win:FindFirstChild("Config")
+    if not DungeonGui.WaitShown(cfg, 2) then return false end
+    local list = cfg:FindFirstChild("Worlds", true)
+    local entry = list and list:FindFirstChild(world)
+    if entry then Extras.Press(entry) task.wait(0.3) end
+    local confirm = cfg:FindFirstChild("Close", true)
+    if confirm then Extras.Press(confirm) end
+    task.wait(0.3)
+    return entry ~= nil
+end
+
+local baseOpenDungeon = Features.OpenDungeon
+function Features.OpenDungeon()
+    -- a summon was just sent: only try to get in (DungeonTravel popup / JoinDungeon)
+    if os.clock() < (DungeonGui.waitUntil or 0) then
+        local dt = mainChild("DungeonTravel")
+        if isShown(dt) then Extras.Press(dt:FindFirstChild("Yes", true)) end
+        if Util.Every("dungeon-rejoin", 5) then
+            Net.Raw("JoinDungeon", Learn.Get("JoinDungeon") or {})
+            -- the door's teleporter (DungeonDoor.Teleporter.TriggerPart), like walking in
+            local door = DungeonGui.Door()
+            local trig = door and door:FindFirstChild("TriggerPart", true)
+            local root = Util.Root()
+            if trig and root and Util.World() == "Tower" then
+                Util.MoveTo(trig.CFrame)
+                if firetouchinterest then
+                    pcall(firetouchinterest, root, trig, 0) task.wait(0.1) pcall(firetouchinterest, root, trig, 1)
+                end
+            end
+        end
+        return
+    end
+    if DungeonGui.failed and DungeonGui.failed >= 3 then return baseOpenDungeon() end
+
+    if On("DungeonEquipArtifact") then Features.EquipOpenArtifact() end
+    if not DungeonGui.GoToDoor() then DungeonGui.failed = (DungeonGui.failed or 0) + 1 return end
+    local prompt = DungeonGui.Prompt()
+    if prompt then Prompt.Use(prompt) end
+    local win = DungeonGui.Window()
+    if not DungeonGui.WaitShown(win, 3) then
+        DungeonGui.failed = (DungeonGui.failed or 0) + 1
+        if DungeonGui.failed >= 3 then Util.Notify("Dungeon window didn't open - using the remote way") end
+        return
+    end
+    DungeonGui.failed = 0
+    local world = Data.FromLabel(F("DungeonWorld") or "")
+    if world ~= "" and not DungeonGui.PickWorld(world) and Util.Every("dungeon-world-note", 120) then
+        Util.Notify("Dungeon: " .. world .. " isn't in the game's dungeon world list")
+    end
+    local btn = win:FindFirstChild(On("DungeonFriends") and "Friends" or "Public", true)
+    if not btn then Util.Notify("Dungeon: Public / Friends button not found") return end
+    Extras.Press(btn)
+    Features.LastSummon = { source = "game window", artifact = "-", at = os.clock() }
+    DungeonGui.waitUntil = os.clock() + 30
+    task.wait(1)
+    local dt = mainChild("DungeonTravel")
+    if DungeonGui.WaitShown(dt, 4) then Extras.Press(dt:FindFirstChild("Yes", true)) end
+end
+
+-- WORLD GATE --------------------------------------------------------------------------------------
+-- buy the gate of a world the same way walking into it does (Bindable.AttemptOpenGate)
+function Extras.BuyWorldGate(worldName)
+    local w = Worlds:FindFirstChild(worldName or Util.World())
+    local gate = w and w:FindFirstChild("WorldGate", true)
+    if not gate then return false end
+    local open = gate:FindFirstChild("Open")
+    if open and open.Value == true then return false end
+    local target = gate:FindFirstChild("TargetWorld")
+    local og = Bindables:FindFirstChild("AttemptOpenGate")
+    if og and og:IsA("BindableEvent") then pcall(og.Fire, og, gate, true) end
+    task.wait(0.2)
+    if target and target.Value then Net.Call("DiscoverWorld", target.Value) end
+    task.wait(0.05)
+    if og and og:IsA("BindableEvent") then pcall(og.Fire, og, gate, false) end
+    return true
+end
+local baseNext = Features.NextWorld
+function Features.NextWorld()
+    if pcall(Extras.BuyWorldGate) then task.wait(0.5) end
+    baseNext()
+end
+
+-- MENUS / TRAVEL ----------------------------------------------------------------------------------
+-- open menus through the game's own SetWindowOpen first (keeps its buttons working)
+local baseOpenMenu = Features.OpenMenu
+function Features.OpenMenu(name, on)
+    local mg = Data.MainGui()
+    local swo = mg and mg:FindFirstChild("SetWindowOpen")
+    if swo and swo:IsA("BindableEvent") and pcall(swo.Fire, swo, name, on) then
+        task.wait(0.15)
+        local f = mg:FindFirstChild(name)
+        if f and f:IsA("GuiObject") and f.Visible == (on and true or false) then return end
+    end
+    baseOpenMenu(name, on)
+end
+-- tell the game's client we teleported (it reloads the area / stops rubber banding)
+local baseTravel = Travel.To
+function Travel.To(world, force)
+    local r = baseTravel(world, force)
+    local tp = Bindables:FindFirstChild("Teleported")
+    if tp and tp:IsA("BindableEvent") then pcall(tp.Fire, tp) end
+    return r
+end
+
+-- STATS -------------------------------------------------------------------------------------------
+function Extras.StatsText()
+    local fps = math.floor(workspace:GetRealPhysicsFPS() + 0.5)
+    local ping = "?"
+    pcall(function()
+        ping = string.match(game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValueString(), "^(%d+)") or "?"
+    end)
+    return string.format("FPS : %d   Ping : %s ms   World : %s", fps, ping, Data.WorldDisplay(Util.World()))
+end
+
 -- BRAIN: one owner of the character at a time ----------------------------------------------------
+-- DIAGNOSTICS ---------------------------------------------------------------------------------------
+-- One text file (GravityHub/AFS/diagnostics.txt) with what the hub sees in YOUR game:
+-- remotes it calls (found? Event or Function?), your player values, the world you're
+-- in and its enemies, the game GUI, modules it reads, learned calls and recent errors.
+-- It's what's needed to fix a feature without guessing.
+local Diag = { Errors = {}, ErrorSeen = {} }
+-- own folder helper: the Window (and its EnsureFolder) doesn't exist yet at this point
+function Diag.EnsureFolder(path)
+    if not (isfolder and makefolder) then return end
+    local cur = ""
+    for part in string.gmatch(path, "[^/]+") do
+        cur = cur == "" and part or (cur .. "/" .. part)
+        pcall(function() if not isfolder(cur) then makefolder(cur) end end)
+    end
+end
+
+function Diag.LogError(where, err)
+    local msg = tostring(where) .. ": " .. tostring(err)
+    local now = os.clock()
+    if Diag.ErrorSeen[msg] and now - Diag.ErrorSeen[msg] < 60 then return end
+    Diag.ErrorSeen[msg] = now
+    local line = os.date("%H:%M:%S") .. "  " .. msg
+    Diag.Errors[#Diag.Errors + 1] = line
+    if #Diag.Errors > 200 then table.remove(Diag.Errors, 1) end
+    if appendfile then
+        pcall(function()
+            Diag.EnsureFolder(CFG.ConfigFolder)
+            appendfile(CFG.ConfigFolder .. "/errors.txt", line .. "\n")
+        end)
+    end
+end
+
+local function diagTree(obj, depth, maxKids, out, indent)
+    indent = indent or ""
+    if not obj then out[#out + 1] = indent .. "(missing)" return end
+    local kids = obj:GetChildren()
+    local val = ""
+    if obj:IsA("ValueBase") then val = " = " .. tostring(obj.Value) end
+    if obj:IsA("GuiObject") then val = val .. (obj.Visible and "  [visible]" or "  [hidden]") end
+    if obj:IsA("TextLabel") or obj:IsA("TextButton") then val = val .. '  "' .. string.sub(obj.Text, 1, 40) .. '"' end
+    out[#out + 1] = indent .. obj.Name .. "  <" .. obj.ClassName .. ">" .. val .. (#kids > 0 and ("  (" .. #kids .. ")") or "")
+    if depth <= 0 then return end
+    -- group same-named children (enemy lists, pickups...) so the file stays short
+    local shown, groups, order = 0, {}, {}
+    for _, c in ipairs(kids) do
+        local key = c.Name .. "<" .. c.ClassName .. ">"
+        if not groups[key] then groups[key] = { first = c, n = 0 } order[#order + 1] = key end
+        groups[key].n = groups[key].n + 1
+    end
+    for _, key in ipairs(order) do
+        shown = shown + 1
+        if shown > (maxKids or 25) then out[#out + 1] = indent .. "  ... " .. (#order - shown + 1) .. " more kinds" break end
+        local g = groups[key]
+        if g.n > 1 then out[#out + 1] = indent .. "  x" .. g.n .. " of:" end
+        diagTree(g.first, depth - 1, maxKids, out, indent .. "  ")
+    end
+end
+
+function Diag.Report()
+    local out = {}
+    local function add(s) out[#out + 1] = s end
+    local function section(t) add("") add("==== " .. t .. " ====") end
+    local exec = "?"
+    pcall(function() exec = table.concat({ identifyexecutor() }, " ") end)
+    add(CFG.Name .. " diagnostics  " .. os.date("%Y-%m-%d %H:%M:%S") .. "  executor: " .. exec .. "  place: " .. tostring(game.PlaceId))
+    add("functions: hookmetamethod=" .. tostring(hookmetamethod ~= nil) .. " getconnections=" .. tostring(getconnections ~= nil)
+        .. " firesignal=" .. tostring(firesignal ~= nil) .. " fireproximityprompt=" .. tostring(fireproximityprompt ~= nil)
+        .. " firetouchinterest=" .. tostring(firetouchinterest ~= nil) .. " writefile=" .. tostring(writefile ~= nil))
+
+    section("REMOTES the hub uses")
+    local names, seen = {}, {}
+    for key, e in pairs(CFG.Calls) do if not seen[e[1]] then seen[e[1]] = key names[#names + 1] = e[1] end end
+    for _, n in ipairs({ "JoinDungeon", "SetDungeonSetting", "ClaimGift", "AttemptMultiOpen", "GetSpawn", "PetAttack", "PetAbility", "SendPet" }) do
+        if not seen[n] then seen[n] = "raw" names[#names + 1] = n end
+    end
+    table.sort(names)
+    for _, n in ipairs(names) do
+        local r = Remotes:FindFirstChild(n)
+        add(string.format("%-28s %s", n, r and r.ClassName or "MISSING"))
+    end
+    section("BINDABLES")
+    for _, n in ipairs({ "SendPet", "FindSpawn", "ToggleMount", "Teleported", "SummonDungeon", "AttemptOpenGate" }) do
+        local b = Bindables:FindFirstChild(n)
+        add(string.format("%-28s %s", n, b and b.ClassName or "MISSING"))
+    end
+
+    section("PLAYER")
+    add("World value: " .. tostring(Util.World()) .. "   character: " .. tostring(LP.Character ~= nil) .. "   root: " .. tostring(Util.Root() ~= nil))
+    diagTree(LP, 1, 40, out)
+    local pets = LP:FindFirstChild("Pets")
+    if pets and pets:GetChildren()[1] then add("first pet:") diagTree(pets:GetChildren()[1], 2, 30, out, "  ") end
+
+    section("WORLDS")
+    add("farm worlds: " .. #Data.FarmWorlds() .. "   event worlds: " .. #Data.EventWorlds() .. "   all: " .. #Data.AllWorlds())
+    local fl = Data.FarmWorldLabels()
+    add("first labels: " .. table.concat({ fl[1] or "-", fl[2] or "-", fl[3] or "-" }, ", "))
+    local w = Worlds:FindFirstChild(Util.World())
+    add("current world folder:")
+    diagTree(w, 3, 20, out, "  ")
+    local enemies = Combat.List(Util.World())
+    add("enemies found by the hub here: " .. #enemies)
+    if enemies[1] then diagTree(enemies[1], 2, 30, out, "  ") end
+
+    section("WORKSPACE (top)")
+    diagTree(workspace, 1, 60, out)
+    local fx = workspace:FindFirstChild("Effects")
+    if fx then add("Effects:") diagTree(fx, 2, 15, out, "  ") end
+
+    section("MODE WORLDS")
+    for _, n in ipairs({ "Dungeon", "Raid", "Tower", "InfinityTower", "GatesMode", "TimeChamber", "GlobalBoss" }) do
+        diagTree(Worlds:FindFirstChild(n), 2, 15, out)
+    end
+
+    section("GAME GUI (MainGui)")
+    diagTree(Data.MainGui(), 1, 200, out)
+    for _, n in ipairs({ "DungeonSummon", "DungeonTravel", "DungeonTimer", "TowerTimer", "TimeTrialTeleport", "RaidPicker", "RaidTransport", "Quest", "MountButtonFrame" }) do
+        local g = Data.MainGui() and Data.MainGui():FindFirstChild(n)
+        if g then diagTree(g, 3, 12, out, "  ") end
+    end
+
+    section("MODULES")
+    for _, n in ipairs({ "WorldData", "PassiveStats", "ArtefactData", "RebirthBossData", "QuestData", "EggStats", "EnemyStats" }) do
+        local m = Data.Module(n)
+        local keys = {}
+        for k in pairs(m or {}) do keys[#keys + 1] = tostring(k) if #keys >= 8 then break end end
+        add(string.format("%-16s %s  %s", n, m and "OK" or "BLOCKED/MISSING", table.concat(keys, ", ")))
+    end
+
+    section("LEARNED CALLS")
+    pcall(function()
+        for name, args in pairs(Learn.Load()) do
+            local ok, j = pcall(HttpService.JSONEncode, HttpService, args)
+            add(name .. "  " .. (ok and j or "?"))
+        end
+    end)
+
+    section("FLAGS ON")
+    local on = {}
+    for flag, el in pairs(Library.Flags) do
+        local v = el:Get()
+        if v == true then on[#on + 1] = flag
+        elseif type(v) == "string" and v ~= "" then on[#on + 1] = flag .. "=" .. v end
+    end
+    table.sort(on)
+    add(table.concat(on, ", "))
+
+    section("RECENT ERRORS")
+    for _, e in ipairs(Diag.Errors) do add(e) end
+    if Net.Missing then
+        local m = {}
+        for n in pairs(Net.Missing) do m[#m + 1] = n end
+        add("missing remotes called: " .. table.concat(m, ", "))
+    end
+    return table.concat(out, "\n")
+end
+
+function Diag.Save()
+    local ok, text = pcall(Diag.Report)
+    if not ok then text = "report failed: " .. tostring(text) end
+    if not writefile then Util.Notify("Executor has no writefile") return text end
+    pcall(function()
+        Diag.EnsureFolder(CFG.ConfigFolder)
+        writefile(CFG.ConfigFolder .. "/diagnostics.txt", text)
+    end)
+    Util.Notify("Saved " .. CFG.ConfigFolder .. "/diagnostics.txt")
+    return text
+end
+
 local function Brain()
     if On("AutoInf") then return Features.InfinityTower() end
     if On("AutoOpenDungeon") or (On("AutoFarmDungeon") and Features.InDungeon()) then return Features.Dungeon() end
@@ -3120,11 +4298,22 @@ do
     d:Toggle({ Title = "Ignore Chest", Flag = "DungeonIgnoreChest" })
     d:Toggle({ Title = "Use Dungeon Artifact To Open", Flag = "DungeonArtifact" })
     d:Toggle({ Title = "Friend Only", Flag = "DungeonFriends" })
+    d:Divider()
+    d:Dropdown({ Title = "Artifact To Equip Before Opening", Items = Data.ArtifactLabels(), Flag = "DungeonOpenArtifact",
+        Callback = function() Features.ResetOpenArtifact() end })
+    d:Dropdown({ Title = "Artifact Slot", Items = { "1", "2" }, Default = "1", Required = true, Flag = "DungeonOpenArtifactSlot",
+        Callback = function() Features.ResetOpenArtifact() end })
+    d:Toggle({ Title = "Equip Artifact Before Opening", Flag = "DungeonEquipArtifact",
+        Callback = function(v) if v then Features.ResetOpenArtifact() end end })
+    d:Button({ Title = "Equip Artifact Now ( test )", Callback = function()
+        if Features.EquipOpenArtifact(true) then Util.Notify("Artifact sent - check it in the game's Artifact menu") end
+    end })
+    d:Divider()
     d:Toggle({ Title = "Auto Open Dungeon", Flag = "AutoOpenDungeon" })
     d:Toggle({ Title = "Teleport To Load All Dungeon", Default = true, Flag = "DungeonLoadAll" })
     d:Toggle({ Title = "Auto Farm Dungeon", Flag = "AutoFarmDungeon" })
     Features.DungeonLabel = d:Label("Runs : 0")
-    d:Button({ Title = "Teleport To Dungeon Lobby", Callback = function() Travel.To("Dungeon", true) end })
+    d:Button({ Title = "Teleport To Dungeon Door", Callback = function() DungeonGui.GoToDoor() end })
     Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(dw, Data.FarmWorldLabels()) end
 
     local g = TDungeon:Card("Auto Gate !", "Right")
@@ -3268,6 +4457,14 @@ do
     end })
     spy:Button({ Title = "Clear Log", Callback = function() table.clear(SpyLog) Util.Notify("Log cleared") end })
 
+    local dg = TSettings:Card("Diagnostics", "Left")
+    dg:Paragraph({ Body = "Something not working? Stand where it fails (e.g. in the world you farm, or the dungeon lobby), press Save Report, and send GravityHub/AFS/diagnostics.txt. Errors are also written to GravityHub/AFS/errors.txt." })
+    dg:Button({ Title = "Save Report", Callback = function() Diag.Save() end })
+    dg:Button({ Title = "Copy Report", Callback = function()
+        local text = Diag.Save()
+        if setclipboard then setclipboard(text) Util.Notify("Report copied") end
+    end })
+
     local w = TSettings:Card("Webhook", "Right")
     w:Input({ Title = "Webhook URL", Placeholder = "https://discord.com/api/webhooks/...", Flag = "WebhookUrl" })
     w:Slider({ Title = "Send Every [minutes]", Min = 1, Max = 60, Default = 10, Flag = "WebhookEvery" })
@@ -3288,9 +4485,114 @@ do
     u:Button({ Title = "Unload Script", Callback = function()
         pcall(function() Window:SaveConfig() end) autoSave = false  -- keep settings as they were before unload
         for _, el in pairs(Flags) do if el.Type == "Toggle" then el:Set(false, true) end end
-        if getgenv and getgenv().RenHubV3 then getgenv().RenHubV3() getgenv().RenHubV3 = nil else Window:Destroy() end
+        if getgenv and getgenv().GravityHubV3 then getgenv().GravityHubV3() getgenv().GravityHubV3 = nil else Window:Destroy() end
     end })
 
+    local s = TUI:Card("Stats", "Right")
+    Extras.StatsLabel = s:Label("FPS : -   Ping : -")
+end
+
+-- EXTRAS UI ----------------------------------------------------------------------------------------
+do
+    -- Main: teams per activity
+    local t = TMain:Card("Auto Equip Teams", "Right")
+    t:Paragraph({ Body = "Uses the teams you saved in the game's Pets menu. Leave a slot empty to not switch for it." })
+    local names = Extras.TeamNames()
+    local drops = {
+        t:Dropdown({ Title = "Farm Team", Items = names, Flag = "TeamFarm" }),
+        t:Dropdown({ Title = "Chest Team", Items = names, Flag = "TeamChest" }),
+        t:Dropdown({ Title = "Raid Team", Items = names, Flag = "TeamRaid" }),
+        t:Dropdown({ Title = "Dungeon / Tower / Gate Team", Items = names, Flag = "TeamDungeon" }),
+        t:Dropdown({ Title = "Time Chamber Team", Items = names, Flag = "TeamChamber" }),
+    }
+    local function refreshTeams()
+        local list = Extras.TeamNames()
+        for _, d in ipairs(drops) do d:Refresh(list) end
+        return #list
+    end
+    t:Button({ Title = "Refresh Teams", Callback = function()
+        Extras.ResetTeam()
+        local n = refreshTeams()
+        Util.Notify(n > 0 and (n .. " teams found") or "No teams - open the Pets menu once, then refresh")
+    end })
+    t:Toggle({ Title = "Auto Equip Teams", Flag = "AutoTeams", Callback = function(v) if v then Extras.ResetTeam() end end })
+    Refreshers[#Refreshers + 1] = refreshTeams
+
+    -- Main: pet extras + world gate
+    local p = TMain:Card("Pets Extra", "Right")
+    p:Toggle({ Title = "Fast Pet Ability ( Ult Skip )", Flag = "PetAbility" })
+    p:Toggle({ Title = "Pull Pets To Me On Attack", Flag = "PullPets" })
+    p:Toggle({ Title = "Boost Pet Speed ( re-equip after )", Flag = "BoostPetSpeed", Callback = function(v)
+        if v then Extras.BoostPetSpeed() Util.Notify("Re-equip your pets to apply") end
+    end })
+    p:Divider()
+    p:Button({ Title = "Buy Current World Gate", Callback = function()
+        if not Extras.BuyWorldGate() then Util.Notify("No closed gate in this world") end
+    end })
+
+    -- Raid: boss / forcefield + results
+    local r = TRaid:Card("Raid Extras", "Right")
+    r:Paragraph({ Body = "Forcefield up: kill the minions first. Forcefield down: go for the boss. When the raid ends the results are confirmed and you go back to your last farm world." })
+    r:Toggle({ Title = "Smart Raid Target ( Boss / Forcefield )", Default = true, Flag = "RaidSmartTarget" })
+    r:Toggle({ Title = "Auto Confirm Raid Results", Default = true, Flag = "RaidAutoConfirm" })
+    r:Toggle({ Title = "Return To Farm World After Raid", Default = true, Flag = "RaidReturn" })
+
+    -- Shop: free gifts
+    local g = TShop:Card("Free Gifts", "Left")
+    g:Paragraph({ Body = "Claims the playtime gifts (ClaimGift 1-" .. CFG.FreeGiftCount .. ") and resets the gift wheel when the game allows it." })
+    g:Toggle({ Title = "Auto Claim Free Gifts", Flag = "AutoFreeGifts" })
+
+    -- Dungeon: summon check (what the hub sends, learned from your own summon)
+    local ds = TDungeon:Card("Dungeon Summon Check", "Right")
+    ds:Paragraph({ Body = "The hub copies the call the game makes when you summon by hand.\n"
+        .. "[1] Summon one dungeon by hand WITHOUT artifact.\n"
+        .. "[2] Summon one by hand WITH artifact.\n"
+        .. "After that Auto Open Dungeon sends the same call with your size / world / artifact choice." })
+    local status = ds:Label("Learned : -")
+    local function statusText()
+        local tpl, n = Learn.Get("SummonDungeon")
+        local hist = #Learn.History("SummonDungeon")
+        local btn = Learn.Get("Bindable.SummonDungeon") ~= nil
+        local _, src, art = Features.SummonArgs(F("DungeonSize") or "Small",
+            Data.FromLabel(F("DungeonWorld") or "") ~= "" and Data.FromLabel(F("DungeonWorld")) or "?", On("DungeonArtifact"))
+        local last = Features.LastSummon
+        local lines = {
+            "Learned summon : " .. (tpl and ("yes, " .. n .. " args, " .. hist .. " different calls") or "<font color='#f87171'>no - summon by hand once</font>"),
+            "Game button learned : " .. (btn and "yes" or "no"),
+            "Sending : " .. src .. "   Artifact slot : " .. tostring(art),
+        }
+        if last then
+            lines[#lines + 1] = "Last summon : " .. last.source .. (last.answer ~= nil and (" -> " .. tostring(last.answer)) or "")
+        end
+        return table.concat(lines, "\n")
+    end
+    Learn.OnRecord = function(name)
+        if name == "SummonDungeon" or name == "Bindable.SummonDungeon" then
+            Util.Notify("Learned " .. name)
+            pcall(function() status:Set(statusText()) end)
+        end
+    end
+    ds:Button({ Title = "Refresh Status", Callback = function() status:Set(statusText()) end })
+    ds:Button({ Title = "Copy Summon Call", Callback = function()
+        local args = Features.SummonArgs(F("DungeonSize") or "Small", Data.FromLabel(F("DungeonWorld") or ""), On("DungeonArtifact"))
+        local ser = {}
+        for i = 1, args.n or #args do ser[i] = Learn.Ser(args[i], 0) end
+        local txt = "SummonDungeon " .. HttpService:JSONEncode(ser)
+        if setclipboard then setclipboard(txt) Util.Notify("Copied") else print(txt) Util.Notify("Printed to F9") end
+    end })
+    ds:Button({ Title = "Forget Learned Summon", Callback = function()
+        local d = Learn.Load()
+        d.SummonDungeon, d["Bindable.SummonDungeon"] = nil, nil
+        pcall(function() if writefile then writefile(Learn.File, HttpService:JSONEncode(d)) end end)
+        status:Set(statusText())
+        Util.Notify("Summon forgotten - summon by hand again")
+    end })
+    task.spawn(function() task.wait(1) pcall(function() status:Set(statusText()) end) end)
+
+    -- Hatch: multi open
+    local h = THatch:Card("Multi Open", "Left")
+    h:Paragraph({ Body = "Uses the game's Multi Open ( gamepass ) on the star picked in Auto Summon. Summon Max Star now uses the amount shown on the game's Open button." })
+    h:Toggle({ Title = "Auto Multi Open Selected Star", Flag = "AutoMultiOpen" })
 end
 
 ------------------------------------------------------------------------
@@ -3392,6 +4694,11 @@ if hookmetamethod and getnamecallmethod then
             local args = table.pack(...)
             task.spawn(Learn.Record, self.Name, args)
         end
+        if method == "Fire" and typeof(self) == "Instance" and self.Name == "SummonDungeon"
+           and self.Parent == Bindables and not (checkcaller and checkcaller()) then
+            local args = table.pack(...)
+            task.spawn(Learn.Record, "Bindable.SummonDungeon", args)
+        end
         if Flags.RemoteSpy and Flags.RemoteSpy:Get() and not (checkcaller and checkcaller())
            and (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance"
            and self.Parent == Remotes and not CFG.SpyIgnore[self.Name] then
@@ -3420,7 +4727,11 @@ local function loop(interval, fn)
     task.spawn(function()
         while running do
             local ok, err = pcall(fn)
-            if not ok then warn("[" .. CFG.Name .. "] " .. tostring(err)) task.wait(1) end
+            if not ok then
+                warn("[" .. CFG.Name .. "] " .. tostring(err))
+                Diag.LogError("loop", err)
+                task.wait(1)
+            end
             task.wait(type(interval) == "function" and interval() or interval)
         end
     end)
@@ -3435,6 +4746,18 @@ loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") t
 loop(3, function() if On("AutoFuse") then Features.Fuse() end end)
 loop(0.2, function() if On("AutoPassive") then Features.Passive() end end)
 loop(2, function() if PassiveStatus then PassiveStatus:Set(Features.PassiveStatusText()) end end)
+
+-- extras
+loop(0.3, function() if On("PetAbility") then Extras.PetAbility() end end)
+loop(0.3, function() if On("AutoFreeGifts") then Extras.FreeGifts() end end)
+loop(0.5, function() if On("AutoMultiOpen") then Extras.MultiOpen() end end)
+loop(2, function()
+    -- team for places where nothing is being attacked (Time Chamber, idle)
+    if On("AutoTeams") and not Extras.Fighting then Extras.TeamFor(nil) end
+    if On("BoostPetSpeed") and Util.Every("petspeed", 10) then Extras.BoostPetSpeed() end
+    if Util.Every("maxhatch", 5) then pcall(Extras.MaxHatch) end
+    if Extras.StatsLabel then Extras.StatsLabel:Set(Extras.StatsText()) end
+end)
 
 local lastWebhook = os.clock()
 loop(1, function()
@@ -3465,6 +4788,8 @@ loop(1, function()
             if secs and (not best or secs < best) then best, bestName = secs, name end
         end
         local txt = best and string.format("%s %d:%02d", bestName, math.floor(best / 60), math.floor(best % 60)) or "?"
+        local left = Extras.TrialTimeLeft()
+        if left then txt = "in run, " .. left .. " left" end
         Features.TrialTimer:Set("Trial time : " .. txt .. "   Floor : " .. Stats.TrialFloor)
     end)
 end)
@@ -3500,7 +4825,7 @@ task.spawn(function()
 end)
 
 if getgenv then
-    getgenv().RenHubV3 = function()
+    getgenv().GravityHubV3 = function()
         running = false
         Window:Destroy()
     end
