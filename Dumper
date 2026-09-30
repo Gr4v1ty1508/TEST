@@ -15,8 +15,12 @@
       replicated.txt   ReplicatedStorage tree
       workspace.txt    Workspace tree (same-named things grouped)
       modules/<name>.txt   data of every ModuleScripts module (require)
-      calls.txt        RECORD: every remote call you make + what the server
+      calls_*.txt      RECORD: every remote call you make + what the server
                        sends back, while recording is on
+      watch_*.txt      WATCH OTHER HUB: the same, but also everything another
+                       script (e.g. another hub) does: remote / Bindable calls,
+                       fireproximityprompt, firetouchinterest, and every teleport
+                       of your character with what's at the spot
 
     How to use
       1. Run this (Gravity Hub can stay open).
@@ -409,21 +413,56 @@ end
 -- recorder: your remote calls (+ return values) and what the server sends
 ------------------------------------------------------------------------
 local recording = false
+local watchAll = false      -- "Watch Other Hub": also record calls made by other executor scripts
 local calls = {}
 local lastIncoming = {}
+local lastLine, lastCount = nil, 0
+local function flushRepeat()
+    if lastCount > 1 then calls[#calls] = calls[#calls] .. "   (x" .. lastCount .. ")" end
+    lastLine, lastCount = nil, 0
+end
 local function rec(line)
-    if #calls >= 5000 then return end
+    if #calls >= 8000 then return end
+    -- the same call again and again (attacks...) is written once with a count
+    if line == lastLine then lastCount = lastCount + 1 return end
+    flushRepeat()
+    lastLine, lastCount = line, 1
     calls[#calls + 1] = string.format("%8.2f  %s", os.clock() - (calls.t0 or os.clock()), line)
+end
+local function shouldRecord()
+    return recording and running and (watchAll or not (checkcaller and checkcaller()))
+end
+local function who()
+    return (checkcaller and checkcaller()) and "[script] " or "[game]   "
+end
+local function posText(p) return string.format("(%.0f, %.0f, %.0f)", p.X, p.Y, p.Z) end
+-- names of what's at a position (parts within 12 studs), for teleports / touches
+local function whatIsAt(pos)
+    local names = {}
+    pcall(function()
+        local params = OverlapParams.new()
+        local char = LP.Character
+        if char then params.FilterDescendantsInstances = { char } params.FilterType = Enum.RaycastFilterType.Exclude end
+        for i, part in ipairs(workspace:GetPartBoundsInRadius(pos, 12, params)) do
+            if i > 4 then break end
+            names[#names + 1] = path(part)
+        end
+    end)
+    return #names > 0 and table.concat(names, " | ") or "nothing"
 end
 
 if hookmetamethod and getnamecallmethod then
     local original
     original = hookmetamethod(game, "__namecall", function(self, ...)
-        if recording and running and not (checkcaller and checkcaller()) then
+        if shouldRecord() then
             local method = getnamecallmethod()
-            if (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance" and not SPAM[self.Name] then
+            local isRemote = (method == "FireServer" or method == "InvokeServer")
+            -- other hubs also drive the game's own Bindables (SendPet, ToggleMount, SummonDungeon...)
+            local isBindable = watchAll and (method == "Fire" or method == "Invoke") and typeof(self) == "Instance"
+                and self.Parent and self.Parent.Name == "Bindable"
+            if (isRemote or isBindable) and typeof(self) == "Instance" and (watchAll or not SPAM[self.Name]) then
                 local args = table.pack(...)
-                local head = "OUT " .. self.Name .. ":" .. method .. "(" .. argsText(args, args.n) .. ")"
+                local head = who() .. "OUT " .. self.Name .. ":" .. method .. "(" .. argsText(args, args.n) .. ")"
                 if method == "InvokeServer" then
                     local res = table.pack(original(self, ...))
                     task.spawn(rec, head .. "  ->  " .. (res.n > 0 and argsText(res, res.n) or "nil"))
@@ -434,6 +473,79 @@ if hookmetamethod and getnamecallmethod then
         end
         return original(self, ...)
     end)
+end
+
+-- other hubs sometimes call the functions directly (not through __namecall), and use
+-- the executor's prompt / touch helpers: hook those too while watching
+local hooked = {}
+if hookfunction then
+    local function hookRemoteMethod(className, methodName)
+        local ok, fn = pcall(function() return Instance.new(className)[methodName] end)
+        if not ok or not fn then return end
+        local old
+        old = hookfunction(fn, (newcclosure or function(f) return f end)(function(self, ...)
+            if watchAll and shouldRecord() and typeof(self) == "Instance" then
+                local args = table.pack(...)
+                task.spawn(rec, who() .. "OUT(direct) " .. self.Name .. ":" .. methodName .. "(" .. argsText(args, args.n) .. ")")
+            end
+            return old(self, ...)
+        end))
+        hooked[#hooked + 1] = { fn = fn, old = old }
+    end
+    pcall(hookRemoteMethod, "RemoteEvent", "FireServer")
+    pcall(hookRemoteMethod, "RemoteFunction", "InvokeServer")
+    local function hookGlobal(name, describeArgs)
+        local fn = getgenv and getgenv()[name] or nil
+        if type(fn) ~= "function" then return end
+        local old
+        old = hookfunction(fn, (newcclosure or function(f) return f end)(function(...)
+            if watchAll and recording and running then
+                local ok, txt = pcall(describeArgs, ...)
+                task.spawn(rec, "[script] " .. name .. " " .. (ok and txt or "?"))
+            end
+            return old(...)
+        end))
+        hooked[#hooked + 1] = { fn = fn, old = old }
+    end
+    pcall(hookGlobal, "fireproximityprompt", function(p)
+        return path(p) .. '  "' .. tostring(p.ActionText) .. '"'
+    end)
+    pcall(hookGlobal, "firetouchinterest", function(a, b, state)
+        local part = (typeof(b) == "Instance" and b:IsA("BasePart")) and b or a
+        return path(part) .. "  state=" .. tostring(state) .. (part:IsA("BasePart") and ("  at " .. posText(part.Position)) or "")
+    end)
+    pcall(hookGlobal, "firesignal", function(sig) return tostring(sig) end)
+end
+
+-- teleports: the character jumping more than 25 studs in one frame (what other hubs do
+-- to move you between rooms), with what is at the spot it landed on
+local lastPos
+conns[#conns + 1] = game:GetService("RunService").Heartbeat:Connect(function()
+    if not recording then lastPos = nil return end
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local p = root.Position
+    if lastPos and (p - lastPos).Magnitude > 25 then
+        local from, to = lastPos, p
+        task.spawn(function()
+            rec(string.format("TP %s -> %s  %.0f studs  at: %s", posText(from), posText(to), (to - from).Magnitude, whatIsAt(to)))
+        end)
+    end
+    lastPos = p
+end)
+
+-- the game's popups / labels that matter for modes (trial room, timers) when they change
+for _, n in ipairs({ "TowerTimer", "DungeonTimer", "InfinityTowerTimer" }) do
+    local mg = LP:FindFirstChild("PlayerGui") and LP.PlayerGui:FindFirstChild("MainGui")
+    local g = mg and mg:FindFirstChild(n)
+    local cf = g and g:FindFirstChild("CurrentFloor")
+    local v = cf and cf:FindFirstChild("Value")
+    if v and v:IsA("TextLabel") then
+        conns[#conns + 1] = v:GetPropertyChangedSignal("Text"):Connect(function()
+            if recording then rec(n .. " room -> " .. v.Text) end
+        end)
+    end
 end
 
 -- server -> you
@@ -456,19 +568,28 @@ if wv then
     conns[#conns + 1] = wv.Changed:Connect(function(v) if recording then rec("WORLD -> " .. tostring(v)) end end)
 end
 
-local function startRecord()
+local function startRecord(all)
     calls = { t0 = os.clock() }
     lastIncoming = {}
+    lastLine, lastCount = nil, 0
+    watchAll = all and true or false
     recording = true
-    rec("recording started in world " .. (wv and tostring(wv.Value) or "?"))
-    status(hookmetamethod and "recording... do the actions by hand" or "recording (no hookmetamethod: only server -> you)")
+    rec("recording started in world " .. (wv and tostring(wv.Value) or "?") .. (watchAll and "  (watching other scripts too)" or ""))
+    if watchAll then
+        status("watching... run the other hub's feature now")
+    else
+        status(hookmetamethod and "recording... do the actions by hand" or "recording (no hookmetamethod: only server -> you)")
+    end
 end
 local function stopRecord()
     recording = false
     rec("recording stopped")
+    flushRepeat()
     local stamp = os.date("%H%M%S")
-    save("calls_" .. stamp .. ".txt", calls)
-    status("saved calls_" .. stamp .. ".txt (" .. #calls .. " lines)")
+    local name = (watchAll and "watch_" or "calls_") .. stamp .. ".txt"
+    save(name, calls)
+    watchAll = false
+    status("saved " .. name .. " (" .. #calls .. " lines)")
 end
 
 ------------------------------------------------------------------------
@@ -488,7 +609,7 @@ gui.DisplayOrder = 1000
 gui.Parent = parent
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(260, 170)
+frame.Size = UDim2.fromOffset(260, 206)
 frame.Position = UDim2.new(1, -280, 0, 80)
 frame.BackgroundColor3 = Color3.fromRGB(19, 19, 20)
 frame.Active = true
@@ -511,7 +632,7 @@ title.Parent = frame
 
 local statusLabel = Instance.new("TextLabel")
 statusLabel.BackgroundTransparency = 1
-statusLabel.Position = UDim2.fromOffset(14, 134)
+statusLabel.Position = UDim2.fromOffset(14, 170)
 statusLabel.Size = UDim2.new(1, -28, 0, 28)
 statusLabel.Font = Enum.Font.Gotham
 statusLabel.TextSize = 11
@@ -556,22 +677,33 @@ button("Dump All", 36, function()
     busy = false
 end)
 local recBtn
-recBtn = button("Record", 72, function()
+local watchBtn
+recBtn = button("Record (you)", 72, function()
     if recording then
         stopRecord()
-        recBtn.Text = "Record"
+        recBtn.Text, watchBtn.Text = "Record (you)", "Watch Other Hub"
     else
-        startRecord()
+        startRecord(false)
         recBtn.Text = "Stop + Save"
     end
 end)
-button("Save Summary Only", 108, function() dumpSummary() status("summary.txt saved") end).Size = UDim2.new(1, -28, 0, 22)
+watchBtn = button("Watch Other Hub", 108, function()
+    if recording then
+        stopRecord()
+        recBtn.Text, watchBtn.Text = "Record (you)", "Watch Other Hub"
+    else
+        startRecord(true)
+        watchBtn.Text = "Stop + Save"
+    end
+end)
+button("Save Summary Only", 144, function() dumpSummary() status("summary.txt saved") end).Size = UDim2.new(1, -28, 0, 22)
 
 local function unload()
     if recording then pcall(stopRecord) end
     running = false
     recording = false
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    for _, h in ipairs(hooked) do pcall(hookfunction, h.fn, h.old) end
     pcall(function() gui:Destroy() end)
 end
 close.MouseButton1Click:Connect(unload)
