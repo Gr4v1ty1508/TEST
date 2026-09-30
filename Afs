@@ -158,7 +158,7 @@ local CFG = {
     Calls = {
         Travel          = { "AttemptTravel",            function(world) return { world } end },
         DiscoverWorld   = { "AttemptDiscoverWorld",     function(world) return { world } end },
-        Click           = { "ClickerDamage",            function() return {} end },
+        Click           = { "ClickerDamage",            function() return { true } end },   -- like Yuto Hub
         UseAbility      = { "UseAbility",               function() return {} end },
         Mount           = { "SetMounted",               function(on) return { on } end },
         PetTeleport     = { "RequestPetTeleport",       function(pet) return { pet } end },
@@ -176,7 +176,8 @@ local CFG = {
         JoinGlobalBoss  = { "JoinGlobalBossArena",      function() return {} end },
 
         DungeonLobby    = { "AttemptTravel",            function() return { "Dungeon" } end },
-        SummonDungeon   = { "SummonDungeon",            function(size, world, useArtifact) return { size, world, useArtifact } end },
+        -- seen from Yuto Hub: SummonDungeon(true, { Size = 2, Theme = "DBZ" })  (Size = 1..5, Theme = world)
+        SummonDungeon   = { "SummonDungeon",            function(flag, size, world) return { flag, { Size = size, Theme = world } } end },
         JoinDungeon     = { "JoinDungeon",              function() return {} end },
         OpenDungeonDoor = { "OpenDungeonDoor",          function(door) return { door } end },
         OpenChest       = { "OpenChest",                function(chest) return { chest } end },
@@ -989,7 +990,8 @@ function Combat.Attack(e, wanted)
             end
         end
         -- pets need the enemy's parts to walk to it
-        if SendPet and e:FindFirstChild("HumanoidRootPart") then pcall(SendPet.Fire, SendPet, e, true) end
+        -- the game's own attack call is SendPet:Fire(enemy, true, true) (seen while watching)
+        if SendPet and e:FindFirstChild("HumanoidRootPart") then pcall(SendPet.Fire, SendPet, e, true, true) end
         task.wait()
     end
 end
@@ -2053,7 +2055,9 @@ function Features.TimeTrial()
             return os.clock() - trialJoinedAt < 75   -- waiting at our door, else let other modes run
         end
         -- 1. fight what's in our room (only near us: every player's run is in the same map)
-        if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest", 450) then return true end
+        -- (Tower.Enemies only holds the enemies of YOUR run - seen in a dump taken in a run -
+        --  so like Yuto Hub: warp to the nearest one, wherever it is)
+        if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest", 3000) then return true end
         -- 2. room cleared: its ConfirmPart has a prompt -> press it to go to the next room
         if Features.PressNextRoom() then return true end
         -- 3. walk the run like a player, using the rooms in Tower.Map near us
@@ -4024,6 +4028,24 @@ function DungeonGui.PickWorld(world)
 end
 
 local baseOpenDungeon = Features.OpenDungeon
+-- the Yuto Hub way (watched in game): EquipArtefact("Dungeon", "CurrentArtefact") then
+-- SummonDungeon(true, { Size = <1-5>, Theme = <world> }), repeated until it opens.
+-- The game's window (door prompt -> Public / Friends) is kept as a fallback.
+function DungeonGui.SummonDirect()
+    local world = Data.FromLabel(F("DungeonWorld") or "")
+    if world == "" then
+        if Util.Every("dungeon-world-pick", 60) then Util.Notify("Dungeon: pick a world first") end
+        return false
+    end
+    local sizeIndex = table.find(CFG.DungeonSizes, F("DungeonSize") or "Small") or 1
+    if On("DungeonEquipArtifact") then Features.EquipOpenArtifact() end
+    -- first value: Yuto Hub sends true; "Friend Only" off sends true too, on sends false
+    local flag = not On("DungeonFriends")
+    if CFG.DungeonSummonFlag ~= nil then flag = CFG.DungeonSummonFlag end
+    Net.Call("SummonDungeon", flag, sizeIndex, world)
+    Features.LastSummon = { source = "direct (Yuto Hub args)", artifact = "-", at = os.clock() }
+    return true
+end
 function Features.OpenDungeon()
     -- a summon was just sent: only try to get in (DungeonTravel popup / JoinDungeon)
     if os.clock() < (DungeonGui.waitUntil or 0) then
@@ -4044,7 +4066,25 @@ function Features.OpenDungeon()
         end
         return
     end
-    if DungeonGui.failed and DungeonGui.failed >= 3 then return baseOpenDungeon() end
+    -- 1. direct summon (every 1.5 s, like Yuto Hub) for up to 6 tries
+    DungeonGui.directTries = DungeonGui.directTries or 0
+    if DungeonGui.directTries < 6 then
+        if not Util.Every("dungeon-direct", 1.5) then return end
+        if Util.World() ~= "Tower" then Travel.To("Tower", true) end
+        if DungeonGui.SummonDirect() then
+            DungeonGui.directTries = DungeonGui.directTries + 1
+            task.wait(0.8)
+            local dt = mainChild("DungeonTravel")
+            if isShown(dt) then
+                Extras.Press(dt:FindFirstChild("Yes", true))
+                DungeonGui.waitUntil, DungeonGui.directTries = os.clock() + 30, 0
+            end
+        end
+        return
+    end
+    DungeonGui.directTries = 0
+    -- 2. the game's window through the door
+    if DungeonGui.failed and DungeonGui.failed >= 3 then DungeonGui.failed = 0 return baseOpenDungeon() end
 
     if On("DungeonEquipArtifact") then Features.EquipOpenArtifact() end
     if not DungeonGui.GoToDoor() then DungeonGui.failed = (DungeonGui.failed or 0) + 1 return end
@@ -4470,11 +4510,11 @@ do
     d:Toggle({ Title = "Use Dungeon Artifact To Open", Flag = "DungeonArtifact" })
     d:Toggle({ Title = "Friend Only", Flag = "DungeonFriends" })
     d:Divider()
-    d:Dropdown({ Title = "Artifact To Equip Before Opening", Items = Data.ArtifactLabels(), Flag = "DungeonOpenArtifact",
+    d:Dropdown({ Title = "Artifact To Equip Before Opening", Items = Data.ArtifactLabels(), Default = "Key | Dungeon", Flag = "DungeonOpenArtifact",
         Callback = function() Features.ResetOpenArtifact() end })
     d:Dropdown({ Title = "Artifact Slot", Items = { "1", "2" }, Default = "1", Required = true, Flag = "DungeonOpenArtifactSlot",
         Callback = function() Features.ResetOpenArtifact() end })
-    d:Toggle({ Title = "Equip Artifact Before Opening", Flag = "DungeonEquipArtifact",
+    d:Toggle({ Title = "Equip Artifact Before Opening", Default = true, Flag = "DungeonEquipArtifact",
         Callback = function(v) if v then Features.ResetOpenArtifact() end end })
     d:Button({ Title = "Equip Artifact Now ( test )", Callback = function()
         if Features.EquipOpenArtifact(true) then Util.Notify("Artifact sent - check it in the game's Artifact menu") end
