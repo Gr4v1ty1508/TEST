@@ -454,23 +454,31 @@ end
 if hookmetamethod and getnamecallmethod then
     local original
     original = hookmetamethod(game, "__namecall", function(self, ...)
-        if shouldRecord() then
-            local method = getnamecallmethod()
+        local method = getnamecallmethod()
+        -- IMPORTANT: no method calls (GetFullName, IsA, ...) before original() below -
+        -- they would replace the namecall method and the game's real call (attacks!)
+        -- would never be sent. Only plain reads here; all formatting runs later.
+        if shouldRecord() and typeof(self) == "Instance" then
             local isRemote = (method == "FireServer" or method == "InvokeServer")
-            -- other hubs also drive the game's own Bindables (SendPet, ToggleMount, SummonDungeon...)
-            local isBindable = watchAll and (method == "Fire" or method == "Invoke") and typeof(self) == "Instance"
-                and self.Parent and self.Parent.Name == "Bindable"
-            if (isRemote or isBindable) and typeof(self) == "Instance" and (watchAll or not SPAM[self.Name]) then
-                local args = table.pack(...)
-                local head = who() .. "OUT " .. self.Name .. ":" .. method .. "(" .. argsText(args, args.n) .. ")"
+            local parent = self.Parent
+            local isBindable = watchAll and (method == "Fire" or method == "Invoke") and parent and parent.Name == "Bindable"
+            if (isRemote or isBindable) and (watchAll or not SPAM[self.Name]) then
+                local args, obj, tag = table.pack(...), self, who()
+                local function head()
+                    return tag .. "OUT " .. obj.Name .. ":" .. method .. "(" .. argsText(args, args.n) .. ")"
+                end
                 if method == "InvokeServer" then
+                    if setnamecallmethod then setnamecallmethod(method) end
                     local res = table.pack(original(self, ...))
-                    task.spawn(rec, head .. "  ->  " .. (res.n > 0 and argsText(res, res.n) or "nil"))
+                    task.spawn(function()
+                        rec(head() .. "  ->  " .. (res.n > 0 and argsText(res, res.n) or "nil"))
+                    end)
                     return table.unpack(res, 1, res.n)
                 end
-                task.spawn(rec, head)
+                task.spawn(function() rec(head()) end)
             end
         end
+        if setnamecallmethod then setnamecallmethod(method) end
         return original(self, ...)
     end)
 end
@@ -485,8 +493,10 @@ if hookfunction then
         local old
         old = hookfunction(fn, (newcclosure or function(f) return f end)(function(self, ...)
             if watchAll and shouldRecord() and typeof(self) == "Instance" then
-                local args = table.pack(...)
-                task.spawn(rec, who() .. "OUT(direct) " .. self.Name .. ":" .. methodName .. "(" .. argsText(args, args.n) .. ")")
+                local args, obj, tag = table.pack(...), self, who()
+                task.spawn(function()
+                    rec(tag .. "OUT(direct) " .. obj.Name .. ":" .. methodName .. "(" .. argsText(args, args.n) .. ")")
+                end)
             end
             return old(self, ...)
         end))
@@ -500,8 +510,11 @@ if hookfunction then
         local old
         old = hookfunction(fn, (newcclosure or function(f) return f end)(function(...)
             if watchAll and recording and running then
-                local ok, txt = pcall(describeArgs, ...)
-                task.spawn(rec, "[script] " .. name .. " " .. (ok and txt or "?"))
+                local args = table.pack(...)
+                task.spawn(function()
+                    local ok, txt = pcall(describeArgs, table.unpack(args, 1, args.n))
+                    rec("[script] " .. name .. " " .. (ok and txt or "?"))
+                end)
             end
             return old(...)
         end))

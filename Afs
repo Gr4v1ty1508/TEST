@@ -4913,19 +4913,28 @@ if hookmetamethod and getnamecallmethod then
         if Flags.RemoteSpy and Flags.RemoteSpy:Get() and not (checkcaller and checkcaller())
            and (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance"
            and self.Parent == Remotes and not CFG.SpyIgnore[self.Name] then
-            local args = table.pack(...)
-            local parts = {}
-            for i = 1, args.n do parts[i] = "[" .. i .. "] " .. describe(args[i]) end
-            local head = "[SPY] " .. self.Name .. ":" .. method .. "(" .. table.concat(parts, ", ") .. ")"
+            -- NOTHING that calls a method (GetFullName, IsA...) may run here before
+            -- original(): it would overwrite the namecall method and the game's real
+            -- call (e.g. an attack) would never be sent. Formatting happens later.
+            local args, remote = table.pack(...), self
+            local function head()
+                local parts = {}
+                for i = 1, args.n do parts[i] = "[" .. i .. "] " .. describe(args[i]) end
+                return "[SPY] " .. remote.Name .. ":" .. method .. "(" .. table.concat(parts, ", ") .. ")"
+            end
             if method == "InvokeServer" then
+                if setnamecallmethod then setnamecallmethod(method) end
                 local res = table.pack(original(self, ...))
-                local outs = {}
-                for i = 1, res.n do outs[i] = describe(res[i]) end
-                task.spawn(spyWrite, head .. "  ->  " .. (res.n > 0 and table.concat(outs, ", ") or "nil"))
+                task.spawn(function()
+                    local outs = {}
+                    for i = 1, res.n do outs[i] = describe(res[i]) end
+                    spyWrite(head() .. "  ->  " .. (res.n > 0 and table.concat(outs, ", ") or "nil"))
+                end)
                 return table.unpack(res, 1, res.n)
             end
-            task.spawn(spyWrite, head)
+            task.spawn(function() spyWrite(head()) end)
         end
+        if setnamecallmethod then setnamecallmethod(method) end
         return original(self, ...)
     end)
 end
