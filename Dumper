@@ -10,6 +10,7 @@
       server_*.txt     answers of read-only server calls (GetPetData, ...)
       gui.txt          PlayerGui.MainGui (visible / hidden, button + label text)
       world.txt        the world you're standing in, deep, + one enemy in full
+      near.txt         every map piece / enemy within 1500 studs of you, not grouped
       modes.txt        Dungeon / Raid / Tower / InfinityTower / GatesMode / ... maps
       replicated.txt   ReplicatedStorage tree
       workspace.txt    Workspace tree (same-named things grouped)
@@ -286,6 +287,60 @@ local function dumpWorld()
     save("world.txt", out)
 end
 
+-- every map piece within 1500 studs of you, NOT grouped (e.g. your own trial rooms
+-- among hundreds of same-named rooms), 5 levels deep
+local function plain(obj, depth, out, indent)
+    if #out >= MAX_LINES then return end
+    out[#out + 1] = indent .. describe(obj)
+    if depth <= 0 then return end
+    for _, c in ipairs(obj:GetChildren()) do
+        if not c:IsA("Texture") and not c:IsA("Decal") and not c:IsA("Sound") then
+            plain(c, depth - 1, out, indent .. "  ")
+        end
+    end
+end
+local function dumpNear()
+    local out = {}
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local worlds = workspace:FindFirstChild("Worlds")
+    local wv = LP:FindFirstChild("World")
+    local w = worlds and wv and worlds:FindFirstChild(tostring(wv.Value))
+    if not root or not w then save("near.txt", "no character / world") return end
+    out[#out + 1] = string.format("you: (%.0f, %.0f, %.0f) in %s", root.Position.X, root.Position.Y, root.Position.Z, w.Name)
+    local function near(m)
+        local ok, cf = pcall(function() return m:GetPivot() end)
+        if m:IsA("BasePart") then return (m.Position - root.Position).Magnitude end
+        if ok and cf then return (cf.Position - root.Position).Magnitude end
+        return math.huge
+    end
+    for _, folderName in ipairs({ "Map", "Enemies" }) do
+        local f = w:FindFirstChild(folderName)
+        local list = {}
+        for _, m in ipairs(f and f:GetChildren() or {}) do
+            local d = near(m)
+            if d <= 1500 then list[#list + 1] = { m = m, d = d } end
+        end
+        table.sort(list, function(a, b) return a.d < b.d end)
+        out[#out + 1] = ""
+        out[#out + 1] = "######## " .. folderName .. " within 1500 studs: " .. #list
+        for i, it in ipairs(list) do
+            if i > 25 then break end
+            out[#out + 1] = string.format("--- %.0f studs away", it.d)
+            plain(it.m, folderName == "Map" and 5 or 2, out, "  ")
+        end
+    end
+    -- prompts near you
+    out[#out + 1] = ""
+    out[#out + 1] = "######## ProximityPrompts within 300 studs"
+    for _, d in ipairs(w:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Parent and d.Parent:IsA("BasePart") and (d.Parent.Position - root.Position).Magnitude < 300 then
+            out[#out + 1] = path(d) .. '  "' .. d.ActionText .. '" enabled=' .. tostring(d.Enabled)
+        end
+    end
+    save("near.txt", out)
+end
+
 local function dumpModes()
     local out = {}
     local worlds = workspace:FindFirstChild("Worlds")
@@ -336,7 +391,7 @@ end
 local function dumpAll()
     local steps = {
         { "summary", dumpSummary }, { "remotes", dumpRemotes }, { "player", dumpPlayer },
-        { "gui", dumpGui }, { "world", dumpWorld }, { "modes", dumpModes },
+        { "gui", dumpGui }, { "world", dumpWorld }, { "near", dumpNear }, { "modes", dumpModes },
         { "trees", dumpBig }, { "modules", dumpModules },
     }
     local errs = {}

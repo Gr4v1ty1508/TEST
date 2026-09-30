@@ -871,8 +871,10 @@ local SendPet = Bindables:FindFirstChild("SendPet")
 -- Enemies far from you are streamed out: the model, its DisplayName / Health values
 -- and its pivot exist, but its parts (HumanoidRootPart) don't until you get close.
 -- So an enemy is alive by its Health value, and found by its pivot position.
+Combat.Skip = setmetatable({}, { __mode = "k" })   -- enemy -> skip until (os.clock)
 function Combat.Alive(e)
     if not e or not e.Parent then return false end
+    if Combat.Skip[e] and os.clock() < Combat.Skip[e] then return false end
     local hp = e:FindFirstChild("Health")
     if hp then return hp.Value > 0 end
     return e:FindFirstChild("HumanoidRootPart") ~= nil
@@ -960,7 +962,18 @@ function Combat.Attack(e, wanted)
         for _, pet in ipairs(Data.EquippedPets()) do task.spawn(Net.Call, "PetTeleport", pet) end
     end
     local streamedAt = 0
+    local hp0, hpAt = Combat.HP(e), nil
     while Combat.Alive(e) and wanted() and os.clock() - t0 < CFG.KillTimeout do
+        -- no damage at all for 8 s once we're next to it (room not started, out of reach):
+        -- skip it for 30 s so the rest of the hub can move on
+        if e:FindFirstChild("HumanoidRootPart") then
+            hpAt = hpAt or os.clock()
+            if Combat.HP(e) < hp0 then hp0, hpAt = Combat.HP(e), os.clock() end
+            if os.clock() - hpAt > 8 then
+                Combat.Skip[e] = os.clock() + 30
+                break
+            end
+        end
         local root = Util.Root()
         local pos, part = Combat.Pos(e)
         if Combat.Options.Teleport and root and pos and (root.Position - pos).Magnitude > 12 then
@@ -2043,30 +2056,8 @@ function Features.TimeTrial()
         if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest", 450) then return true end
         -- 2. room cleared: its ConfirmPart has a prompt -> press it to go to the next room
         if Features.PressNextRoom() then return true end
-        -- like Yuto Hub: go to the middle of the current room ("Room N" on screen)
-        local center = Features.RoomCenter()
-        local root = Util.Root()
-        if center and root and (root.Position - center).Magnitude > 40 then
-            pcall(function() LP:RequestStreamAroundAsync(center) end)
-            Util.MoveTo(CFrame.new(center + Vector3.new(0, 5, 0)))
-            task.wait(0.6)
-            return true
-        end
-        -- enemies of the current room exist but aren't loaded near us (the game only
-        -- loads what's close): go to where they are so they load, then fight
-        local waiting = Features.TowerEnemyTargets()
-        if #waiting > 0 then
-            local pos = waiting[1]
-            pcall(function() LP:RequestStreamAroundAsync(pos) end)
-            Util.MoveTo(CFrame.new(pos + Vector3.new(0, 5, 0)))
-            task.wait(0.5)
-            return true
-        end
-        if not On("TrialIgnoreChest") then
-            for _, p in ipairs(Prompt.Find(tower, { "chest" })) do Prompt.Use(p) task.wait(0.2) end
-        end
-        -- normal room cleared (no button here): go on to the next room
-        if Util.Every("trial-advance", 2) then Features.AdvanceRoom() end
+        -- 3. walk the run like a player, using the rooms in Tower.Map near us
+        if Features.TrialStep() then return true end
         Features.DumpTowerOnce()
         return true
     end
@@ -2109,6 +2100,15 @@ end
 -- the "Room N" label is found once (PlayerGui has thousands of objects) and then just read
 local roomLabel, roomLabelScan = nil, -math.huge
 function Features.CurrentRoom()
+    -- the game's own counter: MainGui.TowerTimer.CurrentFloor ("Room") .Value ("7")
+    local mg = Data.MainGui()
+    local tt = mg and mg:FindFirstChild("TowerTimer")
+    if tt and tt:IsA("GuiObject") and tt.Visible then
+        local cf = tt:FindFirstChild("CurrentFloor")
+        local v = cf and cf:FindFirstChild("Value")
+        local n = v and v:IsA("TextLabel") and tonumber(string.match(v.Text, "(%d+)"))
+        if n then return n end
+    end
     if roomLabel and roomLabel.Parent then
         if roomLabel.Visible then
             local n = string.match(roomLabel.Text, "^%s*Room%s*(%d+)%s*$")
@@ -2184,6 +2184,115 @@ function Features.RoomCenter()
         if p:IsA("BasePart") then sum, count = sum + p.Position, count + 1 end
     end
     return count > 0 and sum / count or nil
+end
+
+-- TRIAL RUN WALKER --------------------------------------------------------------------------
+-- What a run looks like (from a dump taken inside a run): Tower.Map holds the rooms
+--   StartRoom  { Teleporter, Map }                       first room of every run
+--   BattleRoom { EnemySpawners, Door, StageConnectorBack / Front, SafetyFloor, BasePart }
+--   RestRoom   { Teleporter, StageConnectorBack, SafetyFloor, Map }   every 5th room
+-- rooms of one run are chained (Back -> Front); enemies are in Tower.Enemies.
+-- Start / rest rooms move the run on through their Teleporter (like the lobby doors);
+-- a cleared battle room lets you on to the next room in front of it.
+local trialVisited = setmetatable({}, { __mode = "k" })
+local trialLogLast = nil
+function Features.TrialLog(msg)
+    if msg == trialLogLast then return end
+    trialLogLast = msg
+    local root = Util.Root()
+    local line = os.date("%H:%M:%S") .. "  " .. msg .. (root and string.format("   @ (%.0f, %.0f, %.0f)", root.Position.X, root.Position.Y, root.Position.Z) or "")
+    Features.TrialStatus = msg
+    if appendfile then
+        pcall(function()
+            if isfolder and makefolder and not isfolder(CFG.ConfigFolder) then
+                local cur = ""
+                for part in string.gmatch(CFG.ConfigFolder, "[^/]+") do
+                    cur = cur == "" and part or (cur .. "/" .. part)
+                    if not isfolder(cur) then makefolder(cur) end
+                end
+            end
+            appendfile(CFG.ConfigFolder .. "/trial_log.txt", line .. "\n")
+        end)
+    end
+end
+local function roomAnchor(m)
+    local a = m:FindFirstChild("SafetyFloor") or m:FindFirstChild("BasePart") or m.PrimaryPart
+    if a and a:IsA("BasePart") then return a.Position end
+    local ok, cf = pcall(m.GetPivot, m)
+    return ok and cf and cf.Position or nil
+end
+function Features.NearRooms(fromPos, maxDist)
+    local tower = Worlds:FindFirstChild("Tower")
+    local map = tower and tower:FindFirstChild("Map")
+    local out = {}
+    for _, m in ipairs(map and map:GetChildren() or {}) do
+        if m.Name == "StartRoom" or m.Name == "BattleRoom" or m.Name == "RestRoom" then
+            local pos = roomAnchor(m)
+            if pos then
+                local d = (pos - fromPos).Magnitude
+                if d <= maxDist then out[#out + 1] = { room = m, pos = pos, dist = d } end
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.dist < b.dist end)
+    return out
+end
+local function touchPart(part)
+    local root = Util.Root()
+    if not root or not part then return end
+    Util.MoveTo(part.CFrame)
+    if firetouchinterest then
+        pcall(firetouchinterest, root, part, 0)
+        task.wait(0.1)
+        pcall(firetouchinterest, root, part, 1)
+    end
+end
+function Features.TrialStep()
+    local root = Util.Root()
+    if not root then return false end
+    local rooms = Features.NearRooms(root.Position, 1500)
+    if #rooms == 0 then Features.TrialLog("no rooms near us") return false end
+    local cur = rooms[1]
+    trialVisited[cur.room] = true
+    -- chests in our room
+    if not On("TrialIgnoreChest") then
+        for _, p in ipairs(Prompt.Find(cur.room, { "chest" })) do Prompt.Use(p) task.wait(0.2) end
+    end
+    -- start / rest room: step into its teleporter
+    if cur.room.Name ~= "BattleRoom" then
+        local tp = cur.room:FindFirstChild("Teleporter")
+        local trig = tp and tp:FindFirstChild("TriggerPart", true)
+        if trig and trig:IsA("BasePart") then
+            Features.TrialLog("in " .. cur.room.Name .. ": touching its Teleporter")
+            touchPart(trig)
+            task.wait(0.5)
+            return true
+        end
+    end
+    -- next room: the nearest room we haven't been in, measured from the front of this one
+    local front = cur.room:FindFirstChild("StageConnectorFront")
+    local from = front and front:IsA("BasePart") and front.Position or root.Position
+    local best
+    for _, r in ipairs(Features.NearRooms(from, 1200)) do
+        if not trialVisited[r.room] and r.room ~= cur.room then best = r break end
+    end
+    if best then
+        Features.TrialLog("from " .. cur.room.Name .. " to next " .. best.room.Name .. " (" .. math.floor(best.dist) .. " studs)")
+        pcall(function() LP:RequestStreamAroundAsync(best.pos) end)
+        -- walk in over its back connector (the way a player enters), then to its floor
+        local back = best.room:FindFirstChild("StageConnectorBack")
+        if back and back:IsA("BasePart") then touchPart(back) task.wait(0.2) end
+        Util.MoveTo(CFrame.new(best.pos + Vector3.new(0, 6, 0)))
+        for _, n in ipairs({ "SafetyFloor", "BasePart" }) do
+            local f = best.room:FindFirstChild(n)
+            if f and f:IsA("BasePart") then touchPart(f) end
+        end
+        Util.MoveTo(CFrame.new(best.pos + Vector3.new(0, 6, 0)))
+        task.wait(0.6)
+        return true
+    end
+    Features.TrialLog("in " .. cur.room.Name .. ": no teleporter, no next room")
+    return false
 end
 
 -- NEXT ROOM BUTTON: when a trial room is cleared the game puts a ProximityPrompt on a
@@ -3671,7 +3780,10 @@ function Extras.TrialFloor()
     local cf = tt:FindFirstChild("CurrentFloor", true)
     if not cf then return nil end
     local v
-    if cf:IsA("ValueBase") then v = cf.Value
+    -- CurrentFloor is a "Room" label with the number in its child label "Value"
+    local valueLabel = cf:FindFirstChild("Value")
+    if valueLabel and valueLabel:IsA("TextLabel") then v = valueLabel.Text
+    elseif cf:IsA("ValueBase") then v = cf.Value
     elseif cf:IsA("TextLabel") then v = cf.Text
     else
         local lbl = cf:FindFirstChildWhichIsA("TextLabel", true)
@@ -4849,7 +4961,8 @@ loop(1, function()
         local txt = best and string.format("%s %d:%02d", bestName, math.floor(best / 60), math.floor(best % 60)) or "?"
         local left = Extras.TrialTimeLeft()
         if left then txt = "in run, " .. left .. " left" end
-        Features.TrialTimer:Set("Trial time : " .. txt .. "   Floor : " .. Stats.TrialFloor)
+        Features.TrialTimer:Set("Trial time : " .. txt .. "   Floor : " .. Stats.TrialFloor
+            .. (Features.TrialStatus and ("\n" .. Features.TrialStatus) or ""))
     end)
 end)
 
