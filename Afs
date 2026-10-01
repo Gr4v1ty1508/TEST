@@ -880,12 +880,39 @@ function Combat.Alive(e)
     if hp then return hp.Value > 0 end
     return e:FindFirstChild("HumanoidRootPart") ~= nil
 end
+-- where an enemy is. With StreamingEnabled a far enemy is only an empty Model (no parts,
+-- seen in the dumps), so: HumanoidRootPart -> any other part of it (CombatBorder, ...)
+-- -> the model's pivot (only if it isn't the empty-model default at 0,0,0)
 function Combat.Pos(e)
-    local part = e and e:FindFirstChild("HumanoidRootPart")
+    if not e then return nil, nil end
+    local part = e:FindFirstChild("HumanoidRootPart")
+    if part and part:IsA("BasePart") then return part.Position, part end
+    part = e:FindFirstChild("CombatBorder") or e:FindFirstChildWhichIsA("BasePart", true)
     if part then return part.Position, part end
-    local ok, cf = pcall(function() return e:GetPivot() end)
-    if ok and cf then return cf.Position, nil end
+    local ok, cf = pcall(e.GetPivot, e)
+    if ok and cf and cf.Position.Magnitude > 5 then return cf.Position, nil end
     return nil, nil
+end
+-- GravityHub/AFS/combat_log.txt: what the attack loop picked and why it did / didn't teleport
+Combat.LogLast = {}
+function Combat.Log(key, msg)
+    local now = os.clock()
+    if Combat.LogLast[key] == msg then return end
+    Combat.LogLast[key] = msg
+    Combat.Status = msg
+    if not appendfile then return end
+    pcall(function()
+        if isfolder and makefolder and not isfolder(CFG.ConfigFolder) then
+            local cur = ""
+            for seg in string.gmatch(CFG.ConfigFolder, "[^/]+") do
+                cur = cur == "" and seg or (cur .. "/" .. seg)
+                if not isfolder(cur) then makefolder(cur) end
+            end
+        end
+        local root = Util.Root()
+        appendfile(CFG.ConfigFolder .. "/combat_log.txt", os.date("%H:%M:%S") .. string.format(" %.1f  ", now % 1000) .. msg
+            .. (root and string.format("   me @ (%.0f, %.0f, %.0f)", root.Position.X, root.Position.Y, root.Position.Z) or "   (no character)") .. "\n")
+    end)
 end
 function Combat.Name(e)
     local t = e:FindFirstChild("DisplayName")
@@ -972,6 +999,19 @@ function Combat.Attack(e, wanted)
     end
     local streamedAt = 0
     local hp0, hpAt = Combat.HP(e), nil
+    do
+        local pos, part = Combat.Pos(e)
+        local root = Util.Root()
+        local where = pos and string.format("(%.0f, %.0f, %.0f) %s", pos.X, pos.Y, pos.Z, part and part.Name or "pivot") or "NO POSITION"
+        Combat.Log("atk", "target " .. e.Name .. " [" .. Combat.Name(e) .. "] hp " .. string.format("%.3g", Combat.HP(e))
+            .. " at " .. where .. (root and pos and string.format("  dist %.0f", (pos - root.Position).Magnitude) or "")
+            .. (Combat.Options.Teleport and "" or "  | Teleport While Farm is OFF"))
+        if not pos then
+            -- nothing to go to (not streamed in, no pivot): try the next one for a few seconds
+            Combat.Skip[e] = os.clock() + 5
+            return
+        end
+    end
     while Combat.Alive(e) and wanted() and os.clock() - t0 < CFG.KillTimeout do
         -- no damage at all for 8 s once we're next to it (room not started, out of reach):
         -- skip it for 30 s so the rest of the hub can move on
@@ -979,6 +1019,7 @@ function Combat.Attack(e, wanted)
             hpAt = hpAt or os.clock()
             if Combat.HP(e) < hp0 then hp0, hpAt = Combat.HP(e), os.clock() end
             if os.clock() - hpAt > 8 then
+                Combat.Log("atk", "no damage on " .. e.Name .. " for 8 s -> skipped 30 s")
                 Combat.Skip[e] = os.clock() + 30
                 break
             end
@@ -1015,15 +1056,24 @@ function Combat.Step(worldName, wanted, names, mode, maxDist, skip)
     if maxDist then
         -- only enemies near us (the Tower holds every player's trial run in one map)
         local root = Util.Root()
-        local near = {}
+        local near, far, unknown = {}, 0, 0
         for _, e in ipairs(list) do
             local pos = Combat.Pos(e)
-            if root and pos and (pos - root.Position).Magnitude <= maxDist then near[#near + 1] = e end
+            if not pos then unknown = unknown + 1
+            elseif root and (pos - root.Position).Magnitude <= maxDist then near[#near + 1] = e
+            else far = far + 1 end
+        end
+        if #near == 0 and #list > 0 then
+            Combat.Log("near", #list .. " enemies in " .. tostring(worldName) .. ": " .. far .. " farther than " .. maxDist .. ", " .. unknown .. " without a position")
         end
         list = near
     end
     local target = Combat.Pick(list, mode or "Nearest")
-    if not target then return false end
+    if not target then
+        Combat.Log("step", "no enemy in " .. tostring(worldName) .. (maxDist and (" within " .. maxDist) or "") .. " (found " .. #list .. ")")
+        return false
+    end
+    Combat.LogLast.step = nil
     Combat.Attack(target, wanted)
     return true
 end
