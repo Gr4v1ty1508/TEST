@@ -990,6 +990,10 @@ function Combat.Pick(list, mode)
 end
 
 Combat.Options = { Teleport = true, PetTP = false, Ult = false }
+-- "Teleport While Farm" is for the normal world farm only. Every mode (Time Trial,
+-- Infinity Tower, Dungeon, Raid, Gate, Defense, ...) always warps to its mobs, like Yuto Hub.
+Combat.InFarm = false
+function Combat.CanTP() return Combat.Options.Teleport or not Combat.InFarm end
 
 function Combat.Attack(e, wanted)
     local t0 = os.clock()
@@ -1005,7 +1009,7 @@ function Combat.Attack(e, wanted)
         local where = pos and string.format("(%.0f, %.0f, %.0f) %s", pos.X, pos.Y, pos.Z, part and part.Name or "pivot") or "NO POSITION"
         Combat.Log("atk", "target " .. e.Name .. " [" .. Combat.Name(e) .. "] hp " .. string.format("%.3g", Combat.HP(e))
             .. " at " .. where .. (root and pos and string.format("  dist %.0f", (pos - root.Position).Magnitude) or "")
-            .. (Combat.Options.Teleport and "" or "  | Teleport While Farm is OFF"))
+            .. (Combat.CanTP() and "" or "  | Teleport While Farm is OFF"))
         if not pos then
             -- nothing to go to (not streamed in, no pivot): try the next one for a few seconds
             Combat.Skip[e] = os.clock() + 5
@@ -1026,7 +1030,7 @@ function Combat.Attack(e, wanted)
         end
         local root = Util.Root()
         local pos, part = Combat.Pos(e)
-        if Combat.Options.Teleport and root and pos and (root.Position - pos).Magnitude > 12 then
+        if Combat.CanTP() and root and pos and (root.Position - pos).Magnitude > 12 then
             if part then
                 root.CFrame = part.CFrame * CFrame.new(0, 0, 4)
             else
@@ -3754,7 +3758,7 @@ function Combat.Attack(e, wanted)
     if On("AutoTeams") then pcall(Extras.TeamFor, e) end
     if On("PullPets") then
         local root, pos = Util.Root(), e and Combat.Pos(e)
-        if Combat.Options.Teleport and root and pos then root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 4)) end
+        if Combat.CanTP() and root and pos then root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 4)) end
         pcall(Extras.PullPets)
     end
     local ok, err = pcall(baseAttack, e, wanted)
@@ -4431,7 +4435,13 @@ local function Brain()
     if On("AutoGlobalBoss") and Features.GlobalBoss() then return end
     if On("AutoMeteor") and Features.Meteor() then return end
     if On("AutoQuest") then Features.Quest() end
-    if On("AutoFarm") then return Features.Farm() end
+    if On("AutoFarm") then
+        Combat.InFarm = true
+        local ok, err = pcall(Features.Farm)
+        Combat.InFarm = false
+        if not ok then warn("[" .. CFG.Name .. "] " .. tostring(err)) end
+        return
+    end
     if On("AutoTimeChamber") then Features.TimeChamber() end
 end
 
