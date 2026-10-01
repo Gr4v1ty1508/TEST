@@ -3148,7 +3148,15 @@ function Features.FarmDungeon()
     nextSummon = 0
     local wanted = function() return On("AutoFarmDungeon") end
     local worldName = Features.DungeonRoot() and Features.DungeonRoot().Name or Util.World()
-    if Combat.Step(worldName, wanted, nil, F("DungeonTarget") or "Nearest") then return end
+    -- Weakest / Strongest only choose among the mobs of the room we're in (~300 studs):
+    -- the strongest mob of the whole dungeon is the boss in the last, still-closed room.
+    -- Nothing near -> go to the nearest mob anywhere (= the next room).
+    local mode = F("DungeonTarget") or "Nearest"
+    local noChest = On("DungeonIgnoreChest") and function(e)
+        return string.find(string.lower(e.Name .. " " .. Combat.Name(e)), "chest", 1, true) ~= nil
+    end or nil
+    if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then return end
+    if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then return end
     local root = Features.DungeonRoot()
     -- chests
     if not On("DungeonIgnoreChest") then
