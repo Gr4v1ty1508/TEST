@@ -937,19 +937,27 @@ function Combat.List(worldName, names)
     return out
 end
 
+function Combat.MaxHP(e)
+    local m = e:FindFirstChild("MaxHealth")
+    return (m and m.Value) or Combat.HP(e)
+end
+-- Nearest   = closest one
+-- Weakest   = the weakest KIND of mob (lowest MaxHealth); same kind -> least HP left, then closest
+-- Strongest = the strongest kind (highest MaxHealth, = the boss); same kind -> closest
 function Combat.Pick(list, mode)
     if #list == 0 then return nil end
     local root = Util.Root()
-    local best, score = nil, nil
+    local best, k1, k2, k3
     for _, e in ipairs(list) do
-        local s
-        if mode == "Weakest" then s = Combat.HP(e)
-        elseif mode == "Strongest" then s = -Combat.HP(e)
-        else
-            local pos = Combat.Pos(e)
-            s = (root and pos) and (pos - root.Position).Magnitude or math.huge
+        local pos = Combat.Pos(e)
+        local dist = (root and pos) and (pos - root.Position).Magnitude or math.huge
+        local a, b, c
+        if mode == "Weakest" then a, b, c = Combat.MaxHP(e), Combat.HP(e), dist
+        elseif mode == "Strongest" then a, b, c = -Combat.MaxHP(e), dist, 0
+        else a, b, c = dist, 0, 0 end
+        if not best or a < k1 or (a == k1 and (b < k2 or (b == k2 and c < k3))) then
+            best, k1, k2, k3 = e, a, b, c
         end
-        if not score or s < score then best, score = e, s end
     end
     return best
 end
@@ -997,8 +1005,13 @@ function Combat.Attack(e, wanted)
 end
 
 -- one attack step; false when nothing is left
-function Combat.Step(worldName, wanted, names, mode, maxDist)
+function Combat.Step(worldName, wanted, names, mode, maxDist, skip)
     local list = Combat.List(worldName, names)
+    if skip then
+        local keep = {}
+        for _, e in ipairs(list) do if not skip(e) then keep[#keep + 1] = e end end
+        list = keep
+    end
     if maxDist then
         -- only enemies near us (the Tower holds every player's trial run in one map)
         local root = Util.Root()
@@ -2057,7 +2070,10 @@ function Features.TimeTrial()
         -- 1. fight what's in our room (only near us: every player's run is in the same map)
         -- (Tower.Enemies only holds the enemies of YOUR run - seen in a dump taken in a run -
         --  so like Yuto Hub: warp to the nearest one, wherever it is)
-        if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest", 3000) then return true end
+        local noChest = On("TrialIgnoreChest") and function(e)
+            return string.find(string.lower(e.Name .. " " .. Combat.Name(e)), "chest", 1, true) ~= nil
+        end or nil
+        if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest", 3000, noChest) then return true end
         -- 2. every 5th room is a RestRoom: press its ConfirmPart "Clear Rooms" prompt ONCE
         --    (Yuto Hub does exactly this; ~10 s later the server opens the next room)
         if Features.PressNextRoom() then return true end
@@ -2785,7 +2801,7 @@ end
 -- RAID / DEFENSE / METEOR ------------------------------------------------------------
 function Features.Raid()
     if Util.World() == "Raid" then
-        Combat.Step("Raid", function() return On("AutoRaid") end)
+        Combat.Step("Raid", function() return On("AutoRaid") end, nil, F("RaidTarget") or "Nearest")
         return true
     end
     if not Util.Every("raid-join", CFG.JoinCooldown) then return false end
@@ -2849,7 +2865,7 @@ function Features.Defense()
         if Data.IsFarmWorldName(world) then
             defenseActive = false
         else
-            Combat.Step(world, function() return On("AutoDefense") end)
+            Combat.Step(world, function() return On("AutoDefense") end, nil, F("DefenseTarget") or "Nearest")
             return true
         end
     end
@@ -3132,7 +3148,7 @@ function Features.FarmDungeon()
     nextSummon = 0
     local wanted = function() return On("AutoFarmDungeon") end
     local worldName = Features.DungeonRoot() and Features.DungeonRoot().Name or Util.World()
-    if Combat.Step(worldName, wanted) then return end
+    if Combat.Step(worldName, wanted, nil, F("DungeonTarget") or "Nearest") then return end
     local root = Features.DungeonRoot()
     -- chests
     if not On("DungeonIgnoreChest") then
@@ -3185,7 +3201,7 @@ function Features.Gates()
         end
         return
     end
-    if not Combat.Step("GatesMode", function() return On("AutoGate") end) and Util.Every("gates-skip", 3) then
+    if not Combat.Step("GatesMode", function() return On("AutoGate") end, nil, F("GateTarget") or "Nearest") and Util.Every("gates-skip", 3) then
         Net.Call("SkipGateWait")
     end
 end
@@ -3742,8 +3758,9 @@ function Extras.RaidTarget()
     for _, e in ipairs(list) do
         if bossId and e.Name == bossId then boss = e else minions[#minions + 1] = e end
     end
-    if ff == true then return Combat.Pick(minions, "Nearest") end
-    return boss or Combat.Pick(minions, "Nearest")
+    local mode = F("RaidTarget") or "Nearest"
+    if ff == true then return Combat.Pick(minions, mode) end
+    return boss or Combat.Pick(minions, mode)
 end
 -- raid over: press Confirm on the results screen
 function Extras.RaidResults()
@@ -4501,6 +4518,7 @@ do
     local rw = r:Dropdown({ Title = "Select Raid World", Items = Data.FarmWorldLabels(), Multi = true, Flag = "RaidWorlds" })
     r:Dropdown({ Title = "Select Raid Mode", Items = CFG.RaidModes, Multi = true, Flag = "RaidModes" })
     r:Toggle({ Title = "Farm All World", Flag = "RaidAllWorlds" })
+    r:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "RaidTarget" })
     r:Toggle({ Title = "Auto Raid", Flag = "AutoRaid" })
 
     local m = TRaid:Card("Auto Meteor / Fallen Star !", "Left")
@@ -4511,6 +4529,7 @@ do
     local d = TRaid:Card("Auto Defense !", "Right")
     local dw = d:Dropdown({ Title = "Select Defense World", Items = Data.FarmWorldLabels(), Flag = "DefenseWorld" })
     d:Toggle({ Title = "Friend Only", Flag = "DefenseFriends" })
+    d:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "DefenseTarget" })
     d:Toggle({ Title = "Auto Defense Selected", Flag = "AutoDefense" })
 
     Refreshers[#Refreshers + 1] = function()
@@ -4540,6 +4559,7 @@ do
     d:Divider()
     d:Toggle({ Title = "Auto Open Dungeon", Flag = "AutoOpenDungeon" })
     d:Toggle({ Title = "Teleport To Load All Dungeon", Default = true, Flag = "DungeonLoadAll" })
+    d:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "DungeonTarget" })
     d:Toggle({ Title = "Auto Farm Dungeon", Flag = "AutoFarmDungeon" })
     Features.DungeonLabel = d:Label("Runs : 0")
     d:Button({ Title = "Teleport To Dungeon Door", Callback = function() DungeonGui.GoToDoor() end })
@@ -4549,6 +4569,7 @@ do
     local gateRuns = g:Label("Runs : 0")
     g:Dropdown({ Title = "Select Gate Level", Items = CFG.GateRanks, Multi = true, Flag = "GateRanks" })
     g:Slider({ Title = "Amount", Min = 1, Max = 10, Default = 1, Flag = "GateAmount" })
+    g:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "GateTarget" })
     g:Toggle({ Title = "Auto Gate Selected", Flag = "AutoGate" })
     Features.GateLabel = gateRuns
 
