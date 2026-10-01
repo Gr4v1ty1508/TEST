@@ -2058,10 +2058,12 @@ function Features.TimeTrial()
         -- (Tower.Enemies only holds the enemies of YOUR run - seen in a dump taken in a run -
         --  so like Yuto Hub: warp to the nearest one, wherever it is)
         if Combat.Step("Tower", wanted, nil, F("TrialTarget") or "Nearest", 3000) then return true end
-        -- 2. room cleared: its ConfirmPart has a prompt -> press it to go to the next room
+        -- 2. every 5th room is a RestRoom: press its ConfirmPart "Clear Rooms" prompt ONCE
+        --    (Yuto Hub does exactly this; ~10 s later the server opens the next room)
         if Features.PressNextRoom() then return true end
-        -- 3. walk the run like a player, using the rooms in Tower.Map near us
-        if Features.TrialStep() then return true end
+        -- 3. nothing to do: wait here. The server moves the run on by itself
+        --    (SetTowerFloor) when a room's enemies are dead - no walking needed.
+        Features.TrialLog("room " .. tostring(Stats.TrialFloor or "?") .. ": no enemies yet, waiting")
         Features.DumpTowerOnce()
         return true
     end
@@ -2338,23 +2340,26 @@ function Features.NextRoomButton(maxDist)
     end
     return best, bestPrompt
 end
+Features.PressedPrompts = setmetatable({}, { __mode = "k" })   -- (a table field: the main chunk is near Luau's 200-local limit)
 function Features.PressNextRoom()
-    local part, prompt = Features.NextRoomButton(450)
+    local part, prompt = Features.NextRoomButton(350)
     if not part then return false end
+    local last = Features.PressedPrompts[prompt]
+    if last and os.clock() - last < 15 then return false end   -- pressed already, the room is coming
     local cf = part:IsA("BasePart") and part.CFrame or part:GetPivot()
-    local t0 = os.clock()
-    repeat
-        Util.MoveTo(cf + Vector3.new(0, 3, 0))
-        task.wait(0.1)
-        if fireproximityprompt then pcall(fireproximityprompt, prompt) end
+    Features.TrialLog("RestRoom: pressing \"" .. tostring(prompt.ActionText) .. "\"")
+    Util.MoveTo(cf + Vector3.new(0, 3, 0))
+    task.wait(0.4)
+    if fireproximityprompt then
+        pcall(fireproximityprompt, prompt)
+    else
         pcall(function()
             VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
             task.wait(math.max(prompt.HoldDuration, 0.05))
             VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
         end)
-        task.wait(0.25)
-    until not prompt.Parent or not prompt.Enabled or not part.Parent or os.clock() - t0 > 6 or not On("AutoTrial")
-    Stats.TrialFloor = Stats.TrialFloor + 1
+    end
+    Features.PressedPrompts[prompt] = os.clock()
     return true
 end
 
@@ -2707,9 +2712,22 @@ function Features.JoinTrial(name, id)
     Stats.TrialName, Stats.TrialFloor = name, 0
     trialDoorId = id
     Features.ResetTrialRooms()
+    local root0 = Util.Root()
+    local from = root0 and root0.Position
     Net.Raw("JoinTimeTrial", { id })
-    task.wait(0.3)
     local pos = Net.Raw("AttemptTravel", { "TowerDoor" .. id, true })
+    -- the game itself teleports you into the trial's StartRoom (Yuto Hub sends these
+    -- two and nothing else); only stand at the door ourselves if that didn't happen
+    local t0 = os.clock()
+    while from and os.clock() - t0 < 3 do
+        local r = Util.Root()
+        if r and (r.Position - from).Magnitude > 300 then
+            trialJoinedAt = os.clock()
+            Util.Notify("In " .. name .. " Time Trial - waiting for the start")
+            return
+        end
+        task.wait(0.1)
+    end
     local cf = toCFrame(pos)
     if not cf then
         -- no answer: be in the Tower and stand at the door's teleporter ourselves
@@ -4841,6 +4859,12 @@ pcall(function()
     end))
 end)
 
+Net.Listen("SetTowerFloor", function(floor)
+    if type(floor) == "number" then
+        Stats.TrialFloor = floor + 1
+        Features.TrialLog("server: room " .. (floor + 1))
+    end
+end)
 Net.Listen("InfinityFloorTransition", function(floor)
     Stats.InfFloor = type(floor) == "number" and floor or Stats.InfFloor + 1
     Stats.InfBest = math.max(Stats.InfBest, Stats.InfFloor)
