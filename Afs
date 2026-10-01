@@ -3110,21 +3110,11 @@ function Data.ArtifactLabels()
     return out
 end
 
-local openArtifactSent = nil   -- "slot:name" last sent, so it isn't re-sent every summon
-function Features.ResetOpenArtifact() openArtifactSent = nil end
-function Features.EquipOpenArtifact(force)
-    local label = F("DungeonOpenArtifact")
-    if type(label) ~= "string" or label == "" then
-        if Util.Every("open-art-note", 60) then Util.Notify("Dungeon: pick the artifact to equip before opening") end
-        return false
-    end
-    local name = string.match(label, "| (.+)$") or label
-    local slotKey = tostring(F("DungeonOpenArtifactSlot") or "1")
-    local key = slotKey .. ":" .. name
-    if not force and openArtifactSent == key then return true end
-    Net.Call("EquipArtifact", name, CFG.ArtifactSlots[slotKey] or CFG.ArtifactSlots["1"])
-    openArtifactSent = key
-    task.wait(0.5)
+function Features.EquipOpenArtifact()
+    -- "Use Dungeon Artifact To Open": Yuto Hub sends EquipArtefact("Dungeon", "CurrentArtefact")
+    -- right before every SummonDungeon (the dungeon artifact cuts the opening time)
+    Net.Call("EquipArtifact", "Dungeon", "CurrentArtefact")
+    task.wait(0.3)
     return true
 end
 
@@ -3146,7 +3136,7 @@ function Features.OpenDungeon()
         task.wait(1)
     end
     -- 2. artifact that cuts the opening time, 3. friend only, 4. summon, 5. join
-    if On("DungeonEquipArtifact") then Features.EquipOpenArtifact() end
+    if On("DungeonArtifact") then Features.EquipOpenArtifact() end
     Net.Raw("SetDungeonSetting", friendArgs(On("DungeonFriends")))
     local size = F("DungeonSize") or "Small"
     local world = Data.FromLabel(F("DungeonWorld") or "")
@@ -3839,12 +3829,14 @@ end
 local baseRaid = Features.Raid
 function Features.Raid()
     if Util.World() == "Raid" then
-        if On("RaidAutoConfirm") and Extras.RaidResults() then
+        -- built into Auto Raid: confirm the results, go back to the farm world,
+        -- forcefield up = minions first, forcefield down = boss
+        if Extras.RaidResults() then
             task.wait(1)
-            if On("RaidReturn") and HomeWorld ~= "" and not CFG.ModeWorlds[HomeWorld] then Travel.To(HomeWorld) end
+            if HomeWorld ~= "" and not CFG.ModeWorlds[HomeWorld] then Travel.To(HomeWorld) end
             return true
         end
-        if On("RaidSmartTarget") then
+        do
             local t = Extras.RaidTarget()
             if t then Combat.Attack(t, function() return On("AutoRaid") end) end
             return true
@@ -4131,7 +4123,7 @@ function DungeonGui.SummonDirect()
         return false
     end
     local sizeIndex = table.find(CFG.DungeonSizes, F("DungeonSize") or "Small") or 1
-    if On("DungeonEquipArtifact") then Features.EquipOpenArtifact() end
+    if On("DungeonArtifact") then Features.EquipOpenArtifact() end
     -- first value: Yuto Hub sends true; "Friend Only" off sends true too, on sends false
     local flag = not On("DungeonFriends")
     if CFG.DungeonSummonFlag ~= nil then flag = CFG.DungeonSummonFlag end
@@ -4179,7 +4171,7 @@ function Features.OpenDungeon()
     -- 2. the game's window through the door
     if DungeonGui.failed and DungeonGui.failed >= 3 then DungeonGui.failed = 0 return baseOpenDungeon() end
 
-    if On("DungeonEquipArtifact") then Features.EquipOpenArtifact() end
+    if On("DungeonArtifact") then Features.EquipOpenArtifact() end
     if not DungeonGui.GoToDoor() then DungeonGui.failed = (DungeonGui.failed or 0) + 1 return end
     local prompt = DungeonGui.Prompt()
     if prompt then Prompt.Use(prompt) end
@@ -4604,23 +4596,9 @@ do
     d:Toggle({ Title = "Ignore Chest", Flag = "DungeonIgnoreChest" })
     d:Toggle({ Title = "Use Dungeon Artifact To Open", Flag = "DungeonArtifact" })
     d:Toggle({ Title = "Friend Only", Flag = "DungeonFriends" })
-    d:Divider()
-    d:Dropdown({ Title = "Artifact To Equip Before Opening", Items = Data.ArtifactLabels(), Default = "Key | Dungeon", Flag = "DungeonOpenArtifact",
-        Callback = function() Features.ResetOpenArtifact() end })
-    d:Dropdown({ Title = "Artifact Slot", Items = { "1", "2" }, Default = "1", Required = true, Flag = "DungeonOpenArtifactSlot",
-        Callback = function() Features.ResetOpenArtifact() end })
-    d:Toggle({ Title = "Equip Artifact Before Opening", Default = true, Flag = "DungeonEquipArtifact",
-        Callback = function(v) if v then Features.ResetOpenArtifact() end end })
-    d:Button({ Title = "Equip Artifact Now ( test )", Callback = function()
-        if Features.EquipOpenArtifact(true) then Util.Notify("Artifact sent - check it in the game's Artifact menu") end
-    end })
-    d:Divider()
     d:Toggle({ Title = "Auto Open Dungeon", Flag = "AutoOpenDungeon" })
-    d:Toggle({ Title = "Teleport To Load All Dungeon", Default = true, Flag = "DungeonLoadAll" })
-    d:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "DungeonTarget" })
+    d:Toggle({ Title = "Teleport To Load All Dungeon", Flag = "DungeonLoadAll" })
     d:Toggle({ Title = "Auto Farm Dungeon", Flag = "AutoFarmDungeon" })
-    Features.DungeonLabel = d:Label("Runs : 0")
-    d:Button({ Title = "Teleport To Dungeon Door", Callback = function() DungeonGui.GoToDoor() end })
     Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(dw, Data.FarmWorldLabels()) end
 
     local g = TDungeon:Card("Auto Gate !", "Right")
@@ -4838,64 +4816,12 @@ do
         if not Extras.BuyWorldGate() then Util.Notify("No closed gate in this world") end
     end })
 
-    -- Raid: boss / forcefield + results
-    local r = TRaid:Card("Raid Extras", "Right")
-    r:Paragraph({ Body = "Forcefield up: kill the minions first. Forcefield down: go for the boss. When the raid ends the results are confirmed and you go back to your last farm world." })
-    r:Toggle({ Title = "Smart Raid Target ( Boss / Forcefield )", Default = true, Flag = "RaidSmartTarget" })
-    r:Toggle({ Title = "Auto Confirm Raid Results", Default = true, Flag = "RaidAutoConfirm" })
-    r:Toggle({ Title = "Return To Farm World After Raid", Default = true, Flag = "RaidReturn" })
 
     -- Shop: free gifts
     local g = TShop:Card("Free Gifts", "Left")
     g:Paragraph({ Body = "Claims the playtime gifts (ClaimGift 1-" .. CFG.FreeGiftCount .. ") and resets the gift wheel when the game allows it." })
     g:Toggle({ Title = "Auto Claim Free Gifts", Flag = "AutoFreeGifts" })
 
-    -- Dungeon: summon check (what the hub sends, learned from your own summon)
-    local ds = TDungeon:Card("Dungeon Summon Check", "Right")
-    ds:Paragraph({ Body = "The hub copies the call the game makes when you summon by hand.\n"
-        .. "[1] Summon one dungeon by hand WITHOUT artifact.\n"
-        .. "[2] Summon one by hand WITH artifact.\n"
-        .. "After that Auto Open Dungeon sends the same call with your size / world / artifact choice." })
-    local status = ds:Label("Learned : -")
-    local function statusText()
-        local tpl, n = Learn.Get("SummonDungeon")
-        local hist = #Learn.History("SummonDungeon")
-        local btn = Learn.Get("Bindable.SummonDungeon") ~= nil
-        local _, src, art = Features.SummonArgs(F("DungeonSize") or "Small",
-            Data.FromLabel(F("DungeonWorld") or "") ~= "" and Data.FromLabel(F("DungeonWorld")) or "?", On("DungeonArtifact"))
-        local last = Features.LastSummon
-        local lines = {
-            "Learned summon : " .. (tpl and ("yes, " .. n .. " args, " .. hist .. " different calls") or "<font color='#f87171'>no - summon by hand once</font>"),
-            "Game button learned : " .. (btn and "yes" or "no"),
-            "Sending : " .. src .. "   Artifact slot : " .. tostring(art),
-        }
-        if last then
-            lines[#lines + 1] = "Last summon : " .. last.source .. (last.answer ~= nil and (" -> " .. tostring(last.answer)) or "")
-        end
-        return table.concat(lines, "\n")
-    end
-    Learn.OnRecord = function(name)
-        if name == "SummonDungeon" or name == "Bindable.SummonDungeon" then
-            Util.Notify("Learned " .. name)
-            pcall(function() status:Set(statusText()) end)
-        end
-    end
-    ds:Button({ Title = "Refresh Status", Callback = function() status:Set(statusText()) end })
-    ds:Button({ Title = "Copy Summon Call", Callback = function()
-        local args = Features.SummonArgs(F("DungeonSize") or "Small", Data.FromLabel(F("DungeonWorld") or ""), On("DungeonArtifact"))
-        local ser = {}
-        for i = 1, args.n or #args do ser[i] = Learn.Ser(args[i], 0) end
-        local txt = "SummonDungeon " .. HttpService:JSONEncode(ser)
-        if setclipboard then setclipboard(txt) Util.Notify("Copied") else print(txt) Util.Notify("Printed to F9") end
-    end })
-    ds:Button({ Title = "Forget Learned Summon", Callback = function()
-        local d = Learn.Load()
-        d.SummonDungeon, d["Bindable.SummonDungeon"] = nil, nil
-        pcall(function() if writefile then writefile(Learn.File, HttpService:JSONEncode(d)) end end)
-        status:Set(statusText())
-        Util.Notify("Summon forgotten - summon by hand again")
-    end })
-    task.spawn(function() task.wait(1) pcall(function() status:Set(statusText()) end) end)
 
     -- Hatch: multi open
     local h = THatch:Card("Multi Open", "Left")
