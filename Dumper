@@ -8,6 +8,7 @@
       remotes.txt      every RemoteEvent / RemoteFunction / Bindable (path + class)
       player.txt       your player: values, attributes, pets (first 3 with their Data)
       server_*.txt     answers of read-only server calls (GetPetData, ...)
+      store.txt        your save as the client holds it (all pets + passives)
       gui.txt          PlayerGui.MainGui (visible / hidden, button + label text)
       world.txt        the world you're standing in, deep, + one enemy in full
       near.txt         every map piece / enemy within 1500 studs of you, not grouped
@@ -392,11 +393,31 @@ local function dumpModules()
     save("modules/_index.txt", index)
 end
 
+-- your whole save as the client holds it (Modules.LocalDairebStore.GetData()):
+-- every pet in the inventory with its passives - Gravity Hub's Auto Passive reads this
+local function dumpStore()
+    local m = RS:FindFirstChild("LocalDairebStore", true)
+    if not (m and m:IsA("ModuleScript")) then save("store.txt", "(LocalDairebStore not found)") return end
+    local ok, st = pcall(require, m)
+    if not ok or type(st) ~= "table" or type(st.GetData) ~= "function" then save("store.txt", "(can't require: " .. tostring(st) .. ")") return end
+    local done, ok2, res = false, false, nil
+    task.spawn(function() ok2, res = pcall(st.GetData) done = true end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < 5 do task.wait() end
+    if done and ok2 and type(res) ~= "table" then
+        done = false
+        task.spawn(function() ok2, res = pcall(st.GetData, st) done = true end)
+        t0 = os.clock()
+        while not done and os.clock() - t0 < 5 do task.wait() end
+    end
+    save("store.txt", not done and "(timed out)" or (ok2 and ser(res, 5, {}, "") or ("(error) " .. tostring(res))))
+end
+
 local function dumpAll()
     local steps = {
         { "summary", dumpSummary }, { "remotes", dumpRemotes }, { "player", dumpPlayer },
         { "gui", dumpGui }, { "world", dumpWorld }, { "near", dumpNear }, { "modes", dumpModes },
-        { "trees", dumpBig }, { "modules", dumpModules },
+        { "trees", dumpBig }, { "modules", dumpModules }, { "store", dumpStore },
     }
     local errs = {}
     for _, s in ipairs(steps) do

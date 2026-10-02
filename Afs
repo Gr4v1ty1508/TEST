@@ -3318,30 +3318,58 @@ end
 -- asked once a minute. Whatever shape it answers with, pets are read as
 -- { id, name, rarity, shiny, locked, equipped } when those fields can be found.
 local inventoryCache, inventoryAt = {}, -999
-function Data.Inventory(force)
-    if not force and os.clock() - inventoryAt < 60 then return inventoryCache end
-    inventoryAt = os.clock()
-    local ok, reply = pcall(Net.Raw, "GetPetData", {})
-    local out = {}
-    local function field(t, names)
-        for _, n in ipairs(names) do if t[n] ~= nil then return t[n] end end
-        return nil
+-- the player's whole save as the client sees it: Modules.LocalDairebStore.GetData()
+-- (this is where every pet in the inventory is, not only the equipped ones)
+function Data.StoreData()
+    local st = Data.Module("LocalDairebStore")
+    if not st or type(st.GetData) ~= "function" then return nil end
+    for _, args in ipairs({ {}, { st } }) do
+        local ok, r = pcall(st.GetData, table.unpack(args))
+        if ok and type(r) == "table" and next(r) then return r end
     end
+    return nil
+end
+local PET_NAME_KEYS = { "Name", "PetName", "Pet", "Type", "Id" }
+local PET_ID_KEYS = { "UID", "Uid", "uid", "PetId", "ID" }
+local function fieldOf(t, names)
+    for _, n in ipairs(names) do if t[n] ~= nil then return t[n] end end
+    return nil
+end
+-- every table in `root` that looks like a pet (a name + a UID, or a name keyed by a number)
+local function scanPets(root, out, index)
+    local seen = {}
     local function scan(t, keyId, depth)
-        if type(t) ~= "table" or depth > 3 then return end
-        local name = field(t, { "Name", "PetName", "Type", "Pet" })
-        local id = field(t, { "UID", "Uid", "Id", "ID", "PetId" }) or keyId
-        if type(name) == "string" and id ~= nil then
-            out[#out + 1] = { id = tostring(id), name = name, rarity = field(t, { "Rarity", "Tier" }),
-                shiny = field(t, { "Shiny", "IsShiny" }), locked = field(t, { "Locked", "Lock", "IsLocked" }),
-                equipped = field(t, { "Equipped", "IsEquipped" }) }
+        if type(t) ~= "table" or depth > 6 or seen[t] then return end
+        seen[t] = true
+        local name = fieldOf(t, PET_NAME_KEYS)
+        local id = fieldOf(t, PET_ID_KEYS) or (type(keyId) == "number" and keyId or tonumber(keyId))
+        if type(name) == "string" and id ~= nil and (t.Passives ~= nil or t.Level ~= nil or t.UID ~= nil or t.Shiny ~= nil) then
+            local rec = { id = tostring(id), name = name, rarity = fieldOf(t, { "Rarity", "Tier" }),
+                shiny = fieldOf(t, { "Shiny", "IsShiny" }), locked = fieldOf(t, { "Locked", "Lock", "IsLocked" }),
+                equipped = fieldOf(t, { "Equipped", "IsEquipped" }), raw = t }
+            if not index[rec.id] then out[#out + 1] = rec index[rec.id] = rec end
             return
         end
-        for k, v in pairs(t) do scan(v, (type(k) == "string" or type(k) == "number") and k or nil, depth + 1) end
+        for k, v in pairs(t) do scan(v, k, depth + 1) end
     end
-    if ok then scan(reply, nil, 0) end
-    -- the game's own Pets menu (MainGui.Pets.Main.Scroll): one PetBox per pet with
-    -- UID (IntValue), PetName, Equipped / Locked icons. Filled after the menu was opened once.
+    local pets = root.Pets or root.pets or root.PetInventory or root.Inventory
+    scan(type(pets) == "table" and pets or root, nil, 0)
+    if #out == 0 and type(pets) == "table" then scan(root, nil, 0) end
+end
+Data.InventoryIndex = {}
+function Data.Inventory(force)
+    if not force and os.clock() - inventoryAt < 60 and #inventoryCache > 0 then return inventoryCache end
+    inventoryAt = os.clock()
+    local out, index = {}, {}
+    -- 1. the client's copy of your save (all pets)
+    local store = Data.StoreData()
+    if store then pcall(scanPets, store, out, index) end
+    -- 2. GetPetData remote
+    if #out == 0 then
+        local ok, reply = pcall(Net.Raw, "GetPetData", {})
+        if ok and type(reply) == "table" then pcall(scanPets, reply, out, index) end
+    end
+    -- 3. the game's own Pets menu (filled after the menu was opened once)
     if #out == 0 then
         pcall(function()
             local scroll = Data.MainGui().Pets.Main.Scroll
@@ -3349,14 +3377,29 @@ function Data.Inventory(force)
                 local uid, name = box:FindFirstChild("UID"), box:FindFirstChild("PetName")
                 if uid and name and uid.Value ~= 0 then
                     local eq, lk = box:FindFirstChild("Equipped"), box:FindFirstChild("Locked")
-                    out[#out + 1] = { id = tostring(uid.Value), name = name.Text,
+                    local rec = { id = tostring(uid.Value), name = name.Text,
                         equipped = eq and eq.Visible or false, locked = lk and lk.Visible or false }
+                    out[#out + 1] = rec
+                    index[rec.id] = rec
                 end
             end
         end)
     end
-    inventoryCache = out
+    inventoryCache, Data.InventoryIndex = out, index
     return out
+end
+-- passive <slot> of any pet (equipped model first, else the saved data)
+function Data.PetPassive(id, slot)
+    local rec = Data.InventoryIndex[tostring(id)]
+    local p = rec and rec.raw and (rec.raw.Passives or rec.raw.Passive)
+    if type(p) == "table" then
+        local v = p[slot] or p[tostring(slot)]
+        if type(v) == "table" then v = v.Name or v.Passive or v.Id or v[1] end
+        if v ~= nil then return tostring(v) end
+    elseif type(p) == "string" and slot == 1 then
+        return p
+    end
+    return nil
 end
 
 function Features.Fuse()
@@ -3395,6 +3438,8 @@ local function readPassive(petId, slot, reply)
         end
         if v ~= nil then return tostring(v) end
     end
+    local saved = Data.PetPassive(petId, slot)
+    if saved then return saved end
     if type(reply) == "table" then
         local r = reply[slot] or reply.Passive or reply.Name or reply[1]
         return r and tostring(r) or nil
@@ -3408,6 +3453,14 @@ end
 -- passives without a category are the normal machine
 function Data.PassiveMachines()
     local seen, out = {}, {}
+    for k in pairs(Data.Module("PassiveCategories") or {}) do
+        if type(k) == "string" and not seen[k] then seen[k] = true out[#out + 1] = k end
+    end
+    if #out > 0 then
+        table.sort(out)
+        table.insert(out, 1, "Normal")
+        return out
+    end
     for _, t in pairs(Data.Module("PassiveStats") or {}) do
         if type(t) == "table" and type(t.Category) == "string" and not seen[t.Category] then
             seen[t.Category] = true
@@ -3486,6 +3539,10 @@ function Features.Passive()
         return
     end
     task.wait(F("PassiveDelay") or 0.5)
+    -- pets that aren't equipped are read from the save data: re-read it once per round
+    for _, r in ipairs(sent) do
+        if not Data.PetObject(r.id) then Data.Inventory(true) break end
+    end
     for _, r in ipairs(sent) do
         local got = readPassive(r.id, r.slot)
         if passiveWanted(got) then
@@ -4709,7 +4766,12 @@ do
         "[-] If your ping > 500ms use 0.8 - 1s to keep your passive safe.\n" ..
         "[-] Fewer pets selected = better performance." })
     local pets = p:Dropdown({ Title = "Select Pets To Roll", Items = Data.Pets(), Multi = true, Flag = "PassivePets" })
-    p:Button({ Title = "Refresh Pets", Callback = function() pets:Refresh(Data.Pets()) end })
+    p:Button({ Title = "Refresh Pets", Callback = function()
+        Data.Inventory(true)
+        local list = Data.Pets()
+        pets:Refresh(list)
+        Util.Notify(#list .. " pets ( equipped + inventory )")
+    end })
     local names = Data.Passives()
     p:Dropdown({ Title = "Select Passive To Roll", Items = names, Multi = true, Flag = "PassiveNames" })
     p:Dropdown({ Title = "Select Passive Rarity", Items = Data.PassiveRarities(), Multi = true, Flag = "PassiveRarity" })
