@@ -2012,18 +2012,13 @@ end
 -- and the UseAbility remote as a last resort
 local VIM = game:GetService("VirtualInputManager")
 function Features.Ult()
-    local mg = Data.MainGui()
-    local btn = mg and mg:FindFirstChild("R")
-    if btn then
-        local target = btn:IsA("GuiButton") and btn or btn:FindFirstChildWhichIsA("GuiButton", true)
-        if target then fireGui(target, { "MouseButton1Down", "MouseButton1Click", "Activated" }) end
+    -- "Attack While Ulti" (watched from Yuto Hub): every ~0.3 s, for every equipped pet model
+    -- PetAttack(pet) then PetAbility(pet) - pets keep attacking and use their ult without
+    -- waiting for the animation
+    for _, pet in ipairs(Data.EquippedPets()) do
+        Net.Raw("PetAttack", { pet })
+        Net.Raw("PetAbility", { pet })
     end
-    pcall(function()
-        VIM:SendKeyEvent(true, Enum.KeyCode.R, false, game)
-        task.wait(0.05)
-        VIM:SendKeyEvent(false, Enum.KeyCode.R, false, game)
-    end)
-    Net.Call("UseAbility")
 end
 
 -- MOUNT -------------------------------------------------------------------------------
@@ -4823,7 +4818,6 @@ do
 
     -- Main: pet extras + world gate
     local p = TMain:Card("Pets Extra", "Right")
-    p:Toggle({ Title = "Fast Pet Ability ( Ult Skip )", Flag = "PetAbility" })
     p:Toggle({ Title = "Pull Pets To Me On Attack", Flag = "PullPets" })
     p:Toggle({ Title = "Boost Pet Speed ( re-equip after )", Flag = "BoostPetSpeed", Callback = function(v)
         if v then Extras.BoostPetSpeed() Util.Notify("Re-equip your pets to apply") end
@@ -5009,14 +5003,13 @@ track(game:GetService("RunService").Heartbeat:Connect(function()
 end))
 loop(0.5, function() if On("AutoCollect") then Features.Collect() end end)
 loop(3, function() if On("HideOthers") then Features.HideOthers(true) end end)
-loop(1, function() if On("AttackUlt") then Features.Ult() end end)
+loop(0.31, function() if On("AttackUlt") then Features.Ult() end end)
 loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") then Features.Hatch() end end)
 loop(3, function() if On("AutoFuse") then Features.Fuse() end end)
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
 loop(2, function() if PassiveStatus then PassiveStatus:Set(Features.PassiveStatusText()) end end)
 
 -- extras
-loop(0.3, function() if On("PetAbility") then Extras.PetAbility() end end)
 loop(0.3, function() if On("AutoFreeGifts") then Extras.FreeGifts() end end)
 loop(0.5, function() if On("AutoMultiOpen") then Extras.MultiOpen() end end)
 loop(2, function()
