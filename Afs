@@ -3323,7 +3323,7 @@ local inventoryCache, inventoryAt = {}, -999
 function Data.StoreData()
     local st = Data.Module("LocalDairebStore")
     if not st or type(st.GetData) ~= "function" then return nil end
-    for _, args in ipairs({ {}, { st } }) do
+    for _, args in ipairs({ {}, { st }, { LP }, { st, LP }, { LP.UserId }, { st, LP.UserId } }) do
         local ok, r = pcall(st.GetData, table.unpack(args))
         if ok and type(r) == "table" and next(r) then return r end
     end

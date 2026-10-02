@@ -400,17 +400,29 @@ local function dumpStore()
     if not (m and m:IsA("ModuleScript")) then save("store.txt", "(LocalDairebStore not found)") return end
     local ok, st = pcall(require, m)
     if not ok or type(st) ~= "table" or type(st.GetData) ~= "function" then save("store.txt", "(can't require: " .. tostring(st) .. ")") return end
-    local done, ok2, res = false, false, nil
-    task.spawn(function() ok2, res = pcall(st.GetData) done = true end)
-    local t0 = os.clock()
-    while not done and os.clock() - t0 < 5 do task.wait() end
-    if done and ok2 and type(res) ~= "table" then
-        done = false
-        task.spawn(function() ok2, res = pcall(st.GetData, st) done = true end)
-        t0 = os.clock()
-        while not done and os.clock() - t0 < 5 do task.wait() end
+    local LPl = game:GetService("Players").LocalPlayer
+    local lines = {}
+    for _, fn in ipairs({ "IsEnabled", "GetDataStoreConnected" }) do
+        if type(st[fn]) == "function" then
+            local okf, r = pcall(st[fn])
+            lines[#lines + 1] = fn .. "() -> " .. (okf and ser(r, 2, {}, "") or ("error " .. tostring(r)))
+        end
     end
-    save("store.txt", not done and "(timed out)" or (ok2 and ser(res, 5, {}, "") or ("(error) " .. tostring(res))))
+    local tries = { { "GetData()", {} }, { "GetData(store)", { st } }, { "GetData(player)", { LPl } },
+        { "GetData(store, player)", { st, LPl } }, { "GetData(userId)", { LPl.UserId } }, { "GetData(\"Pets\")", { "Pets" } } }
+    local res, used = nil, nil
+    for _, t in ipairs(tries) do
+        local done, okc, r = false, false, nil
+        task.spawn(function() okc, r = pcall(st.GetData, table.unpack(t[2])) done = true end)
+        local t0 = os.clock()
+        while not done and os.clock() - t0 < 4 do task.wait() end
+        lines[#lines + 1] = t[1] .. " -> " .. (not done and "(timed out)"
+            or (okc and (type(r) == "table" and "table" or (type(r) .. " " .. tostring(r))) or ("error " .. tostring(r))))
+        if done and okc and type(r) == "table" and next(r) and not res then res, used = r, t[1] end
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = res and ("=== " .. used .. " ===\n" .. ser(res, 5, {}, "")) or "(no table returned)"
+    save("store.txt", table.concat(lines, "\n"))
 end
 
 local function dumpAll()
