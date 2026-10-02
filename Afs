@@ -188,7 +188,8 @@ local CFG = {
         OpenEgg         = { "OpenEgg",                  function(egg, amount) return { egg, amount } end },
         FusePets        = { "FeedPets",                 function(petIds) return { petIds } end },
 
-        RollPassive     = { "RollPassive",              function(petId, slot, machine, method) return { petId, slot, machine, method } end },
+        -- seen from Yuto Hub: RollPassive(<pet UID number>, <machine = PassiveStats Category, e.g. "Frieren2026">, true, <slot>)
+        RollPassive     = { "RollPassive",              function(petId, machine, slot) return { tonumber(petId) or petId, machine, true, slot } end },
         PickPassive     = { "PickedPassive",            function(petId, slot, keep) return { petId, slot, keep } end },
         TransferPassive = { "TransferAllPassives",      function(fromId, toId) return { fromId, toId } end },
 
@@ -3408,19 +3409,20 @@ local function readPassive(petId, slot, reply)
     return nil
 end
 
-local function goToMachine()
-    local machine = F("PassiveMachine") or "Normal"
-    local words = machine == "Normal" and { "passive" } or { string.lower(machine) }
-    local prompts = Prompt.Find(workspace, words)
-    local best
-    for _, p in ipairs(prompts) do
-        local hay = string.lower((p.Parent and p.Parent:GetFullName() or "") .. p.ObjectText .. p.ActionText)
-        if string.find(hay, "passive", 1, true) or string.find(hay, "reroll", 1, true) then best = p break end
+-- machines = the "Category" values in the game's PassiveStats ("Frieren2026", "Easter2026", ...)
+-- passives without a category are the normal machine
+function Data.PassiveMachines()
+    local seen, out = {}, {}
+    for _, t in pairs(Data.Module("PassiveStats") or {}) do
+        if type(t) == "table" and type(t.Category) == "string" and not seen[t.Category] then
+            seen[t.Category] = true
+            out[#out + 1] = t.Category
+        end
     end
-    local root = Util.Root()
-    if best and root and best.Parent:IsA("BasePart") and (best.Parent.Position - root.Position).Magnitude > 20 then
-        Util.MoveTo(best.Parent.CFrame * CFrame.new(0, 3, 5))
-    end
+    table.sort(out)
+    table.insert(out, 1, "Normal")
+    if #out == 1 then return CFG.PassiveMachines end
+    return out
 end
 
 function Features.PassiveStatusText()
@@ -3435,7 +3437,6 @@ function Features.PassiveStatusText()
     lines[#lines + 1] = "[-] Passive Rarity Selected :"
     for _, n in ipairs(Util.SetToList(F("PassiveRarity"))) do lines[#lines + 1] = "    [+] " .. n end
     lines[#lines + 1] = "[-] Passive Machine : " .. tostring(F("PassiveMachine") or "-")
-    lines[#lines + 1] = "[-] Method : " .. tostring(F("PassiveMethod") or "-")
     lines[#lines + 1] = "[-] Delayed " .. tostring(F("PassiveDelay") or 0.5)
     local done, total = 0, 0
     for _ in pairs(passiveRolls) do total = total + 1 end
@@ -3450,50 +3451,51 @@ function Features.Passive()
     local pets = Util.SetToList(F("PassivePets"))
     local slots = Util.SetToList(F("PassiveSlots"))
     if #pets == 0 or #slots == 0 then return end
-    if Util.Every("passive-machine", 15) then goToMachine() end
-
+    local machine = F("PassiveMachine") or "Normal"
     local keepNames, keepRarity = F("PassiveNames") or {}, F("PassiveRarity") or {}
     local mode = F("PassiveMode") or "Keep Selected Passive"
-    local remaining = 0
+    -- 1. one RollPassive for every pet / slot still to do, all at once (Yuto Hub: ~every 0.5 s)
+    local sent = {}
     for _, label in ipairs(pets) do
         local id = Data.PetId(label)
         for _, slotText in ipairs(slots) do
-            if not On("AutoPassive") then return end
             local slot = tonumber(slotText) or 1
             local key = id .. "#" .. slot
             if not passiveDone[key] then
-                remaining = remaining + 1
                 passiveRolls[key] = (passiveRolls[key] or 0) + 1
-                local reply = Net.Call("RollPassive", id, slot, F("PassiveMachine") or "Normal", F("PassiveMethod") or "Token")
-                task.wait(F("PassiveDelay") or 0.5)
-                local got = readPassive(id, slot, reply)
-                if got then
-                    local keep
-                    if mode == "Keep Selected Rarity" then
-                        keep = keepRarity[passiveRarityOf[got] or ""] == true
-                    else
-                        keep = false
-                        for name in pairs(keepNames) do
-                            if string.find(string.lower(got), string.lower(name), 1, true) then keep = true break end
-                        end
-                    end
-                    if keep then
-                        passiveDone[key] = true
-                        Net.Call("PickPassive", id, slot, true)
-                        Util.Notify(label .. " slot " .. slot .. " -> " .. got)
-                    end
-                elseif not warnedRead then
-                    warnedRead = true
-                    Util.Notify("Can't read passive - use Remote Spy (F9)")
-                end
+                Net.Call("RollPassive", id, machine, slot)
+                sent[#sent + 1] = { label = label, id = id, slot = slot, key = key }
             end
         end
     end
-    if PassiveStatus then PassiveStatus:Set(Features.PassiveStatusText()) end
-    if remaining == 0 then
+    if #sent == 0 then
         Flags.AutoPassive:Set(false)
         Util.Notify("All selected slots have a kept passive")
+        return
     end
+    task.wait(F("PassiveDelay") or 0.5)
+    -- 2. what each slot has now (pet.Data.Passives."1" / "2" / "3") -> stop rolling the kept ones
+    for _, r in ipairs(sent) do
+        local got = readPassive(r.id, r.slot)
+        if got then
+            local keep = false
+            if mode == "Keep Selected Rarity" then
+                keep = keepRarity[passiveRarityOf[got] or ""] == true
+            else
+                for name in pairs(keepNames) do
+                    if string.lower(got) == string.lower(name) or string.find(string.lower(got), string.lower(name), 1, true) then keep = true break end
+                end
+            end
+            if keep then
+                passiveDone[r.key] = true
+                Util.Notify(r.label .. " slot " .. r.slot .. " -> " .. got)
+            end
+        elseif not warnedRead then
+            warnedRead = true
+            Util.Notify("Can't read the pet's passive - send a Gravity Dumper report")
+        end
+    end
+    if PassiveStatus then PassiveStatus:Set(Features.PassiveStatusText()) end
 end
 function Features.ResetPassive() passiveDone, passiveRolls, warnedRead = {}, {}, false end
 
@@ -4701,7 +4703,7 @@ end
 do
     local p = TPassive:Card("Auto Reroll Passive", "Left")
     p:Paragraph({ Title = "Auto Reroll Passive Caution !", Body =
-        "[-] Stand near the passive machine (the script walks you there).\n" ..
+        "[-] Works from anywhere - no need to stand at the machine.\n" ..
         "[-] Use 0.5-0.7 delay when rolling more than 1 pet.\n" ..
         "[-] If your ping > 500ms use 0.8 - 1s to keep your passive safe.\n" ..
         "[-] Fewer pets selected = better performance." })
@@ -4712,8 +4714,7 @@ do
     p:Dropdown({ Title = "Select Passive Rarity", Items = Data.PassiveRarities(), Multi = true, Flag = "PassiveRarity" })
     p:Dropdown({ Title = "Select Passive Slot", Items = { "1", "2", "3" }, Multi = true, Default = { ["1"] = true }, Flag = "PassiveSlots" })
     p:Dropdown({ Title = "Select Passive Reroll Mode", Items = { "Keep Selected Rarity", "Keep Selected Passive" }, Default = "Keep Selected Passive", Required = true, Flag = "PassiveMode" })
-    p:Dropdown({ Title = "Select Passive Machine", Items = CFG.PassiveMachines, Default = "Normal", Required = true, Flag = "PassiveMachine" })
-    p:Dropdown({ Title = "Select Reroll Method", Items = CFG.RerollMethods, Default = "Token", Required = true, Flag = "PassiveMethod" })
+    p:Dropdown({ Title = "Select Passive Machine", Items = Data.PassiveMachines(), Default = "Normal", Required = true, Flag = "PassiveMachine" })
     p:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 2, Default = 0.5, Decimals = 1, Flag = "PassiveDelay" })
     p:Toggle({ Title = "Auto Reroll Passive !", Flag = "AutoPassive", Callback = function(v) if v then Features.ResetPassive() end end })
     if #names == 0 then
@@ -4997,7 +4998,9 @@ local function loop(interval, fn)
 end
 
 loop(0.1, Brain)
-loop(0.05, function() if On("AutoClick") then Net.Call("Click") end end)
+track(game:GetService("RunService").Heartbeat:Connect(function()
+    if running and On("AutoClick") then Net.Call("Click") end
+end))
 loop(0.5, function() if On("AutoCollect") then Features.Collect() end end)
 loop(3, function() if On("HideOthers") then Features.HideOthers(true) end end)
 loop(1, function() if On("AttackUlt") then Features.Ult() end end)
