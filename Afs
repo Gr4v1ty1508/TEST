@@ -3719,9 +3719,11 @@ function Features.EventQuestStatus()
     return table.concat(lines, "\n")
 end
 function Features.EventQuests()
-    local label = F("EQPet")
-    if type(label) ~= "string" or label == "" then
-        if Util.Every("eq-pet", 30) then Util.Notify("Event Quests: pick the pet to reroll first") end
+    -- several pets: each one gets a reroll every round (old single-pet config still works)
+    local pets = Util.SetToList(F("EQPets"))
+    if #pets == 0 and type(F("EQPet")) == "string" and F("EQPet") ~= "" then pets = { F("EQPet") } end
+    if #pets == 0 then
+        if Util.Every("eq-pet", 30) then Util.Notify("Event Quests: pick the pets to reroll first") end
         return
     end
     local prog = Features.EventQuestProgress()
@@ -3735,8 +3737,13 @@ function Features.EventQuests()
         if q.cur < q.goal and (not next(wanted) or wanted[key]) then open[key] = true end
     end
     if not next(open) then
-        Flags.AutoEventQuests:Set(false)
-        Util.Notify("All selected Lunar vs Solar quests are done")
+        -- points are given by the game as each quest finishes (nothing to hand in).
+        -- When all are done the board resets after its cooldown: keep waiting, then start again.
+        if Util.Every("eq-alldone", 300) then Util.Notify("Lunar vs Solar: all quests done - waiting for the new quests") end
+        if Features.EQStatus and Util.Every("eq-status", 10) then
+            pcall(function() Features.EQStatus:Set("Waiting for new quests\n" .. Features.EventQuestStatus()) end)
+        end
+        task.wait(5)
         return
     end
     -- the machine + currency that moves the most unfinished quests
@@ -3750,8 +3757,10 @@ function Features.EventQuests()
     local machine = best[1] == "Event" and (F("EQEventMachine") or "Frieren2026") or best[1]
     local slot = tonumber(F("EQSlot") or "1") or 1
     if not Features.PassiveReady(machine) then return end
-    Net.Call("RollPassive", Data.PetId(label), machine, slot, best[2])
-    Features.EQLast = machine .. (best[2] and " shard" or " token") .. " reroll"
+    for _, label in ipairs(pets) do
+        Net.Call("RollPassive", Data.PetId(label), machine, slot, best[2])
+    end
+    Features.EQLast = machine .. (best[2] and " shard" or " token") .. " reroll x" .. #pets
     task.wait(F("PassiveDelay") or 0.5)
     if Features.EQStatus and Util.Every("eq-status", 2) then
         pcall(function() Features.EQStatus:Set("Rolling : " .. Features.EQLast .. "\n" .. Features.EventQuestStatus()) end)
@@ -5062,13 +5071,14 @@ end
 do
     -- Lunar vs Solar passive quests
     local q = TPassive:Card("Auto Lunar vs Solar Quests", "Right")
-    q:Paragraph({ Body = "[-] Open the Lunar vs Solar quest board once (the hub reads the progress from it).\n"
-        .. "[-] Only the pet / slot picked here is rerolled - use a pet whose passive you don't need.\n"
-        .. "[-] Uses Normal / Event / Requiem rerolls with tokens or shards, whatever finishes the most quests." })
+    q:Paragraph({ Body = "[-] Progress is read from your save - no need to open the board.\n"
+        .. "[-] The pets / slot picked here are rerolled every round - use pets whose passive you don't need.\n"
+        .. "[-] Uses Normal / Event / Requiem rerolls with tokens or shards, whatever finishes the most quests.\n"
+        .. "[-] Points come by themselves; when all quests are done it waits for the new ones and goes on." })
     local labels, keys = {}, {}
     local info = Data.Module("TeamEventInfo")
     for _, key in ipairs(info and info.QuestOrder or {}) do keys[#keys + 1] = key end
-    local qpet = q:Dropdown({ Title = "Pet To Reroll", Items = Data.Pets(), Flag = "EQPet" })
+    local qpet = q:Dropdown({ Title = "Pets To Reroll", Items = Data.Pets(), Multi = true, Default = {}, Flag = "EQPets" })
     table.insert(Features.PetDrops, qpet)
     q:Button({ Title = "Refresh Pets", Callback = function() Features.RefreshPetLists() end })
     q:Dropdown({ Title = "Slot", Items = { "1", "2", "3" }, Default = "1", Required = true, Flag = "EQSlot" })
