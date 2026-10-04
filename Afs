@@ -3680,10 +3680,30 @@ function Features.EventQuestProgress()
     local ted = store and store.TeamEventData
     if type(ted) == "table" and type(ted.QuestsFinished) == "table" and info and type(info.Targets) == "table"
        and (not info.EventId or not ted.EventId or ted.EventId == info.EventId) then
+        -- a finished quest isn't a number any more (seen: board 2000/2000 while the save read 0),
+        -- so anything that isn't a number but is set counts as done; the board rows
+        -- (MainGui.TeamEvent.Quests.Frame.<Quest>.Progress "x/y") are read too and the higher wins
+        local board
+        pcall(function() board = Data.MainGui().TeamEvent.Quests.Frame end)
         local out = {}
         for key, goal in pairs(info.Targets) do
             local goalN = tonumber(goal)
-            if goalN then out[key] = { cur = tonumber(ted.QuestsFinished[key]) or 0, goal = goalN } end
+            if goalN then
+                local v = ted.QuestsFinished[key]
+                local cur = tonumber(v) or ((v ~= nil and v ~= false) and goalN or 0)
+                -- or marked in another table of TeamEventData (e.g. Completed[key] = true)
+                for k2, t2 in pairs(ted) do
+                    if k2 ~= "QuestsFinished" and type(t2) == "table" and t2[key] == true then cur = goalN end
+                end
+                local row = board and board:FindFirstChild(key)
+                local prog = row and row:FindFirstChild("Progress")
+                if prog and prog:IsA("TextLabel") then
+                    local a, b = string.match(prog.Text, "^%s*(.-)%s*/%s*(.-)%s*$")
+                    local ga, gb = eqNumber(a), eqNumber(b)
+                    if ga and gb and gb == goalN and ga > cur then cur = ga end
+                end
+                out[key] = { cur = math.min(cur, goalN), goal = goalN }
+            end
         end
         if next(out) then return out end
     end
