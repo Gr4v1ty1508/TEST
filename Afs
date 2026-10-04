@@ -3790,7 +3790,7 @@ function Features.EventQuests()
         Net.Call("RollPassive", Data.PetId(label), machine, slot, best[2])
     end
     Features.EQLast = machine .. (best[2] and " shard" or " token") .. " reroll x" .. #pets
-    task.wait(F("PassiveDelay") or 0.5)
+    task.wait(F("EQDelay") or 0.5)
     if Features.EQStatus and Util.Every("eq-status", 2) then
         pcall(function() Features.EQStatus:Set("Rolling : " .. Features.EQLast .. "\n" .. Features.EventQuestStatus()) end)
     end
@@ -5117,6 +5117,7 @@ do
     local def = {}
     for _, k in ipairs(keys) do def[k] = true end
     q:Dropdown({ Title = "Quests To Do", Items = keys, Multi = true, Default = def, Flag = "EQQuests" })
+    q:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 2, Default = 0.5, Decimals = 1, Flag = "EQDelay" })
     Features.EQStatus = q:Paragraph({ Body = "Status : -" })
     q:Button({ Title = "Read Board Now", Callback = function()
         Features.EventQuestScan()
