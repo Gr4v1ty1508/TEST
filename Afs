@@ -3734,14 +3734,18 @@ function Features.EventQuestProgress()
 end
 -- seconds left before the next set of quests (0 = quests are open). After all quests are done
 -- the board shows "0:01:59:43" (2 h, TeamEventInfo.CooldownTimer) and rolls don't count then.
--- Read from the save (TeamEventData.QuestTimer = when it ends) and from the board's Timer text.
+-- Read from the save (TeamEventData.QuestTimer + CooldownTimer) and from the board's Timer text.
 function Features.EventQuestCooldown()
     local left = 0
     pcall(function()
+        -- QuestTimer = when the last quest was finished (0 = never); the new quests come
+        -- CooldownTimer (7200 s) later. Seen: QuestTimer 1791140914, board "0:01:53:19".
         local ted = Data.StoreData().TeamEventData
+        local info = Data.Module("TeamEventInfo") or {}
         local t = tonumber(ted.QuestTimer) or 0
+        local cdLen = tonumber(info.CooldownTimer) or 7200
         local now = workspace:GetServerTimeNow()
-        if t > now and t - now < 86400 then left = t - now end
+        if t > 0 and t + cdLen > now then left = math.min(t + cdLen - now, cdLen) end
     end)
     pcall(function()
         local timer = Data.MainGui().TeamEvent.Quests.Timer
