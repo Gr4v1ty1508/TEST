@@ -5473,6 +5473,11 @@ end)
 
 -- auto load this account's config, then auto save every 3 s when something changed
 pcall(function() Window:LoadConfig() end)
+-- the pets picked for Auto Passive / Auto Lunar are NOT kept between games: start empty every join
+for _, flag in ipairs({ "PassivePets", "EQPets" }) do
+    local el = Flags[flag]
+    if el then pcall(el.Set, el, {}, true) end
+end
 for _, fn in ipairs(Refreshers) do pcall(fn) end
 
 -- auto update: every 30 s compare the world list with what the dropdowns show;
