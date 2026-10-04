@@ -4932,12 +4932,17 @@ do
         "[-] If your ping > 500ms use 0.8 - 1s to keep your passive safe.\n" ..
         "[-] Fewer pets selected = better performance." })
     local pets = p:Dropdown({ Title = "Select Pets To Roll", Items = Data.Pets(), Multi = true, Flag = "PassivePets" })
-    p:Button({ Title = "Refresh Pets", Callback = function()
+    Features.PetDrops = Features.PetDrops or {}
+    table.insert(Features.PetDrops, pets)
+    -- one refresh for every pet list (Auto Reroll Passive + Lunar vs Solar), keeps what was picked
+    function Features.RefreshPetLists(silent)
         Data.Inventory(true)
         local list = Data.Pets()
-        pets:Refresh(list)
-        Util.Notify(#list .. " pets ( equipped + inventory )")
-    end })
+        for _, d in ipairs(Features.PetDrops) do pcall(d.Refresh, d, list) end
+        if not silent then Util.Notify(#list .. " pets ( equipped + inventory )") end
+        return list
+    end
+    p:Button({ Title = "Refresh Pets", Callback = function() Features.RefreshPetLists() end })
     local names = Data.Passives()
     p:Dropdown({ Title = "Select Passive To Roll", Items = names, Multi = true, Flag = "PassiveNames" })
     p:Dropdown({ Title = "Select Passive Rarity", Items = Data.PassiveRarities(), Multi = true, Flag = "PassiveRarity" })
@@ -4969,6 +4974,8 @@ do
     local info = Data.Module("TeamEventInfo")
     for _, key in ipairs(info and info.QuestOrder or {}) do keys[#keys + 1] = key end
     local qpet = q:Dropdown({ Title = "Pet To Reroll", Items = Data.Pets(), Flag = "EQPet" })
+    table.insert(Features.PetDrops, qpet)
+    q:Button({ Title = "Refresh Pets", Callback = function() Features.RefreshPetLists() end })
     q:Dropdown({ Title = "Slot", Items = { "1", "2", "3" }, Default = "1", Required = true, Flag = "EQSlot" })
     local events = {}
     for _, m in ipairs(Data.PassiveMachines()) do if m ~= "Normal" and m ~= "Requiem" then events[#events + 1] = m end end
@@ -4982,7 +4989,13 @@ do
         Features.EQStatus:Set(Features.EventQuestStatus())
     end })
     q:Toggle({ Title = "Auto Lunar vs Solar Quests", Flag = "AutoEventQuests" })
-    Refreshers[#Refreshers + 1] = function() qpet:Refresh(Data.Pets()) end
+    -- equip / unequip a pet -> both lists update by themselves
+    local petsFolder = LP:FindFirstChild("Pets")
+    if petsFolder then
+        local function soon() task.delay(1, function() pcall(Features.RefreshPetLists, true) end) end
+        track(petsFolder.ChildAdded:Connect(soon))
+        track(petsFolder.ChildRemoved:Connect(soon))
+    end
 end
 
 -- SETTINGS -----------------------------------------------------------------------------------------
