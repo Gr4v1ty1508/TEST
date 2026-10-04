@@ -188,8 +188,12 @@ local CFG = {
         OpenEgg         = { "OpenEgg",                  function(egg, amount) return { egg, amount } end },
         FusePets        = { "FeedPets",                 function(petIds) return { petIds } end },
 
-        -- seen from Yuto Hub: RollPassive(<pet UID number>, <machine = PassiveStats Category, e.g. "Frieren2026">, true, <slot>)
-        RollPassive     = { "RollPassive",              function(petId, machine, slot) return { tonumber(petId) or petId, machine, true, slot } end },
+        -- recorded from the game's own Passive Reroll window:
+        --   RollPassive(<pet UID>, <machine: PassiveCategories key, nil = Normal>, <true = "Token Reroll", nil = "Shard Reroll">, <slot>, {})
+        RollPassive     = { "RollPassive",              function(petId, machine, slot, useShards)
+            return { tonumber(petId) or petId, (machine ~= "Normal" and machine ~= "") and machine or nil,
+                (not useShards) and true or nil, slot, {} }
+        end },
         PickPassive     = { "PickedPassive",            function(petId, slot, keep) return { petId, slot, keep } end },
         TransferPassive = { "TransferAllPassives",      function(fromId, toId) return { fromId, toId } end },
 
@@ -3525,7 +3529,7 @@ function Features.Passive()
                     passiveDone[key] = true            -- already good: keep it, never roll it
                 else
                     passiveRolls[key] = (passiveRolls[key] or 0) + 1
-                    Net.Call("RollPassive", id, machine, slot)
+                    Net.Call("RollPassive", id, machine, slot, F("PassiveMethod") == "Shard")
                     sent[#sent + 1] = { label = label, id = id, slot = slot, key = key }
                     break                              -- one slot per pet per round
                 end
@@ -3555,6 +3559,137 @@ function Features.Passive()
     end
     if PassiveStatus then PassiveStatus:Set(Features.PassiveStatusText()) end
 end
+-- LUNAR VS SOLAR QUESTS --------------------------------------------------------------------------
+-- Modules.TeamEventInfo (EventId "LunarSolar2026"): 9 passive quests, labels in QuestLabels,
+-- goals in Targets. Progress is read from the event board in PlayerGui (each row: the label
+-- text + a "12/2000" text next to it), so the board has to be opened once.
+-- Every quest is done by rerolling ONE pet / slot the player picks:
+--   Normal / Divine quests -> machine + currency that move the most unfinished quests at once
+--   Spend ... Shards -> "Shard Reroll", Spend ... Tokens -> "Token Reroll"
+do
+local EQ = { rows = {}, scannedAt = -999 }
+local function eqNumber(t)
+    if not t then return nil end
+    local n, suf = string.match(string.gsub(t, ",", ""), "^%s*([%d%.]+)%s*([KkMm]?)%s*$")
+    n = tonumber(n)
+    if not n then return nil end
+    if suf == "K" or suf == "k" then n = n * 1e3 elseif suf == "M" or suf == "m" then n = n * 1e6 end
+    return n
+end
+local function eqPattern(fmt)
+    local esc = string.gsub(fmt, "[%(%)%.%+%-%*%?%[%]%^%$]", "%%%0")
+    esc = string.gsub(esc, "%%s", "[%%d,%%.]+[KkMm]?")
+    return "^%s*" .. esc .. "%s*$"
+end
+function Features.EventQuestScan()
+    local info = Data.Module("TeamEventInfo")
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not (info and info.QuestLabels and pg) then return false end
+    local pats = {}
+    for key, fmt in pairs(info.QuestLabels) do pats[key] = eqPattern(fmt) end
+    local rows = {}
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("TextLabel") and d.Text ~= "" then
+            for key, pat in pairs(pats) do
+                if not rows[key] and string.find(d.Text, pat) then
+                    -- the "x/y" text is in the same row (siblings, or one level down)
+                    local row, prog = d.Parent, nil
+                    for _, c in ipairs(row and row:GetDescendants() or {}) do
+                        if c:IsA("TextLabel") and c ~= d and string.find(c.Text, "^%s*[%d,%.]+[KkMm]?%s*/%s*[%d,%.]+[KkMm]?%s*$") then prog = c break end
+                    end
+                    if prog then rows[key] = { title = d, progress = prog } end
+                end
+            end
+        end
+    end
+    EQ.rows, EQ.scannedAt = rows, os.clock()
+    return next(rows) ~= nil
+end
+-- key -> { cur, goal } (nil when the board isn't loaded)
+function Features.EventQuestProgress()
+    local alive = false
+    for _, r in pairs(EQ.rows) do if r.progress.Parent then alive = true break end end
+    if not alive and os.clock() - EQ.scannedAt > 10 then Features.EventQuestScan() end
+    local out = {}
+    for key, r in pairs(EQ.rows) do
+        if r.progress.Parent then
+            local a, b = string.match(r.progress.Text, "^%s*(.-)%s*/%s*(.-)%s*$")
+            local cur, goal = eqNumber(a), eqNumber(b)
+            if cur and goal then out[key] = { cur = cur, goal = goal } end
+        end
+    end
+    return next(out) and out or nil
+end
+-- which quests one reroll moves: machine "Normal" / "Event" / "Requiem", shards = true/false
+local EQ_MOVES = {
+    NormalPassives       = function(m) return m == "Normal" end,
+    NormalDivinePassives = function(m) return m == "Normal" end,
+    EventPassives        = function(m) return m == "Event" end,
+    EventDivinePassives  = function(m) return m == "Event" end,
+    DivinePassives       = function() return true end,
+    EventShards          = function(m, sh) return m == "Event" and sh end,
+    EventTokens          = function(m, sh) return m == "Event" and not sh end,
+    WorldShards          = function(m, sh) return m == "Normal" and sh end,
+    RequiemTokens        = function(m, sh) return m == "Requiem" and not sh end,
+}
+local EQ_CHOICES = {
+    { "Normal", true }, { "Normal", false }, { "Event", true }, { "Event", false }, { "Requiem", false },
+}
+function Features.EventQuestStatus()
+    local info = Data.Module("TeamEventInfo")
+    local prog = Features.EventQuestProgress()
+    local lines = {}
+    if not info then return "TeamEventInfo module not found" end
+    if not prog then return "Open the Lunar vs Solar quest board once so the hub can read it." end
+    for _, key in ipairs(info.QuestOrder or {}) do
+        local q = prog[key]
+        local fmt = (info.QuestLabels or {})[key] or key
+        local goal = q and q.goal or (info.Targets or {})[key] or 0
+        local text = string.format(fmt, tostring(goal))
+        lines[#lines + 1] = (q and q.cur >= q.goal and "[done] " or "[ ] ") .. text .. "  " .. (q and (q.cur .. "/" .. q.goal) or "?")
+    end
+    return table.concat(lines, "\n")
+end
+function Features.EventQuests()
+    local label = F("EQPet")
+    if type(label) ~= "string" or label == "" then
+        if Util.Every("eq-pet", 30) then Util.Notify("Event Quests: pick the pet to reroll first") end
+        return
+    end
+    local prog = Features.EventQuestProgress()
+    if not prog then
+        if Util.Every("eq-board", 30) then Util.Notify("Event Quests: open the Lunar vs Solar quest board once") end
+        return
+    end
+    local wanted = F("EQQuests") or {}
+    local open = {}
+    for key, q in pairs(prog) do
+        if q.cur < q.goal and (not next(wanted) or wanted[key]) then open[key] = true end
+    end
+    if not next(open) then
+        Flags.AutoEventQuests:Set(false)
+        Util.Notify("All selected Lunar vs Solar quests are done")
+        return
+    end
+    -- the machine + currency that moves the most unfinished quests
+    local best, bestN
+    for _, c in ipairs(EQ_CHOICES) do
+        local n = 0
+        for key in pairs(open) do if EQ_MOVES[key] and EQ_MOVES[key](c[1], c[2]) then n = n + 1 end end
+        if n > 0 and (not bestN or n > bestN) then best, bestN = c, n end
+    end
+    if not best then return end
+    local machine = best[1] == "Event" and (F("EQEventMachine") or "Frieren2026") or best[1]
+    local slot = tonumber(F("EQSlot") or "1") or 1
+    Net.Call("RollPassive", Data.PetId(label), machine, slot, best[2])
+    Features.EQLast = machine .. (best[2] and " shard" or " token") .. " reroll"
+    task.wait(F("PassiveDelay") or 0.5)
+    if Features.EQStatus and Util.Every("eq-status", 2) then
+        pcall(function() Features.EQStatus:Set("Rolling : " .. Features.EQLast .. "\n" .. Features.EventQuestStatus()) end)
+    end
+end
+end
+
 function Features.ResetPassive() passiveDone, passiveRolls, warnedRead = {}, {}, false end
 
 -- SHOP ------------------------------------------------------------------------------------------
@@ -4778,6 +4913,7 @@ do
     p:Dropdown({ Title = "Select Passive Slot", Items = { "1", "2", "3" }, Multi = true, Default = { ["1"] = true }, Flag = "PassiveSlots" })
     p:Dropdown({ Title = "Select Passive Reroll Mode", Items = { "Keep Selected Rarity", "Keep Selected Passive" }, Default = "Keep Selected Passive", Required = true, Flag = "PassiveMode" })
     p:Dropdown({ Title = "Select Passive Machine", Items = Data.PassiveMachines(), Default = "Normal", Required = true, Flag = "PassiveMachine" })
+    p:Dropdown({ Title = "Reroll With", Items = CFG.RerollMethods, Default = "Token", Required = true, Flag = "PassiveMethod" })
     p:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 2, Default = 0.5, Decimals = 1, Flag = "PassiveDelay" })
     p:Toggle({ Title = "Auto Reroll Passive !", Flag = "AutoPassive", Callback = function(v) if v then Features.ResetPassive() end end })
     if #names == 0 then
@@ -4790,6 +4926,32 @@ do
 
     local s = TPassive:Card(nil, "Right")
     PassiveStatus = s:Paragraph({ Body = "Status : -" })
+end
+
+do
+    -- Lunar vs Solar passive quests
+    local q = TPassive:Card("Auto Lunar vs Solar Quests", "Right")
+    q:Paragraph({ Body = "[-] Open the Lunar vs Solar quest board once (the hub reads the progress from it).\n"
+        .. "[-] Only the pet / slot picked here is rerolled - use a pet whose passive you don't need.\n"
+        .. "[-] Uses Normal / Event / Requiem rerolls with tokens or shards, whatever finishes the most quests." })
+    local labels, keys = {}, {}
+    local info = Data.Module("TeamEventInfo")
+    for _, key in ipairs(info and info.QuestOrder or {}) do keys[#keys + 1] = key end
+    local qpet = q:Dropdown({ Title = "Pet To Reroll", Items = Data.Pets(), Flag = "EQPet" })
+    q:Dropdown({ Title = "Slot", Items = { "1", "2", "3" }, Default = "1", Required = true, Flag = "EQSlot" })
+    local events = {}
+    for _, m in ipairs(Data.PassiveMachines()) do if m ~= "Normal" and m ~= "Requiem" then events[#events + 1] = m end end
+    q:Dropdown({ Title = "Event Machine", Items = events, Default = events[#events] or "Frieren2026", Required = true, Flag = "EQEventMachine" })
+    local def = {}
+    for _, k in ipairs(keys) do def[k] = true end
+    q:Dropdown({ Title = "Quests To Do", Items = keys, Multi = true, Default = def, Flag = "EQQuests" })
+    Features.EQStatus = q:Paragraph({ Body = "Status : -" })
+    q:Button({ Title = "Read Board Now", Callback = function()
+        Features.EventQuestScan()
+        Features.EQStatus:Set(Features.EventQuestStatus())
+    end })
+    q:Toggle({ Title = "Auto Lunar vs Solar Quests", Flag = "AutoEventQuests" })
+    Refreshers[#Refreshers + 1] = function() qpet:Refresh(Data.Pets()) end
 end
 
 -- SETTINGS -----------------------------------------------------------------------------------------
@@ -5069,6 +5231,7 @@ loop(0.31, function() if On("AttackUlt") then Features.Ult() end end)
 loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") then Features.Hatch() end end)
 loop(3, function() if On("AutoFuse") then Features.Fuse() end end)
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
+loop(0.05, function() if On("AutoEventQuests") then Features.EventQuests() else task.wait(0.5) end end)
 loop(2, function() if PassiveStatus then PassiveStatus:Set(Features.PassiveStatusText()) end end)
 
 -- extras

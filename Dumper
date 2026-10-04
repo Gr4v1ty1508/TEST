@@ -400,6 +400,11 @@ local function dumpStore()
     if not (m and m:IsA("ModuleScript")) then save("store.txt", "(LocalDairebStore not found)") return end
     local ok, st = pcall(require, m)
     if not ok or type(st) ~= "table" or type(st.GetData) ~= "function" then save("store.txt", "(can't require: " .. tostring(st) .. ")") return end
+    -- the store's own code: GetData needs the NAME of a loaded store, the code shows which
+    if decompile then
+        local okd, src = pcall(decompile, m)
+        if okd and type(src) == "string" then save("store_source.lua", src) end
+    end
     local LPl = game:GetService("Players").LocalPlayer
     local lines = {}
     for _, fn in ipairs({ "IsEnabled", "GetDataStoreConnected" }) do
