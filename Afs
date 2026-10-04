@@ -826,16 +826,16 @@ function Data.PetUID(model)
 end
 function Data.PetLabel(model)
     local uid = Data.PetUID(model)
-    return uid and (model.Name .. " [" .. uid .. "]") or model.Name
+    return uid and (model.Name .. " | [" .. uid .. "]") or model.Name
 end
 function Data.PetId(label) return string.match(label, "%[(.-)%]$") or label end
 function Data.Pets()
     local out, seen = {}, {}
-    -- the inventory first (it has the display names: "(Lucky) Femto [866728]"),
+    -- the inventory first (it has the display names: "Lucky | Femto | [866728]"),
     -- then equipped pets it doesn't list (Data.Inventory is defined further down)
     if Data.Inventory then
         for _, p in ipairs(Data.Inventory()) do
-            if not seen[p.id] then seen[p.id] = true out[#out + 1] = p.name .. " [" .. p.id .. "]" end
+            if not seen[p.id] then seen[p.id] = true out[#out + 1] = p.name .. " | [" .. p.id .. "]" end
         end
     end
     for _, m in ipairs(Data.EquippedPets()) do
@@ -3341,7 +3341,7 @@ local function scanPets(root, out, index)
         local id = fieldOf(t, PET_ID_KEYS) or (type(keyId) == "number" and keyId or tonumber(keyId))
         if type(name) == "string" and id ~= nil and (t.Passives ~= nil or t.Level ~= nil or t.UID ~= nil or t.Shiny ~= nil) then
             local nick = t.CustomName
-            local rec = { id = tostring(id), name = (type(nick) == "string" and nick ~= "" and nick ~= name) and ("(" .. nick .. ") " .. name) or name,
+            local rec = { id = tostring(id), name = (type(nick) == "string" and nick ~= "" and nick ~= name) and (nick .. " | " .. name) or name,
                 type = name, rarity = fieldOf(t, { "Rarity", "Tier" }),
                 shiny = fieldOf(t, { "Shiny", "IsShiny" }), locked = fieldOf(t, { "Locked", "Lock", "IsLocked" }),
                 equipped = fieldOf(t, { "Equipped", "IsEquipped" }), raw = t }
