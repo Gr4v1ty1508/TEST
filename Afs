@@ -3314,7 +3314,7 @@ end
 function Data.PetTypes()
     local set = {}
     for _, m in ipairs(Data.EquippedPets()) do set[m.Name] = true end
-    for _, p in ipairs(Data.Inventory()) do if p.name then set[p.name] = true end end
+    for _, p in ipairs(Data.Inventory()) do local t = p.type or p.name if t then set[t] = true end end
     return Util.SetToList(set)
 end
 
@@ -3322,8 +3322,10 @@ end
 -- asked once a minute. Whatever shape it answers with, pets are read as
 -- { id, name, rarity, shiny, locked, equipped } when those fields can be found.
 local inventoryCache, inventoryAt = {}, -999
-local PET_NAME_KEYS = { "Name", "PetName", "Pet", "Type", "Id" }
-local PET_ID_KEYS = { "UID", "Uid", "uid", "PetId", "ID" }
+-- save data (GetData("GameData").Pets): { UID = 866728, PetId = "Femto", CustomName = "Lucky",
+--   Passives = { "EnchantingFairy", ... }, Shiny, Void, Locked, Level }
+local PET_NAME_KEYS = { "PetId", "Name", "PetName", "Pet", "Type" }
+local PET_ID_KEYS = { "UID", "Uid", "uid", "ID" }
 local function fieldOf(t, names)
     for _, n in ipairs(names) do if t[n] ~= nil then return t[n] end end
     return nil
@@ -3337,7 +3339,9 @@ local function scanPets(root, out, index)
         local name = fieldOf(t, PET_NAME_KEYS)
         local id = fieldOf(t, PET_ID_KEYS) or (type(keyId) == "number" and keyId or tonumber(keyId))
         if type(name) == "string" and id ~= nil and (t.Passives ~= nil or t.Level ~= nil or t.UID ~= nil or t.Shiny ~= nil) then
-            local rec = { id = tostring(id), name = name, rarity = fieldOf(t, { "Rarity", "Tier" }),
+            local nick = t.CustomName
+            local rec = { id = tostring(id), name = (type(nick) == "string" and nick ~= "" and nick ~= name) and (name .. " (" .. nick .. ")") or name,
+                type = name, rarity = fieldOf(t, { "Rarity", "Tier" }),
                 shiny = fieldOf(t, { "Shiny", "IsShiny" }), locked = fieldOf(t, { "Locked", "Lock", "IsLocked" }),
                 equipped = fieldOf(t, { "Equipped", "IsEquipped" }), raw = t }
             if not index[rec.id] then out[#out + 1] = rec index[rec.id] = rec end
@@ -3354,7 +3358,10 @@ end
 function Data.StoreData()
     local st = Data.Module("LocalDairebStore")
     if not st or type(st.GetData) ~= "function" then return nil end
-    -- GetData(<store name>): the names are the keys of the stores table in GetData's upvalues
+    -- the client's save is the "GameData" store (Pets, EquippedPets, TeamEventData, ...)
+    local ok, r = pcall(st.GetData, "GameData")
+    if ok and type(r) == "table" then return r end
+    -- other builds: the names are the keys of the stores table in GetData's upvalues
     local getup = (debug and debug.getupvalues) or getupvalues
     local tries = {}
     if getup then
@@ -3367,15 +3374,14 @@ function Data.StoreData()
             end
         end
     end
-    for _, args in ipairs({ {}, { LP }, { LP.UserId }, { "PlayerData" }, { "Data" } }) do tries[#tries + 1] = args end
     local best, bestN = nil, 0
     for _, args in ipairs(tries) do
-        local ok, r = pcall(st.GetData, table.unpack(args))
-        if ok and type(r) == "table" and next(r) then
+        local ok2, r2 = pcall(st.GetData, table.unpack(args))
+        if ok2 and type(r2) == "table" and next(r2) then
             local n = 0
-            pcall(function() local o, i = {}, {} scanPets(r, o, i) n = #o end)
-            if n > bestN then best, bestN = r, n end
-            if not best then best = r end
+            pcall(function() local o, i = {}, {} scanPets(r2, o, i) n = #o end)
+            if n > bestN then best, bestN = r2, n end
+            if not best then best = r2 end
         end
     end
     return best
@@ -3387,7 +3393,16 @@ function Data.Inventory(force)
     local out, index = {}, {}
     -- 1. the client's copy of your save (all pets)
     local store = Data.StoreData()
-    if store then pcall(scanPets, store, out, index) end
+    if store then
+        pcall(scanPets, store, out, index)
+        -- GameData.EquippedPets = { uid, uid, ... }
+        if type(store.EquippedPets) == "table" then
+            for _, uid in pairs(store.EquippedPets) do
+                local rec = index[tostring(uid)]
+                if rec then rec.equipped = true end
+            end
+        end
+    end
     -- 2. GetPetData remote
     if #out == 0 then
         local ok, reply = pcall(Net.Raw, "GetPetData", {})
@@ -3432,7 +3447,7 @@ function Features.Fuse()
     -- only pets from the inventory list (GetPetData); equipped pets are never fused
     local ids = {}
     for _, p in ipairs(Data.Inventory()) do
-        if types[p.name] and not p.locked and not p.equipped
+        if types[p.type or p.name] and not p.locked and not p.equipped
            and (not next(rarities) or p.rarity == nil or rarities[tostring(p.rarity)])
            and (On("FuseShiny") or not p.shiny) then
             ids[#ids + 1] = p.id
@@ -3634,6 +3649,20 @@ function Features.EventQuestScan()
 end
 -- key -> { cur, goal } (nil when the board isn't loaded)
 function Features.EventQuestProgress()
+    -- 1. the save: GameData.TeamEventData.QuestsFinished = { NormalPassives = 3, ... } (= the board's "3/2000")
+    local info = Data.Module("TeamEventInfo")
+    local store = Data.StoreData and Data.StoreData()
+    local ted = store and store.TeamEventData
+    if type(ted) == "table" and type(ted.QuestsFinished) == "table" and info and type(info.Targets) == "table"
+       and (not info.EventId or not ted.EventId or ted.EventId == info.EventId) then
+        local out = {}
+        for key, goal in pairs(info.Targets) do
+            local goalN = tonumber(goal)
+            if goalN then out[key] = { cur = tonumber(ted.QuestsFinished[key]) or 0, goal = goalN } end
+        end
+        if next(out) then return out end
+    end
+    -- 2. the board in PlayerGui (MainGui.TeamEvent.Quests.Frame.<Quest>.Progress)
     local alive = false
     for _, r in pairs(EQ.rows) do if r.progress.Parent then alive = true break end end
     if not alive and os.clock() - EQ.scannedAt > 10 then
