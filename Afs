@@ -824,9 +824,17 @@ function Data.PetUID(model)
     local v = Data.PetValue(model, { "UID", "Uid", "Id", "ID", "PetId", "PetID" })
     return v ~= nil and tostring(v) or nil
 end
+-- in-game name of a pet type: PetStats[PetId].DisplayName ("DBZ2026BlackFrieza" -> "Black Frieza")
+function Data.PetDisplay(petId)
+    local ps = Data.Module("PetStats")
+    local st = type(ps) == "table" and ps[petId]
+    local dn = type(st) == "table" and st.DisplayName
+    return (type(dn) == "string" and dn ~= "") and dn or tostring(petId)
+end
 function Data.PetLabel(model)
     local uid = Data.PetUID(model)
-    return uid and (model.Name .. " | [" .. uid .. "]") or model.Name
+    local shown = Data.PetDisplay(model.Name)
+    return uid and (shown .. " | [" .. uid .. "]") or shown
 end
 function Data.PetId(label) return string.match(label, "%[(.-)%]$") or label end
 function Data.Pets()
@@ -3340,9 +3348,10 @@ local function scanPets(root, out, index)
         local name = fieldOf(t, PET_NAME_KEYS)
         local id = fieldOf(t, PET_ID_KEYS) or (type(keyId) == "number" and keyId or tonumber(keyId))
         if type(name) == "string" and id ~= nil and (t.Passives ~= nil or t.Level ~= nil or t.UID ~= nil or t.Shiny ~= nil) then
-            local nick = t.CustomName
-            local rec = { id = tostring(id), name = (type(nick) == "string" and nick ~= "" and nick ~= name) and (nick .. " | " .. name) or name,
-                type = name, rarity = fieldOf(t, { "Rarity", "Tier" }),
+            local nick, shown = t.CustomName, Data.PetDisplay(name)
+            local stats = (Data.Module("PetStats") or {})[name]
+            local rec = { id = tostring(id), name = (type(nick) == "string" and nick ~= "" and nick ~= shown) and (nick .. " | " .. shown) or shown,
+                type = name, rarity = fieldOf(t, { "Rarity", "Tier" }) or (type(stats) == "table" and stats.Rarity or nil),
                 shiny = fieldOf(t, { "Shiny", "IsShiny" }), locked = fieldOf(t, { "Locked", "Lock", "IsLocked" }),
                 equipped = fieldOf(t, { "Equipped", "IsEquipped" }), raw = t }
             if not index[rec.id] then out[#out + 1] = rec index[rec.id] = rec end
