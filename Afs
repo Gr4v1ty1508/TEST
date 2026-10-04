@@ -3732,6 +3732,30 @@ function Features.EventQuestProgress()
     end
     return next(out) and out or nil
 end
+-- seconds left before the next set of quests (0 = quests are open). After all quests are done
+-- the board shows "0:01:59:43" (2 h, TeamEventInfo.CooldownTimer) and rolls don't count then.
+-- Read from the save (TeamEventData.QuestTimer = when it ends) and from the board's Timer text.
+function Features.EventQuestCooldown()
+    local left = 0
+    pcall(function()
+        local ted = Data.StoreData().TeamEventData
+        local t = tonumber(ted.QuestTimer) or 0
+        local now = workspace:GetServerTimeNow()
+        if t > now and t - now < 86400 then left = t - now end
+    end)
+    pcall(function()
+        local timer = Data.MainGui().TeamEvent.Quests.Timer
+        -- "Quest Timer: 00:00:00" (open) or "0:01:59:43" (d:hh:mm:ss) / "01:59:43"
+        local parts = {}
+        for n in string.gmatch(timer.Text, "%d+") do parts[#parts + 1] = tonumber(n) end
+        local secs, any = 0, #parts > 0
+        for i, n in ipairs(parts) do
+            secs = (i == 2 and #parts == 4) and (secs * 24 + n) or (secs * 60 + n)
+        end
+        if any and secs > left then left = secs end
+    end)
+    return math.floor(left)
+end
 -- which quests one reroll moves: machine "Normal" / "Event" / "Requiem", shards = true/false
 local EQ_MOVES = {
     NormalPassives       = function(m) return m == "Normal" end,
@@ -3768,6 +3792,19 @@ function Features.EventQuests()
     if #pets == 0 and type(F("EQPet")) == "string" and F("EQPet") ~= "" then pets = { F("EQPet") } end
     if #pets == 0 then
         if Util.Every("eq-pet", 30) then Util.Notify("Event Quests: pick the pets to reroll first") end
+        return
+    end
+    -- all quests done -> 2 h cooldown: don't roll (it wouldn't count), leave the character to the
+    -- other features and start again by itself when the new quests open
+    local cd = Features.EventQuestCooldown()
+    if cd > 0 then
+        if Util.Every("eq-cd", 600) then
+            Util.Notify(string.format("Lunar vs Solar: new quests in %d:%02d - doing other things meanwhile", cd // 3600, (cd % 3600) // 60))
+        end
+        if Features.EQStatus and Util.Every("eq-status", 5) then
+            pcall(function() Features.EQStatus:Set(string.format("Cooldown : %d:%02d:%02d (new quests after this)", cd // 3600, (cd % 3600) // 60, cd % 60)) end)
+        end
+        task.wait(2)
         return
     end
     local prog = Features.EventQuestProgress()
