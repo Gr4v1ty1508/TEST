@@ -3322,17 +3322,6 @@ end
 -- asked once a minute. Whatever shape it answers with, pets are read as
 -- { id, name, rarity, shiny, locked, equipped } when those fields can be found.
 local inventoryCache, inventoryAt = {}, -999
--- the player's whole save as the client sees it: Modules.LocalDairebStore.GetData()
--- (this is where every pet in the inventory is, not only the equipped ones)
-function Data.StoreData()
-    local st = Data.Module("LocalDairebStore")
-    if not st or type(st.GetData) ~= "function" then return nil end
-    for _, args in ipairs({ {}, { st }, { LP }, { st, LP }, { LP.UserId }, { st, LP.UserId } }) do
-        local ok, r = pcall(st.GetData, table.unpack(args))
-        if ok and type(r) == "table" and next(r) then return r end
-    end
-    return nil
-end
 local PET_NAME_KEYS = { "Name", "PetName", "Pet", "Type", "Id" }
 local PET_ID_KEYS = { "UID", "Uid", "uid", "PetId", "ID" }
 local function fieldOf(t, names)
@@ -3359,6 +3348,37 @@ local function scanPets(root, out, index)
     local pets = root.Pets or root.pets or root.PetInventory or root.Inventory
     scan(type(pets) == "table" and pets or root, nil, 0)
     if #out == 0 and type(pets) == "table" then scan(root, nil, 0) end
+end
+-- the player's whole save as the client sees it: Modules.LocalDairebStore.GetData()
+-- (this is where every pet in the inventory is, not only the equipped ones)
+function Data.StoreData()
+    local st = Data.Module("LocalDairebStore")
+    if not st or type(st.GetData) ~= "function" then return nil end
+    -- GetData(<store name>): the names are the keys of the stores table in GetData's upvalues
+    local getup = (debug and debug.getupvalues) or getupvalues
+    local tries = {}
+    if getup then
+        for _, fn in ipairs({ st.GetData, st.IndexExists }) do
+            local okU, ups = pcall(getup, fn)
+            for _, u in pairs(okU and ups or {}) do
+                if type(u) == "table" then
+                    for k in pairs(u) do if type(k) == "string" then tries[#tries + 1] = { k } end end
+                end
+            end
+        end
+    end
+    for _, args in ipairs({ {}, { LP }, { LP.UserId }, { "PlayerData" }, { "Data" } }) do tries[#tries + 1] = args end
+    local best, bestN = nil, 0
+    for _, args in ipairs(tries) do
+        local ok, r = pcall(st.GetData, table.unpack(args))
+        if ok and type(r) == "table" and next(r) then
+            local n = 0
+            pcall(function() local o, i = {}, {} scanPets(r, o, i) n = #o end)
+            if n > bestN then best, bestN = r, n end
+            if not best then best = r end
+        end
+    end
+    return best
 end
 Data.InventoryIndex = {}
 function Data.Inventory(force)
@@ -3609,7 +3629,18 @@ end
 function Features.EventQuestProgress()
     local alive = false
     for _, r in pairs(EQ.rows) do if r.progress.Parent then alive = true break end end
-    if not alive and os.clock() - EQ.scannedAt > 10 then Features.EventQuestScan() end
+    if not alive and os.clock() - EQ.scannedAt > 10 then
+        if not Features.EventQuestScan() and Util.Every("eq-open", 20) then
+            -- board not built yet: press the game's own TeamEvent button (left menu) once
+            local mg = Data.MainGui()
+            local btn = mg and mg:FindFirstChild("TeamEvent", true)
+            if btn and btn:IsA("GuiButton") and Features.FireGui then
+                Features.FireGui(btn, { "MouseButton1Down", "MouseButton1Click", "Activated" })
+                task.wait(1.5)
+                Features.EventQuestScan()
+            end
+        end
+    end
     local out = {}
     for key, r in pairs(EQ.rows) do
         if r.progress.Parent then

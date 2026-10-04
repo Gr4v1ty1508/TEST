@@ -261,7 +261,7 @@ local function dumpGui()
     local out = {}
     local pg = LP:FindFirstChild("PlayerGui")
     for _, g in ipairs(pg and pg:GetChildren() or {}) do
-        tree(g, g.Name == "MainGui" and 5 or 2, out, "", 120)
+        tree(g, g.Name == "MainGui" and 5 or 2, out, "", 400)
     end
     save("gui.txt", out)
 end
@@ -413,8 +413,36 @@ local function dumpStore()
             lines[#lines + 1] = fn .. "() -> " .. (okf and ser(r, 2, {}, "") or ("error " .. tostring(r)))
         end
     end
-    local tries = { { "GetData()", {} }, { "GetData(store)", { st } }, { "GetData(player)", { LPl } },
-        { "GetData(store, player)", { st, LPl } }, { "GetData(userId)", { LPl.UserId } }, { "GetData(\"Pets\")", { "Pets" } } }
+    -- names of the loaded stores: GetData's upvalues hold the table of stores
+    local getup = (debug and debug.getupvalues) or getupvalues
+    local names = {}
+    if getup then
+        for _, fn in ipairs({ st.GetData, st.IndexExists, st.GetStoreProxy, st.WaitForInit }) do
+            if type(fn) == "function" then
+                local okU, ups = pcall(getup, fn)
+                for i, u in pairs(okU and ups or {}) do
+                    if type(u) == "table" then
+                        local ks = {}
+                        for k in pairs(u) do
+                            if #ks < 30 then ks[#ks + 1] = tostring(k) end
+                            if type(k) == "string" then names[k] = true end
+                        end
+                        lines[#lines + 1] = "upvalue " .. tostring(i) .. " = table { " .. table.concat(ks, ", ") .. " }"
+                    else
+                        lines[#lines + 1] = "upvalue " .. tostring(i) .. " = " .. type(u) .. " " .. tostring(u)
+                    end
+                end
+            end
+        end
+    else
+        lines[#lines + 1] = "(no getupvalues in this executor)"
+    end
+    local tries = {}
+    for n in pairs(names) do tries[#tries + 1] = { "GetData(\"" .. n .. "\")", { n } } end
+    for _, t in ipairs({ { "GetData()", {} }, { "GetData(store)", { st } }, { "GetData(player)", { LPl } },
+        { "GetData(store, player)", { st, LPl } }, { "GetData(userId)", { LPl.UserId } }, { "GetData(\"Pets\")", { "Pets" } } }) do
+        tries[#tries + 1] = t
+    end
     local res, used = nil, nil
     for _, t in ipairs(tries) do
         local done, okc, r = false, false, nil
