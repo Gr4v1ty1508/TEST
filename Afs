@@ -4359,19 +4359,31 @@ function Extras.EquipTeam(name)
 end
 function Extras.ResetTeam() currentTeam = nil Extras.TeamCheck = nil end
 -- the team's UIDs from the save (GameData.PetTeams[i] = { Name, UIDs = { ... } })
+-- (only pets you still own count: a fused / deleted pet can't go on)
 function Extras.TeamUIDs(name)
     local st = Data.StoreData()
+    local owned = nil
+    if st and type(st.Pets) == "table" then
+        owned = {}
+        for _, p in pairs(st.Pets) do if type(p) == "table" and p.UID then owned[tostring(p.UID)] = true end end
+    end
     for _, t in pairs(st and type(st.PetTeams) == "table" and st.PetTeams or {}) do
         if type(t) == "table" and t.Name == name and type(t.UIDs) == "table" then
             local set, n = {}, 0
-            for _, uid in pairs(t.UIDs) do set[tostring(uid)] = true n = n + 1 end
+            for _, uid in pairs(t.UIDs) do
+                local k = tostring(uid)
+                set[k] = true
+                if not owned or owned[k] then n = n + 1 end
+            end
             return set, n
         end
     end
     return nil, 0
 end
--- did the team really go on? every equipped pet belongs to the team, and as many pets are on
--- as the team has (or as were on before, when the team is bigger than your slots).
+-- did the team really go on? every equipped pet belongs to the team, and every pet of the team
+-- is on. A team is saved with its own Title, and "Mystical Oracle" gives +1 pet slot
+-- (TitleData EquipAmount): teams saved with it hold 23 pets, the others 22 - when the pets go
+-- on before the title, the 23rd is missing and the second press puts it on.
 -- Not right -> press the team again (2 more tries), then tell the player.
 function Extras.CheckTeam()
     local c = Extras.TeamCheck
@@ -4383,7 +4395,7 @@ function Extras.CheckTeam()
         local uid = Data.PetUID(m)
         if uid and not set[uid] then wrong = wrong + 1 end
     end
-    local want = math.min(teamN, math.max(c.before, 1))
+    local want = teamN
     if wrong == 0 and #pets >= want then
         Extras.TeamCheck = nil
         return true
