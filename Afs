@@ -3545,7 +3545,14 @@ function Features.Passive()
             local key = id .. "#" .. slot
             if not passiveDone[key] then
                 local now = readPassive(id, slot)
-                if passiveWanted(now) then
+                if now == nil and not Data.PetObject(id) then
+                    -- not equipped and its passive can't be read: rolling blind could roll
+                    -- straight past the passive you want, so this pet is skipped
+                    if Util.Every("passive-blind-" .. key, 30) then
+                        Util.Notify(label .. ": can't read its passive - equip it to roll it")
+                    end
+                    break
+                elseif passiveWanted(now) then
                     passiveDone[key] = true            -- already good: keep it, never roll it
                 else
                     passiveRolls[key] = (passiveRolls[key] or 0) + 1
