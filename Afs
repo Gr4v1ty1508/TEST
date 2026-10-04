@@ -320,7 +320,7 @@ end
 -- GravityHub/AFS/learned_calls.json and reused, so the script sends what the
 -- game really expects instead of a guess.
 local Learn = { data = nil }
-Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true }
+Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true, TrialShopPurchase = true, UpgradePotion = true }
 Learn.File = CFG.ConfigFolder .. "/learned_calls.json"
 function Learn.Load()
     if Learn.data then return Learn.data end
@@ -3860,6 +3860,218 @@ function Features.EventQuests()
 end
 end
 
+-- MEGA BOOST CRAFTER --------------------------------------------------------------------------------
+-- Potion Master (Worlds.Frieren.MegaBooster): 50 Super boosts -> 1 Mega boost (Remote UpgradePotion).
+-- Super boosts come from the Time Trial shop (Remote TrialShopPurchase, paid with Items.TowerShard).
+-- Each item stacks to 500 (ItemStats.ItemLimit). Per selected Mega boost, until it has 500:
+--   Super < 50 -> buy as many Supers as fit (500 cap / shards)  ->  craft while Super >= 50.
+-- The exact arguments are learned from the game when you buy / craft once by hand
+-- (learned_calls.json); until then a few forms are tried and the one that changes your items is kept.
+do
+local MB = { buyForm = nil, craftForm = nil, tried = {} }
+local MEGA_FALLBACK = {
+    { key = "MegaDmg", form = "Dmg", name = "Mega DMG Boost" }, { key = "MegaDrops", form = "Drops", name = "Mega Drop Boost" },
+    { key = "MegaLuck", form = "Luck", name = "Mega Luck Boost" }, { key = "MegaPassiveLuck", form = "Passive", name = "Mega Passive Luck Boost" },
+    { key = "MegaTime", form = "Time", name = "Mega Time Boost" }, { key = "MegaXp", form = "Xp", name = "Mega XP Boost" },
+    { key = "MegaYen", form = "Yen", name = "Mega Yen Boost" },
+}
+function Features.MegaTypes()
+    local bd, shop = Data.Module("BoostData"), Data.Module("TimeTrialShop") or {}
+    local list = {}
+    if bd then
+        for key, v in pairs(bd) do
+            if type(v) == "table" and v.BasicForm and string.sub(key, 1, 4) == "Mega" then
+                list[#list + 1] = { key = key, form = v.BasicForm, name = v.DisplayName or key }
+            end
+        end
+    end
+    if #list == 0 then list = MEGA_FALLBACK end
+    local out = {}
+    for _, m in ipairs(list) do
+        local base = string.sub(m.key, 5)                         -- "Xp", "PassiveLuck"
+        local src = shop["Super" .. base .. "Boost"] and ("Super" .. base .. "Boost")
+            or (shop[base .. "Boost"] and (base .. "Boost")) or ("Super" .. base .. "Boost")
+        local price = type(shop[src]) == "table" and tonumber(shop[src].Price) or nil
+        out[#out + 1] = { key = m.key, form = m.form, name = m.name, mega = m.key .. "Boost", src = src, price = price }
+    end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    return out
+end
+function Features.MegaNames()
+    local n = {}
+    for _, m in ipairs(Features.MegaTypes()) do n[#n + 1] = m.name end
+    return n
+end
+local function itemCount(name)
+    local st = Data.StoreData()
+    local it = st and st.Items
+    return type(it) == "table" and (tonumber(it[name]) or 0) or 0
+end
+local function itemLimit(name)
+    local is = Data.Module("ItemStats")
+    local v = type(is) == "table" and type(is[name]) == "table" and tonumber(is[name].ItemLimit)
+    return v or 500
+end
+-- wait up to `t` seconds for an item count to change
+local function waitChange(name, before, t)
+    local t0 = os.clock()
+    while os.clock() - t0 < t do
+        task.wait(0.2)
+        local now = itemCount(name)
+        if now ~= before then return now - before end
+    end
+    return 0
+end
+-- learned args with the item swapped: every string arg that is one of `known` becomes the
+-- matching form for this item (same kind as the learned one), numbers become `amount`
+local function learnedArgs(remote, m, kinds, amount)
+    local args, n = Learn.Get(remote)
+    if not args then return nil end
+    for i = 1, n do
+        local a = args[i]
+        if type(a) == "string" then
+            local done = false
+            for _, getter in pairs(kinds) do
+                for _, other in ipairs(Features.MegaTypes()) do
+                    if getter(other) == a then args[i] = getter(m) done = true break end
+                end
+                if done then break end
+            end
+        elseif type(a) == "number" and amount then
+            args[i] = amount
+        end
+    end
+    args.n = n
+    return args
+end
+local BUY_KINDS = { src = function(x) return x.src end }
+local CRAFT_KINDS = { key = function(x) return x.key end, form = function(x) return x.form end,
+    mega = function(x) return x.mega end, src = function(x) return x.src end }
+local BUY_GUESSES = { function(m, a) return { m.src, a, n = 2 } end, function(m) return { m.src, n = 1 } end }
+local CRAFT_GUESSES = {
+    function(m) return { m.key, n = 1 } end, function(m) return { m.form, n = 1 } end,
+    function(m) return { m.mega, n = 1 } end, function(m) return { m.src, n = 1 } end,
+}
+function Features.MegaBuy(m, amount)
+    local before = itemCount(m.src)
+    local learned = learnedArgs("TrialShopPurchase", m, BUY_KINDS, amount)
+    if learned then
+        Net.Raw("TrialShopPurchase", learned)
+        return waitChange(m.src, before, 3)
+    end
+    local first = MB.buyForm or 1
+    for i = first, (MB.buyForm or #BUY_GUESSES) do
+        Net.Raw("TrialShopPurchase", BUY_GUESSES[i](m, amount))
+        local got = waitChange(m.src, before, 2.5)
+        if got > 0 then MB.buyForm = i return got end
+    end
+    return 0
+end
+function Features.MegaCraftOne(m)
+    local before = itemCount(m.mega)
+    local learned = learnedArgs("UpgradePotion", m, CRAFT_KINDS, nil)
+    if learned then
+        Net.Raw("UpgradePotion", learned)
+        return waitChange(m.mega, before, 3)
+    end
+    local first = MB.craftForm or 1
+    for i = first, (MB.craftForm or #CRAFT_GUESSES) do
+        Net.Raw("UpgradePotion", CRAFT_GUESSES[i](m))
+        local got = waitChange(m.mega, before, 2.5)
+        if got > 0 then MB.craftForm = i return got end
+    end
+    return 0
+end
+-- the Potion Master stands in Worlds.Frieren (MegaBooster)
+function Features.GoPotionMaster()
+    if Util.World() ~= "Frieren" then
+        if Util.Every("mega-travel", 6) then Travel.To("Frieren") task.wait(1.5) end
+        return
+    end
+    local w = Worlds:FindFirstChild("Frieren")
+    local mdl = w and w:FindFirstChild("MegaBooster")
+    local part = mdl and mdl:FindFirstChildWhichIsA("BasePart", true)
+    local root = Util.Root()
+    if part and root and (root.Position - part.Position).Magnitude > 12 then
+        Util.MoveTo(part.CFrame * CFrame.new(0, 3, 8))
+        task.wait(0.3)
+    end
+end
+function Features.AtPotionMaster()
+    if Util.World() ~= "Frieren" then return false end
+    local w = Worlds:FindFirstChild("Frieren")
+    local mdl = w and w:FindFirstChild("MegaBooster")
+    local part = mdl and mdl:FindFirstChildWhichIsA("BasePart", true)
+    local root = Util.Root()
+    return part ~= nil and root ~= nil and (root.Position - part.Position).Magnitude < 25
+end
+function Features.MegaStatusText()
+    local lines = {}
+    local picked = F("MegaTypes") or {}
+    for _, m in ipairs(Features.MegaTypes()) do
+        if picked[m.name] then
+            local c = itemCount(m.mega)
+            lines[#lines + 1] = (c >= itemLimit(m.mega) and "[done] " or "[ ] ") .. m.name .. "  " .. c .. "/" .. itemLimit(m.mega)
+                .. "   (" .. m.src .. " " .. itemCount(m.src) .. ")"
+        end
+    end
+    lines[#lines + 1] = "Tower Shards : " .. itemCount("TowerShard")
+    return table.concat(lines, "\n")
+end
+function Features.MegaCraft()
+    local picked = F("MegaTypes") or {}
+    local shards = itemCount("TowerShard")
+    local anyOpen, craftM, buyM, buyAmt = false, nil, nil, 0
+    for _, m in ipairs(Features.MegaTypes()) do
+        local mega = itemCount(m.mega)
+        if picked[m.name] and mega < itemLimit(m.mega) then
+            anyOpen = true
+            local src = itemCount(m.src)
+            if src >= 50 then craftM = m break end
+            -- not enough Supers for one craft: buy as many as fit (500 cap, shards, what's still needed)
+            local room = math.min(itemLimit(m.src) - src, (itemLimit(m.mega) - mega) * 50 - src)
+            if m.price and m.price > 0 then room = math.min(room, math.floor(shards / m.price)) end
+            if room >= 50 - src and not buyM then buyM, buyAmt = m, room end
+        end
+    end
+    if not anyOpen then
+        Flags.AutoMegaCraft:Set(false)
+        Util.Notify("Mega Boosts: every selected boost is full")
+        return
+    end
+    if craftM then
+        local m = craftM
+        -- craft at the Potion Master
+        if On("MegaGoMaster") then
+            Features.MegaWantAt = os.clock()
+            if not Features.AtPotionMaster() then return end
+        end
+        local crafts = math.min(itemCount(m.src) // 50, itemLimit(m.mega) - itemCount(m.mega))
+        for _ = 1, crafts do
+            if not On("AutoMegaCraft") then return end
+            if Features.MegaCraftOne(m) <= 0 then
+                if Util.Every("mega-craft", 30) then
+                    Util.Notify("Mega Boosts: crafting didn't work - craft one Mega boost by hand at the Potion Master")
+                end
+                task.wait(3)
+                return
+            end
+            Features.MegaWantAt = os.clock()
+        end
+        return
+    end
+    if buyM then
+        if Features.MegaBuy(buyM, buyAmt) <= 0 and Util.Every("mega-buy", 30) then
+            Util.Notify("Mega Boosts: buying didn't work - buy one Super boost by hand in the Time Trial shop")
+            task.wait(3)
+        end
+        return
+    end
+    if Util.Every("mega-poor", 60) then Util.Notify("Mega Boosts: not enough Tower Shards to buy more Super boosts") end
+    task.wait(5)
+end
+end
+
 -- PASSIVE MACHINE (like Yuto): rerolls are done standing at the machine.
 -- Each machine is Worlds.<World>.Passive (prompt "Reroll"). Event categories have their own
 -- world (Frieren2026, Easter2026, BC2026, Christmas2); Normal / Requiem use the main machine.
@@ -4842,6 +5054,10 @@ function Diag.Save()
 end
 
 local function Brain()
+    -- Mega Boost crafter is crafting (asked in the last 4 s): stand at the Potion Master
+    if Features.MegaWantAt and os.clock() - Features.MegaWantAt < 4 and On("AutoMegaCraft") and On("MegaGoMaster") then
+        return Features.GoPotionMaster()
+    end
     -- Auto Passive / Lunar quests asked for the reroll machine in the last 3 s: stand there
     if Features.PassiveWant and os.clock() - (Features.PassiveWantAt or 0) < 3 and On("PassiveGoMachine") then
         return Features.GoPassiveMachine(Features.PassiveWant)
@@ -5077,6 +5293,19 @@ do
     end })
     Refreshers[#Refreshers + 1] = function() from:Refresh(Data.Pets()) to:Refresh(Data.Pets()) end
 
+    do
+        local mc = TShop:Card("Mega Boost Crafter", "Left")
+        mc:Paragraph({ Body = "[-] Buys Super boosts (Max) in the Time Trial shop with Tower Shards, then crafts them\n"
+            .. "    at the Potion Master (50 -> 1 Mega) until each selected Mega boost has 500.\n"
+            .. "[-] Buy one Super boost and craft one Mega boost by hand once: the hub learns the exact calls." })
+        local names = Features.MegaNames()
+        local def = {}
+        for _, n in ipairs(names) do def[n] = true end
+        mc:Dropdown({ Title = "Mega Boosts", Items = names, Multi = true, Default = def, Flag = "MegaTypes" })
+        mc:Toggle({ Title = "Teleport To Potion Master", Default = true, Flag = "MegaGoMaster" })
+        Features.MegaStatus = mc:Paragraph({ Body = "Status : -" })
+        mc:Toggle({ Title = "Auto Craft Mega Boost", Flag = "AutoMegaCraft" })
+    end
     local c = TShop:Card("Auto Claim", "Right")
     c:Toggle({ Title = "Auto Daily Spin", Flag = "AutoSpin" })
     c:Toggle({ Title = "Auto Claim Ticket", Flag = "AutoTicket" })
@@ -5486,6 +5715,8 @@ loop(3, function() if On("HideOthers") then Features.HideOthers(true) end end)
 loop(0.31, function() if On("AttackUlt") then Features.Ult() end end)
 loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") then Features.Hatch() end end)
 loop(3, function() if On("AutoFuse") then Features.Fuse() end end)
+loop(0.2, function() if On("AutoMegaCraft") then Features.MegaCraft() else task.wait(0.5) end end)
+loop(2, function() if Features.MegaStatus then pcall(function() Features.MegaStatus:Set(Features.MegaStatusText()) end) end end)
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
 -- after joining, the save (GameData) loads a bit after the hub: refresh the pet lists once it's there
 task.spawn(function()
