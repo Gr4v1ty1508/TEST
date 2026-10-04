@@ -3307,7 +3307,19 @@ function Features.Hatch()
     local modes = F("HatchModes") or {}
     local amount = modes["Summon Max Star"] and CFG.HatchAmount.Max
         or modes["Summon Multiple Star"] and CFG.HatchAmount.Multiple or CFG.HatchAmount.Single
-    -- the game only opens a star in the world it's in
+    -- the game only opens a star in the world it's in. Moving there needs the character, so it
+    -- waits for its turn in the Priority list (Brain sets Features.BrainOwner = "Hatch")
+    local needMove = Util.World() ~= worldName
+    if not needMove and On("HatchTp") then
+        local w = Worlds:FindFirstChild(worldName)
+        local star = w and w:FindFirstChild(starName)
+        local root = Util.Root()
+        needMove = star ~= nil and root ~= nil and (root.Position - star:GetPivot().Position).Magnitude > 12
+    end
+    if needMove then
+        Features.HatchWantAt = os.clock()
+        if Features.BrainOwner ~= "Hatch" then return end
+    end
     if Util.World() ~= worldName then Travel.To(worldName) end
     if On("HatchTp") then
         local w = Worlds:FindFirstChild(worldName)
@@ -3318,6 +3330,7 @@ function Features.Hatch()
             if (root.Position - pivot.Position).Magnitude > 12 then Util.MoveTo(pivot * CFrame.new(0, 0, 7)) task.wait(0.3) end
         end
     end
+    Features.HatchWantAt = os.clock()
     local w = Worlds:FindFirstChild(worldName)
     Net.Call("OpenEgg", (w and w:FindFirstChild(starName)) or starName, amount)
 end
@@ -3578,7 +3591,7 @@ function Features.Passive()
     local slots = Util.SetToList(F("PassiveSlots"))
     if #pets == 0 or #slots == 0 then return end
     local machine = F("PassiveMachine") or "Normal"
-    if not Features.PassiveReady(machine) then return end
+    if not Features.PassiveReady(machine, "passive") then return end
     local sent = {}
     for _, label in ipairs(pets) do
         local id = Data.PetId(label)
@@ -3848,7 +3861,7 @@ function Features.EventQuests()
     if not best then return end
     local machine = best[1] == "Event" and (F("EQEventMachine") or "Frieren2026") or best[1]
     local slot = tonumber(F("EQSlot") or "1") or 1
-    if not Features.PassiveReady(machine) then return end
+    if not Features.PassiveReady(machine, "lunar") then return end
     for _, label in ipairs(pets) do
         Net.Call("RollPassive", Data.PetId(label), machine, slot, best[2])
     end
@@ -4117,9 +4130,12 @@ function Features.GoPassiveMachine(machine)
     end
 end
 -- a passive feature asks before each roll: true = roll now
-function Features.PassiveReady(machine)
+-- who = "passive" (Auto Passive) or "lunar" (Lunar quests): the Brain lets the one with the
+-- higher priority take the character to its machine
+Features.PassiveWants = {}
+function Features.PassiveReady(machine, who)
     if not On("PassiveGoMachine") then return true end
-    Features.PassiveWant, Features.PassiveWantAt = machine, os.clock()
+    Features.PassiveWants[who or "passive"] = { machine = machine, at = os.clock() }
     return Features.AtPassiveMachine(machine)
 end
 end
@@ -5053,33 +5069,81 @@ function Diag.Save()
     return text
 end
 
+-- PRIORITY: every feature that moves the character is a task; the Brain runs them in the order
+-- set in Settings > Priority (1 = first). The first task that wants the character this tick gets
+-- it; a task that has nothing to do right now (trial not open, cooldown, ...) lets the next one go.
+local function wantedRecently(who, secs)
+    local w = Features.PassiveWants and Features.PassiveWants[who]
+    return w and os.clock() - w.at < (secs or 3) and On("PassiveGoMachine") and w or nil
+end
+Features.Tasks = {
+    { id = "Lunar", name = "Auto Lunar Quests", run = function()
+        local w = On("AutoEventQuests") and wantedRecently("lunar")
+        if w then Features.GoPassiveMachine(w.machine) return true end
+    end },
+    { id = "Passive", name = "Auto Passive", run = function()
+        local w = On("AutoPassive") and wantedRecently("passive")
+        if w then Features.GoPassiveMachine(w.machine) return true end
+    end },
+    { id = "Mega", name = "Mega Boost Craft", run = function()
+        if Features.MegaWantAt and os.clock() - Features.MegaWantAt < 4 and On("AutoMegaCraft") and On("MegaGoMaster") then
+            Features.GoPotionMaster() return true
+        end
+    end },
+    { id = "Infinity", name = "Infinity Tower", run = function()
+        if On("AutoInf") then Features.InfinityTower() return true end
+    end },
+    { id = "Dungeon", name = "Dungeon", run = function()
+        if On("AutoOpenDungeon") or (On("AutoFarmDungeon") and Features.InDungeon()) then Features.Dungeon() return true end
+    end },
+    { id = "Gate", name = "Gate", run = function()
+        if On("AutoGate") then Features.Gates() return true end
+    end },
+    { id = "Trial", name = "Time Trial", run = function() return On("AutoTrial") and Features.TimeTrial() end },
+    { id = "Raid", name = "Raid", run = function() return On("AutoRaid") and Features.Raid() end },
+    { id = "Defense", name = "Defense", run = function() return On("AutoDefense") and Features.Defense() end },
+    { id = "Event", name = "Event", run = function() return On("AutoEvent") and Features.Events() end },
+    { id = "GlobalBoss", name = "Global Boss", run = function() return On("AutoGlobalBoss") and Features.GlobalBoss() end },
+    { id = "Meteor", name = "Meteor", run = function() return On("AutoMeteor") and Features.Meteor() end },
+    { id = "Hatch", name = "Hatch Egg", run = function()
+        return On("AutoHatch") and Features.HatchWantAt ~= nil and os.clock() - Features.HatchWantAt < 3
+    end },
+    { id = "Farm", name = "Farm / Quest", run = function()
+        if On("AutoQuest") then Features.Quest() end
+        if On("AutoFarm") then
+            Combat.InFarm = true
+            local ok, err = pcall(Features.Farm)
+            Combat.InFarm = false
+            if not ok then warn("[" .. CFG.Name .. "] " .. tostring(err)) end
+            return true
+        end
+    end },
+    { id = "TimeChamber", name = "Time Chamber", run = function()
+        if On("AutoTimeChamber") then Features.TimeChamber() return true end
+    end },
+}
+-- default order (Settings > Priority changes it)
+Features.DefaultPrio = { Lunar = 1, Trial = 2, Dungeon = 3, Hatch = 4, Passive = 5, Mega = 6, Infinity = 7, Gate = 8,
+    Raid = 9, Defense = 10, Event = 11, GlobalBoss = 12, Meteor = 13, Farm = 14, TimeChamber = 15 }
+-- the tasks sorted by their Priority number (ties keep the default order)
+function Features.TaskOrder()
+    local list = {}
+    for i, t in ipairs(Features.Tasks) do
+        local def = Features.DefaultPrio[t.id] or i
+        list[#list + 1] = { task = t, prio = tonumber(F("Prio_" .. t.id)) or def, def = def }
+    end
+    table.sort(list, function(a, b) if a.prio ~= b.prio then return a.prio < b.prio end return a.def < b.def end)
+    local out = {}
+    for _, e in ipairs(list) do out[#out + 1] = e.task end
+    return out
+end
 local function Brain()
-    -- Mega Boost crafter is crafting (asked in the last 4 s): stand at the Potion Master
-    if Features.MegaWantAt and os.clock() - Features.MegaWantAt < 4 and On("AutoMegaCraft") and On("MegaGoMaster") then
-        return Features.GoPotionMaster()
+    for _, t in ipairs(Features.TaskOrder()) do
+        local ok, took = pcall(t.run)
+        if not ok then warn("[" .. CFG.Name .. "] " .. t.id .. ": " .. tostring(took)) end
+        if ok and took then Features.BrainOwner = t.id return end
     end
-    -- Auto Passive / Lunar quests asked for the reroll machine in the last 3 s: stand there
-    if Features.PassiveWant and os.clock() - (Features.PassiveWantAt or 0) < 3 and On("PassiveGoMachine") then
-        return Features.GoPassiveMachine(Features.PassiveWant)
-    end
-    if On("AutoInf") then return Features.InfinityTower() end
-    if On("AutoOpenDungeon") or (On("AutoFarmDungeon") and Features.InDungeon()) then return Features.Dungeon() end
-    if On("AutoGate") then return Features.Gates() end
-    if On("AutoTrial") and Features.TimeTrial() then return end
-    if On("AutoRaid") and Features.Raid() then return end
-    if On("AutoDefense") and Features.Defense() then return end
-    if On("AutoEvent") and Features.Events() then return end
-    if On("AutoGlobalBoss") and Features.GlobalBoss() then return end
-    if On("AutoMeteor") and Features.Meteor() then return end
-    if On("AutoQuest") then Features.Quest() end
-    if On("AutoFarm") then
-        Combat.InFarm = true
-        local ok, err = pcall(Features.Farm)
-        Combat.InFarm = false
-        if not ok then warn("[" .. CFG.Name .. "] " .. tostring(err)) end
-        return
-    end
-    if On("AutoTimeChamber") then Features.TimeChamber() end
+    Features.BrainOwner = nil
 end
 
 ------------------------------------------------------------------------
@@ -5432,6 +5496,36 @@ do
     g:Toggle({ Title = "Anti AFK", Default = true, Flag = "AntiAFK" })
     g:Slider({ Title = "Walk Speed", Min = 16, Max = 200, Default = 16, Flag = "WalkSpeed" })
 
+    -- PRIORITY: 1 = done first. The first feature in the list that has something to do gets the
+    -- character; the ones under it wait until it's idle (trial closed, cooldown, nothing to hatch...)
+    local pc = TSettings:Card("Priority", "Right")
+    pc:Paragraph({ Body = "1 = most important. When two features both want the character, the lower number goes first;\n"
+        .. "the other one waits until the first has nothing to do." })
+    local orderText = pc:Paragraph({ Body = "Order : -" })
+    local function showOrder()
+        local names = {}
+        for i, t in ipairs(Features.TaskOrder()) do names[#names + 1] = i .. ". " .. t.name end
+        pcall(function() orderText:Set("Order :\n" .. table.concat(names, "\n")) end)
+    end
+    local nums = {}
+    for i = 1, #Features.Tasks do nums[i] = tostring(i) end
+    local sorted = {}
+    for _, t in ipairs(Features.Tasks) do sorted[#sorted + 1] = t end
+    table.sort(sorted, function(a, b) return (Features.DefaultPrio[a.id] or 99) < (Features.DefaultPrio[b.id] or 99) end)
+    for _, t in ipairs(sorted) do
+        pc:Dropdown({ Title = t.name, Items = nums, Default = tostring(Features.DefaultPrio[t.id] or #nums), Required = true,
+            Search = false, Flag = "Prio_" .. t.id, Callback = function() task.defer(showOrder) end })
+    end
+    pc:Button({ Title = "Reset To Default", Callback = function()
+        for _, t in ipairs(Features.Tasks) do
+            local el = Flags["Prio_" .. t.id]
+            if el then el:Set(tostring(Features.DefaultPrio[t.id] or #nums), true) end
+        end
+        showOrder()
+    end })
+    task.defer(showOrder)
+    Features.ShowPrioOrder = showOrder
+
     local up = TSettings:Card("Ultra Performance", "Left")
     up:Paragraph({ Body = "Removes shadows, textures, particles, lights, water and post effects that drop FPS. Farming keeps working. Turning it off fully needs a rejoin." })
     up:Toggle({ Title = "Ultra Performance", Flag = "UltraPerf", Callback = function(v) Features.UltraPerformance(v) end })
@@ -5781,6 +5875,7 @@ end)
 
 -- auto load this account's config, then auto save every 3 s when something changed
 pcall(function() Window:LoadConfig() end)
+pcall(function() if Features.ShowPrioOrder then Features.ShowPrioOrder() end end)
 -- the pets picked for Auto Passive / Auto Lunar are NOT kept between games: start empty every join
 for _, flag in ipairs({ "PassivePets", "EQPets" }) do
     local el = Flags[flag]
