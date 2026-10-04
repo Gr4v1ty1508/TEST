@@ -3552,6 +3552,7 @@ function Features.Passive()
     local slots = Util.SetToList(F("PassiveSlots"))
     if #pets == 0 or #slots == 0 then return end
     local machine = F("PassiveMachine") or "Normal"
+    if not Features.PassiveReady(machine) then return end
     local sent = {}
     for _, label in ipairs(pets) do
         local id = Data.PetId(label)
@@ -3748,12 +3749,65 @@ function Features.EventQuests()
     if not best then return end
     local machine = best[1] == "Event" and (F("EQEventMachine") or "Frieren2026") or best[1]
     local slot = tonumber(F("EQSlot") or "1") or 1
+    if not Features.PassiveReady(machine) then return end
     Net.Call("RollPassive", Data.PetId(label), machine, slot, best[2])
     Features.EQLast = machine .. (best[2] and " shard" or " token") .. " reroll"
     task.wait(F("PassiveDelay") or 0.5)
     if Features.EQStatus and Util.Every("eq-status", 2) then
         pcall(function() Features.EQStatus:Set("Rolling : " .. Features.EQLast .. "\n" .. Features.EventQuestStatus()) end)
     end
+end
+end
+
+-- PASSIVE MACHINE (like Yuto): rerolls are done standing at the machine.
+-- Each machine is Worlds.<World>.Passive (prompt "Reroll"). Event categories have their own
+-- world (Frieren2026, Easter2026, BC2026, Christmas2); Normal / Requiem use the main machine.
+do
+local NORMAL_MACHINE_WORLDS = { TimeChamber = true, MHA = true, MadeInAbyss = true, MachineWorld = true }
+function Features.PassiveMachineWorld(machine)
+    if machine and machine ~= "Normal" and machine ~= "Requiem" then
+        local w = Worlds:FindFirstChild(machine)
+        if w and w:FindFirstChild("Passive") then return machine end
+    end
+    local cur = Util.World()
+    local w = Worlds:FindFirstChild(cur)
+    if NORMAL_MACHINE_WORLDS[cur] and w and w:FindFirstChild("Passive") then return cur end
+    return "TimeChamber"
+end
+function Features.PassiveMachineCFrame(world)
+    local w = Worlds:FindFirstChild(world)
+    local m = w and w:FindFirstChild("Passive")
+    if not m then return nil end
+    local root = m:FindFirstChild("RootPart") or m:FindFirstChildWhichIsA("BasePart", true)
+    if root then return root.CFrame end
+    local ok, cf = pcall(m.GetPivot, m)
+    if ok and cf and cf.Position.Magnitude > 5 then return cf end
+    return nil
+end
+function Features.AtPassiveMachine(machine)
+    local world = Features.PassiveMachineWorld(machine)
+    if Util.World() ~= world then return false end
+    local cf, root = Features.PassiveMachineCFrame(world), Util.Root()
+    return cf ~= nil and root ~= nil and (root.Position - cf.Position).Magnitude < 25
+end
+-- called by the Brain (it owns the character): travel to the machine's world, then stand at it
+function Features.GoPassiveMachine(machine)
+    local world = Features.PassiveMachineWorld(machine)
+    if Util.World() ~= world then
+        if Util.Every("passive-travel", 6) then Travel.To(world) task.wait(1.5) end
+        return
+    end
+    local cf, root = Features.PassiveMachineCFrame(world), Util.Root()
+    if cf and root and (root.Position - cf.Position).Magnitude > 12 then
+        Util.MoveTo(cf * CFrame.new(0, 3, 8))
+        task.wait(0.3)
+    end
+end
+-- a passive feature asks before each roll: true = roll now
+function Features.PassiveReady(machine)
+    if not On("PassiveGoMachine") then return true end
+    Features.PassiveWant, Features.PassiveWantAt = machine, os.clock()
+    return Features.AtPassiveMachine(machine)
 end
 end
 
@@ -4687,6 +4741,10 @@ function Diag.Save()
 end
 
 local function Brain()
+    -- Auto Passive / Lunar quests asked for the reroll machine in the last 3 s: stand there
+    if Features.PassiveWant and os.clock() - (Features.PassiveWantAt or 0) < 3 and On("PassiveGoMachine") then
+        return Features.GoPassiveMachine(Features.PassiveWant)
+    end
     if On("AutoInf") then return Features.InfinityTower() end
     if On("AutoOpenDungeon") or (On("AutoFarmDungeon") and Features.InDungeon()) then return Features.Dungeon() end
     if On("AutoGate") then return Features.Gates() end
@@ -4987,6 +5045,7 @@ do
     p:Dropdown({ Title = "Select Passive Machine", Items = Data.PassiveMachines(), Default = "Normal", Required = true, Flag = "PassiveMachine" })
     p:Dropdown({ Title = "Reroll With", Items = CFG.RerollMethods, Default = "Token", Required = true, Flag = "PassiveMethod" })
     p:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 2, Default = 0.5, Decimals = 1, Flag = "PassiveDelay" })
+    p:Toggle({ Title = "Teleport To Reroll Machine", Default = true, Flag = "PassiveGoMachine" })
     p:Toggle({ Title = "Auto Reroll Passive !", Flag = "AutoPassive", Callback = function(v) if v then Features.ResetPassive() end end })
     if #names == 0 then
         p:Paragraph({ Body = "PassiveStats module could not be read. Type a passive name below instead." })
