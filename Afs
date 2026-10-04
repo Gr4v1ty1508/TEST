@@ -5469,7 +5469,7 @@ end
 do
     local p = TPassive:Card("Auto Reroll Passive", "Left")
     p:Paragraph({ Title = "Auto Reroll Passive Caution !", Body =
-        "[-] Works from anywhere - no need to stand at the machine.\n" ..
+        "[-] Teleport To Reroll Machine on: goes to the machine first (like Yuto).\n" ..
         "[-] Use 0.5-0.7 delay when rolling more than 1 pet.\n" ..
         "[-] If your ping > 500ms use 0.8 - 1s to keep your passive safe.\n" ..
         "[-] Fewer pets selected = better performance." })
