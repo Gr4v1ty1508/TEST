@@ -1489,7 +1489,9 @@ function Elements:Dropdown(opt)
     local function summary()
         if multi then
             local names = Util.SetToList(selected)
-            headerText.Text = #names > 0 and (opt.Title .. " • " .. table.concat(names, ", ")) or (opt.Title .. "...")
+            -- opt.CountOnly: show how many are picked instead of the names ("Pets To Reroll • 3")
+            local shown = opt.CountOnly and tostring(#names) or table.concat(names, ", ")
+            headerText.Text = #names > 0 and (opt.Title .. " • " .. shown) or (opt.Title .. "...")
         else
             headerText.Text = single and (opt.Title .. " • " .. single) or (opt.Title .. "...")
         end
@@ -5124,7 +5126,7 @@ do
         "[-] Use 0.5-0.7 delay when rolling more than 1 pet.\n" ..
         "[-] If your ping > 500ms use 0.8 - 1s to keep your passive safe.\n" ..
         "[-] Fewer pets selected = better performance." })
-    local pets = p:Dropdown({ Title = "Select Pets To Roll", Items = Data.Pets(), Multi = true, Flag = "PassivePets" })
+    local pets = p:Dropdown({ Title = "Select Pets To Roll", Items = Data.Pets(), Multi = true, CountOnly = true, Flag = "PassivePets" })
     Features.PetDrops = Features.PetDrops or {}
     table.insert(Features.PetDrops, pets)
     -- one refresh for every pet list (Auto Reroll Passive + Lunar vs Solar), keeps what was picked
@@ -5168,7 +5170,7 @@ do
     local labels, keys = {}, {}
     local info = Data.Module("TeamEventInfo")
     for _, key in ipairs(info and info.QuestOrder or {}) do keys[#keys + 1] = key end
-    local qpet = q:Dropdown({ Title = "Pets To Reroll", Items = Data.Pets(), Multi = true, Default = {}, Flag = "EQPets" })
+    local qpet = q:Dropdown({ Title = "Pets To Reroll", Items = Data.Pets(), Multi = true, CountOnly = true, Default = {}, Flag = "EQPets" })
     table.insert(Features.PetDrops, qpet)
     q:Button({ Title = "Refresh Pets", Callback = function() Features.RefreshPetLists() end })
     q:Dropdown({ Title = "Slot", Items = { "1", "2", "3" }, Default = "1", Required = true, Flag = "EQSlot" })
@@ -5179,6 +5181,7 @@ do
     for _, k in ipairs(keys) do def[k] = true end
     q:Dropdown({ Title = "Quests To Do", Items = keys, Multi = true, Default = def, Flag = "EQQuests" })
     q:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 2, Default = 0.5, Decimals = 1, Flag = "EQDelay" })
+    Features.EQTimer = q:Paragraph({ Body = "New Quests In : -" })
     Features.EQStatus = q:Paragraph({ Body = "Status : -" })
     q:Button({ Title = "Read Board Now", Callback = function()
         Features.EventQuestScan()
@@ -5447,6 +5450,19 @@ end
 -- LOOPS
 ------------------------------------------------------------------------
 local running = true
+-- Lunar vs Solar card: live countdown to the next quests
+task.spawn(function()
+    while running do
+        if Features.EQTimer and Features.EventQuestCooldown then
+            local cd = Features.EventQuestCooldown()
+            pcall(function()
+                Features.EQTimer:Set(cd > 0 and string.format("New Quests In : <font color='#f87171'>%d:%02d:%02d</font>", cd // 3600, (cd % 3600) // 60, cd % 60)
+                    or "New Quests In : <font color='#4ade80'>open now</font>")
+            end)
+        end
+        task.wait(1)
+    end
+end)
 local function loop(interval, fn)
     task.spawn(function()
         while running do
