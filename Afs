@@ -4352,10 +4352,52 @@ function Extras.EquipTeam(name)
     local btn = Extras.TeamButtons()[name]
     if btn and pressOnce(btn) then
         currentTeam = name
+        -- checked once the pets stop changing (Extras.CheckTeam)
+        Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = #Data.EquippedPets() }
         task.wait(0.3)
     end
 end
-function Extras.ResetTeam() currentTeam = nil end
+function Extras.ResetTeam() currentTeam = nil Extras.TeamCheck = nil end
+-- the team's UIDs from the save (GameData.PetTeams[i] = { Name, UIDs = { ... } })
+function Extras.TeamUIDs(name)
+    local st = Data.StoreData()
+    for _, t in pairs(st and type(st.PetTeams) == "table" and st.PetTeams or {}) do
+        if type(t) == "table" and t.Name == name and type(t.UIDs) == "table" then
+            local set, n = {}, 0
+            for _, uid in pairs(t.UIDs) do set[tostring(uid)] = true n = n + 1 end
+            return set, n
+        end
+    end
+    return nil, 0
+end
+-- did the team really go on? every equipped pet belongs to the team, and as many pets are on
+-- as the team has (or as were on before, when the team is bigger than your slots).
+-- Not right -> press the team again (2 more tries), then tell the player.
+function Extras.CheckTeam()
+    local c = Extras.TeamCheck
+    if not c then return end
+    local set, teamN = Extras.TeamUIDs(c.name)
+    if not set then Extras.TeamCheck = nil return end   -- can't read the team: nothing to compare
+    local pets, wrong = Data.EquippedPets(), 0
+    for _, m in ipairs(pets) do
+        local uid = Data.PetUID(m)
+        if uid and not set[uid] then wrong = wrong + 1 end
+    end
+    local want = math.min(teamN, math.max(c.before, 1))
+    if wrong == 0 and #pets >= want then
+        Extras.TeamCheck = nil
+        return true
+    end
+    if c.tries >= 2 then
+        Extras.TeamCheck = nil
+        Util.Notify(string.format("Team %s: %d/%d pets on (%d not in the team) after 3 tries", c.name, #pets - wrong, want, wrong))
+        return false
+    end
+    c.tries, c.at = c.tries + 1, os.clock()
+    local btn = Extras.TeamButtons()[c.name]
+    if btn then pressOnce(btn) end
+    return false
+end
 -- which saved team fits what we're doing right now
 function Extras.TeamFor(target)
     local world = Util.World()
@@ -5484,9 +5526,11 @@ do
     -- equip / unequip a pet -> both lists update by themselves
     local petsFolder = LP:FindFirstChild("Pets")
     if petsFolder then
-        local function soon() task.delay(1, function() pcall(Features.RefreshPetLists, true) end) end
-        track(petsFolder.ChildAdded:Connect(soon))
-        track(petsFolder.ChildRemoved:Connect(soon))
+        -- a team swap moves ~20 pets: only note the time here, the lists are refreshed ONCE
+        -- after nothing changed for 1.5 s (see the pet-settle loop)
+        local function changed() Features.PetChangeAt = os.clock() Features.PetListDirty = true end
+        track(petsFolder.ChildAdded:Connect(changed))
+        track(petsFolder.ChildRemoved:Connect(changed))
     end
 end
 
@@ -5773,6 +5817,19 @@ end
 -- LOOPS
 ------------------------------------------------------------------------
 local running = true
+-- pets settled (no equip / unequip for 1.5 s): refresh the pet lists once, then check the team
+task.spawn(function()
+    while running do
+        task.wait(0.5)
+        local quiet = os.clock() - (Features.PetChangeAt or 0) > 1.5
+        if quiet and Features.PetListDirty then
+            Features.PetListDirty = false
+            pcall(Features.RefreshPetLists, true)
+        end
+        local c = Extras.TeamCheck
+        if quiet and c and os.clock() - c.at > 2 then pcall(Extras.CheckTeam) end
+    end
+end)
 -- Lunar vs Solar card: live countdown to the next quests
 task.spawn(function()
     while running do
