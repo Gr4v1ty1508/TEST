@@ -3759,8 +3759,13 @@ function Features.EventQuests()
     -- the machine + currency that moves the most unfinished quests
     local best, bestN
     for _, c in ipairs(EQ_CHOICES) do
+        -- shards are only spent while their own "Spend ... Shards" quest is still open
+        local shardQuest = c[1] == "Normal" and "WorldShards" or "EventShards"
         local n = 0
-        for key in pairs(open) do if EQ_MOVES[key] and EQ_MOVES[key](c[1], c[2]) then n = n + 1 end end
+        if c[2] and not open[shardQuest] then n = -1 end
+        if n == 0 then
+            for key in pairs(open) do if EQ_MOVES[key] and EQ_MOVES[key](c[1], c[2]) then n = n + 1 end end
+        end
         if n > 0 and (not bestN or n > bestN) then best, bestN = c, n end
     end
     if not best then return end
@@ -5083,7 +5088,7 @@ do
     local q = TPassive:Card("Auto Lunar vs Solar Quests", "Right")
     q:Paragraph({ Body = "[-] Progress is read from your save - no need to open the board.\n"
         .. "[-] The pets / slot picked here are rerolled every round - use pets whose passive you don't need.\n"
-        .. "[-] Uses Normal / Event / Requiem rerolls with tokens or shards, whatever finishes the most quests.\n"
+        .. "[-] Uses Normal / Event / Requiem token rerolls; shards only for the Spend ... Shards quests.\n"
         .. "[-] Points come by themselves; when all quests are done it waits for the new ones and goes on." })
     local labels, keys = {}, {}
     local info = Data.Module("TeamEventInfo")
