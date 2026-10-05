@@ -1075,10 +1075,7 @@ function Combat.Attack(e, wanted)
         end
         local root = Util.Root()
         local pos, part = Combat.Pos(e)
-        -- Yuto Hub in a dungeon fight (watched, 30 s): it doesn't send pets at enemies at all -
-        -- it stands there and fires PetAttack + PetAbility for every pet ~2-3x a second.
-        -- Done here too while fighting (the "Attack While Ult" loop already does it when on).
-        -- (Combat is defined before On / Features: the hook is set once they exist)
+        -- optional per-fight hook (off: see Combat.FightTick note next to Features.Ult)
         if Combat.FightTick and os.clock() - ultAt > 0.31 then
             ultAt = os.clock()
             Combat.FightTick()
@@ -2128,10 +2125,11 @@ function Features.Ult()
         Net.Raw("PetAbility", { pet })
     end
 end
--- fired by Combat.Attack ~3x a second while fighting (unless "Attack While Ult" already does it)
-Combat.FightTick = function()
-    if not On("AttackUlt") then task.spawn(pcall, Features.Ult) end
-end
+-- Combat.FightTick (PetAttack + PetAbility for every pet ~3x a second while fighting) is NOT set:
+-- Yuto's dungeon runs (two full logs) send none of it - the game's own pet code then teleports
+-- the pets onto each enemy (RequestPetTeleport) and mobs die in ~1 s. With the spam on, the game
+-- never sent RequestPetTeleport (pets walked) and every mob took ~6 s. "Attack While Ult" still
+-- does it for whoever turns it on.
 
 -- MOUNT -------------------------------------------------------------------------------
 local MountAssets = RS:FindFirstChild("ReplicatedAssets") and RS.ReplicatedAssets:FindFirstChild("Mounts")
