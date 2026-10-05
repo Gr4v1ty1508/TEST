@@ -7013,10 +7013,6 @@ do
     g:Toggle({ Title = "Auto Claim Free Gifts", Flag = "AutoFreeGifts" })
 
 
-    -- Hatch: multi open
-    local h = THatch:Card("Multi Open", "Left")
-    h:Paragraph({ Body = "Uses the game's Multi Open ( gamepass ) on the star picked in Auto Summon. Summon Max Star now uses the amount shown on the game's Open button." })
-    h:Toggle({ Title = "Auto Multi Open Selected Star", Flag = "AutoMultiOpen" })
 end
 
 ------------------------------------------------------------------------
@@ -7310,7 +7306,6 @@ end)
 
 -- extras
 loop(0.3, function() if On("AutoFreeGifts") then Extras.FreeGifts() end end)
-loop(0.5, function() if On("AutoMultiOpen") then Extras.MultiOpen() end end)
 loop(2, function()
     -- team for places where nothing is being attacked (Time Chamber, idle)
     if On("AutoTeams") and not Extras.Fighting then Extras.TeamFor(nil) end
