@@ -3264,9 +3264,12 @@ function Features.DungeonActivate()
     for _, cp in ipairs(map:GetDescendants()) do
         if cp.Name == "ConfirmPart" and cp:IsA("BasePart") then
             local pp = cp:FindFirstChildWhichIsA("ProximityPrompt")
+            -- pressed already: again only if its prompt is still on 15 s later (the press
+            -- didn't take, e.g. not loaded yet), at most 3 presses per altar
             local done = Features.DungeonActivated[cp]
+            local again = done == nil or (done.n < 3 and os.clock() - done.at > 15)
             if pp and pp.Enabled and string.find(string.lower(pp.ActionText), "activ", 1, true)
-               and not done then
+               and again then
                 local d = (cp.Position - me.Position).Magnitude
                 if not bestD or d < bestD then best, bestD = { cp = cp, pp = pp }, d end
             end
@@ -3277,7 +3280,8 @@ function Features.DungeonActivate()
     Util.MoveTo(best.cp.CFrame * CFrame.new(0, 4, 0))
     task.wait(1)
     if fireproximityprompt then pcall(fireproximityprompt, best.pp) else Prompt.Use(best.pp) end
-    Features.DungeonActivated[best.cp] = os.clock()
+    local prev = Features.DungeonActivated[best.cp]
+    Features.DungeonActivated[best.cp] = { at = os.clock(), n = (prev and prev.n or 0) + 1 }
     task.wait(1)
     return true
 end
@@ -3332,20 +3336,21 @@ function Features.FarmDungeon()
     -- boss down and nothing left (a few seconds for the treasure chests to show up): run finished
     if Features.DungeonBossAt and os.clock() - Features.DungeonBossAt > 8 then return false end
     if Features.DungeonBossAt then task.wait(0.5) return true end
-    -- safety net if the boss message was missed: nothing to fight / press / open for 30 s
-    -- (only walking rooms to load them) -> also finished, instead of walking until time is up
-    Features.DungeonIdleSince = Features.DungeonIdleSince or os.clock()
-    if os.clock() - Features.DungeonIdleSince > 30 then return false end
-    -- nothing loaded near us: visit the rooms one by one so their enemies load in (Yuto does this too)
-    if On("DungeonLoadAll") then
-        local rooms = Features.DungeonRooms()
-        if #rooms > 0 then
-            roomIndex = roomIndex % #rooms + 1
-            local cf = rooms[roomIndex]:GetPivot()
-            pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
-            Util.MoveTo(cf + Vector3.new(0, 5, 0))
-            task.wait(0.6)
-        end
+    -- nothing loaded near us: visit the rooms one by one so their enemies load in (Yuto does this
+    -- too). Safety net if the boss message was missed: a whole lap over every room and 60 s with
+    -- nothing to fight / press / open -> the run is finished (instead of walking until time is up)
+    if not Features.DungeonIdleSince then Features.DungeonIdleSince, Features.DungeonIdleLap = os.clock(), 0 end
+    local rooms = Features.DungeonRooms()
+    if #rooms > 0 then
+        roomIndex = roomIndex % #rooms + 1
+        Features.DungeonIdleLap = Features.DungeonIdleLap + 1
+        local cf = rooms[roomIndex]:GetPivot()
+        pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
+        Util.MoveTo(cf + Vector3.new(0, 5, 0))
+        task.wait(0.6)
+    end
+    if os.clock() - Features.DungeonIdleSince > 60 and Features.DungeonIdleLap >= math.max(#rooms, 1) then
+        return false
     end
     return true
 end
@@ -5569,7 +5574,6 @@ do
     d:Toggle({ Title = "Use Dungeon Artifact To Open", Flag = "DungeonArtifact" })
     d:Toggle({ Title = "Friend Only", Flag = "DungeonFriends" })
     d:Toggle({ Title = "Auto Open Dungeon", Flag = "AutoOpenDungeon" })
-    d:Toggle({ Title = "Teleport To Load All Dungeon", Flag = "DungeonLoadAll" })
     d:Toggle({ Title = "Auto Farm Dungeon", Flag = "AutoFarmDungeon" })
     Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(dw, Data.FarmWorldLabels()) end
 
