@@ -3787,9 +3787,32 @@ local EQ_MOVES = {
     WorldShards          = function(m, sh) return m == "Normal" and sh end,
     RequiemTokens        = function(m, sh) return m == "Requiem" and not sh end,
 }
+-- order = which one wins when two move the same number of quests:
+-- Requiem token -> Event token (the picked Event Machine) -> Normal token -> Event shard -> Normal shard
 local EQ_CHOICES = {
-    { "Normal", true }, { "Normal", false }, { "Event", true }, { "Event", false }, { "Requiem", false },
+    { "Requiem", false }, { "Event", false }, { "Normal", false }, { "Event", true }, { "Normal", true },
 }
+-- the item a reroll pays with (Items in the save): RequiemToken, <Category>PassiveToken /
+-- <Category>Shard (PassiveCategories), PassiveToken for Normal. nil = unknown (not checked)
+function Features.EQCurrency(machineKind, shards)
+    local cats = Data.Module("PassiveCategories") or {}
+    if machineKind == "Requiem" then
+        return (type(cats.Requiem) == "table" and cats.Requiem.TokenId) or "RequiemToken"
+    elseif machineKind == "Event" then
+        local c = cats[F("EQEventMachine") or "Frieren2026"]
+        if type(c) ~= "table" then return nil end
+        if shards then return c.ShardId end
+        return c.TokenId
+    elseif not shards then
+        return "PassiveToken"
+    end
+    return nil
+end
+function Features.EQHave(item)
+    local st = Data.StoreData()
+    local it = st and st.Items
+    return type(it) == "table" and (tonumber(it[item]) or 0) or nil
+end
 function Features.EventQuestStatus()
     local info = Data.Module("TeamEventInfo")
     local prog = Features.EventQuestProgress()
@@ -3853,12 +3876,20 @@ function Features.EventQuests()
         local shardQuest = c[1] == "Normal" and "WorldShards" or "EventShards"
         local n = 0
         if c[2] and not open[shardQuest] then n = -1 end
+        -- not enough of what this reroll pays with (1 per pet per round): skip it
+        local cur = Features.EQCurrency(c[1], c[2])
+        local have = cur and Features.EQHave(cur)
+        if have and have < #pets then n = -1 end
         if n == 0 then
             for key in pairs(open) do if EQ_MOVES[key] and EQ_MOVES[key](c[1], c[2]) then n = n + 1 end end
         end
         if n > 0 and (not bestN or n > bestN) then best, bestN = c, n end
     end
-    if not best then return end
+    if not best then
+        if Util.Every("eq-broke", 60) then Util.Notify("Lunar vs Solar: not enough tokens / shards for the open quests") end
+        task.wait(3)
+        return
+    end
     local machine = best[1] == "Event" and (F("EQEventMachine") or "Frieren2026") or best[1]
     local slot = tonumber(F("EQSlot") or "1") or 1
     if not Features.PassiveReady(machine, "lunar") then return end
