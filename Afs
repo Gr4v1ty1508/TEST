@@ -1037,7 +1037,7 @@ function Combat.PetsToMe()
 end
 function Combat.Attack(e, wanted)
     local t0 = os.clock()
-    local movedAt = nil
+    local movedAt, sentAt = nil, nil
     local streamedAt = 0
     local hp0, hpAt = Combat.HP(e), nil
     do
@@ -1086,8 +1086,16 @@ function Combat.Attack(e, wanted)
             end
         end
         -- pets need the enemy's parts to walk to it
-        -- the game's own attack call is SendPet:Fire(enemy, true, true) (seen while watching)
-        if SendPet and (e:FindFirstChild("HumanoidRootPart") or part) then pcall(SendPet.Fire, SendPet, e, true, true) end
+        -- the game's own attack call is SendPet:Fire(enemy, true, true) (seen while watching).
+        -- Every Fire makes the game re-send ALL pets to the enemy, which restarts their attack:
+        -- it used to be fired every frame (= pets kept restarting, the HP bar barely moved).
+        -- The game itself fires it about once per target (22 times in 75 s of Yuto's dungeon):
+        -- now once when we're there, and again only every 5 s or right after we moved.
+        if SendPet and (e:FindFirstChild("HumanoidRootPart") or part)
+           and (not sentAt or os.clock() - sentAt > 5 or movedAt) then
+            sentAt = os.clock()
+            pcall(SendPet.Fire, SendPet, e, true, true)
+        end
         task.wait()
     end
 end
