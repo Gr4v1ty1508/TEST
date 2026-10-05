@@ -3412,30 +3412,28 @@ function Features.Dungeon()
     end
     return false
 end
--- seconds before a new dungeon can be opened (0 = now). The door in the Tower shows it
--- ("0:04:14"); the save has LastDungeon (when the last one was opened): the cooldown is
--- 4 min with the Dungeon artefact on (it's put on right before every summon) and 10 h without.
+-- seconds before a new dungeon can be opened (0 = now), counted from LastDungeon in the save:
+--   no artefact      ModuleScripts.ConfigValues.DungeonTime (39600 s = 11 h)
+--   Dungeon artefact ArtefactData.Dungeon.Effects.DungeonCooldown hours (1 = 1 h)
+-- Checked against the game's own timer: at the same moment it showed ~10 h without the
+-- artefact and 4:14 with it (= about 56 min after the last one). The artefact is put on right
+-- before every summon, so with "Use Dungeon Artifact To Open" the 1 h counts.
+function Features.DungeonCooldownLength()
+    local cfgv, arts = Data.Module("ConfigValues") or {}, Data.Module("ArtefactData") or {}
+    local base = tonumber(cfgv.DungeonTime) or 39600
+    if On("DungeonArtifact") then
+        local eff = type(arts.Dungeon) == "table" and type(arts.Dungeon.Effects) == "table" and tonumber(arts.Dungeon.Effects.DungeonCooldown)
+        return math.min(base, (eff or 1) * 3600)
+    end
+    return base
+end
 function Features.DungeonCooldown()
     local left = 0
     pcall(function()
         local last = tonumber(Data.StoreData().LastDungeon) or 0
-        local cdLen = On("DungeonArtifact") and 240 or 36000
         local now = workspace:GetServerTimeNow()
-        if last > 0 and last + cdLen > now then left = last + cdLen - now end
-    end)
-    pcall(function()
-        local door = Worlds.Tower.DungeonDoor
-        for _, d in ipairs(door:GetDescendants()) do
-            if d:IsA("TextLabel") and d.Visible then
-                local parts = {}
-                for n in string.gmatch(d.Text, "%d+") do parts[#parts + 1] = tonumber(n) end
-                if string.find(d.Text, "%d+:%d%d:%d%d") and #parts >= 3 then
-                    local secs = 0
-                    for i, n in ipairs(parts) do secs = (i == 2 and #parts == 4) and (secs * 24 + n) or (secs * 60 + n) end
-                    if secs > left then left = secs end
-                end
-            end
-        end
+        local len = Features.DungeonCooldownLength()
+        if last > 0 and last + len > now then left = last + len - now end
     end)
     return math.floor(left)
 end
