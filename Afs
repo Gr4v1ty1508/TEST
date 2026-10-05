@@ -1128,7 +1128,9 @@ function Combat.Attack(e, wanted)
             return
         end
     end
-    while Combat.Alive(e) and wanted() and os.clock() - t0 < CFG.KillTimeout do
+    -- CFG.KillTimeout only ends a fight that stopped taking damage: chests have ~15x the HP of a
+    -- mob (a Rare Chest took ~60 s) and were dropped at 25 s, then picked again
+    while Combat.Alive(e) and wanted() and (os.clock() - t0 < CFG.KillTimeout or (hpAt and os.clock() - hpAt < 3)) do
         -- no damage at all for 8 s once we're next to it (room not started, out of reach):
         -- skip it for 30 s so the rest of the hub can move on
         if e:FindFirstChild("HumanoidRootPart") then
@@ -3699,6 +3701,7 @@ function Features.FarmDungeon()
     for _, r in ipairs(Features.DungeonRooms()) do
         if Features.RoomRevealed(Features.DungeonRoomOf(r) or r) then rooms[#rooms + 1] = r end
     end
+    if #rooms == 0 then Combat.Log("dng", "no room of this dungeon found / shown on the minimap") end
     if #rooms > 0 then
         local done, seen = Features.DungeonRoomDone, Features.DungeonRoomSeen
         local me = Util.Root()
@@ -3721,7 +3724,7 @@ function Features.FarmDungeon()
             pick = rooms[roomIndex]
             if roomIndex == #rooms then table.clear(done) end
         end
-        Combat.Log("dng", "nothing to do here: checking rooms (" .. left .. " of " .. #rooms .. " not cleared yet)")
+        Combat.Log("dng", "nothing to do here: checking room " .. pick.Name .. " (" .. left .. " of " .. #rooms .. " not cleared yet)")
         local cf = pick:GetPivot()
         pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
         Util.MoveTo(cf + Vector3.new(0, 5, 0))
@@ -6633,9 +6636,18 @@ end
 local function Brain()
     for _, t in ipairs(Features.TaskOrder()) do
         local ok, took = pcall(t.run)
-        if not ok then warn("[" .. CFG.Name .. "] " .. t.id .. ": " .. tostring(took)) end
-        if ok and took then Features.BrainOwner = t.id return end
+        if not ok then
+            warn("[" .. CFG.Name .. "] " .. t.id .. ": " .. tostring(took))
+            Combat.Log("err-" .. t.id, "ERROR in " .. t.id .. ": " .. tostring(took))
+        end
+        if ok and took then
+            -- who has the character now (in combat_log.txt only when it changes)
+            Combat.Log("brain", "priority: " .. t.name .. " is running")
+            Features.BrainOwner = t.id
+            return
+        end
     end
+    Combat.Log("brain", "priority: nothing to do right now")
     Features.BrainOwner = nil
 end
 
