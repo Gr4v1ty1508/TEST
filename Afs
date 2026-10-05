@@ -4885,11 +4885,28 @@ function Features.Defense()
         Util.Notify("Defense: no summon point in " .. Data.WorldDisplay(world))
         return false
     end
-    local part = spot:FindFirstChildWhichIsA("BasePart", true)
+    local part = spot:FindFirstChild("Trigger") or spot:FindFirstChildWhichIsA("BasePart", true)
     if part then
         pcall(function() LP:RequestStreamAroundAsync(part.Position) end)
         Util.MoveTo(part.CFrame * CFrame.new(0, 3, 6))
         task.wait(0.4)
+    end
+    -- what the game sends for its buttons (watched): SummonTitan(<TitanSummon.Trigger>, true)
+    -- = "Private Defense Mode" (Friends Only); Public = false. Then AttemptTravel("Titan").
+    local trig = spot:FindFirstChild("Trigger")
+    if trig and Remotes:FindFirstChild("SummonTitan") then
+        local flags = Learn.Load().DefenseFlags or {}
+        local private = On("DefenseFriends")
+        local v
+        if private then v = flags.Friends else v = flags.Public end
+        if v == nil then v = private end
+        Features.DefenseSent = { v = v, private = private, at = os.clock() }
+        Net.Raw("SummonTitan", { trig, v, n = 2 })
+        Features.DefenseState.at = os.clock()
+        task.wait(1.5)
+        local tr = mainChild("TitanTravel")
+        if isShown(tr) then Extras.Press(tr:FindFirstChild("Yes", true)) else Travel.To("Titan") end
+        return true
     end
     Prompt.Use(prompt)
     -- the Defense Mode window opens -> pressed on the next tick
@@ -5180,8 +5197,11 @@ function DungeonGui.SummonDirect()
     -- first value: what the game sent when its "Public" / "Friends Only" button was clicked
     -- (learned); Public not learned yet -> true, like Yuto Hub
     local known = Learn.Load().DungeonFlags or {}
-    local flag = On("DungeonFriends") and known.Friends or known.Public
-    if flag == nil then flag = true end
+    local flag
+    if On("DungeonFriends") then flag = known.Friends else flag = known.Public end
+    -- not learned yet: like Defense Mode (SummonTitan(trigger, true) = Private), and with
+    -- false sent for Friend Only others could join -> true = Friends Only, false = Public
+    if flag == nil then flag = On("DungeonFriends") end
     if CFG.DungeonSummonFlag ~= nil then flag = CFG.DungeonSummonFlag end
     Net.Call("SummonDungeon", flag, sizeIndex, world)
     Features.LastSummon = { source = "direct (Yuto Hub args)", artifact = "-", at = os.clock() }
@@ -6247,6 +6267,25 @@ end)
 Net.Listen("JoinDungeon", function() Features.DungeonBossAt = nil Features.DungeonIdleSince = nil Features.DungeonMap = nil end)
 -- UpdateMap(grid): grid[x][y] = true for every room the minimap shows (= reachable now).
 -- Rooms open one by one from the start room; a hidden one can't be activated or walked to.
+-- "<you> has started a Private / Public Defense Mode in ..." -> check what we sent meant that;
+-- if not, remember the other value (saved with the learned calls)
+Net.Listen("SendSubtleMessage", function(msg)
+    local sent = Features.DefenseSent
+    if type(msg) ~= "string" or not sent or os.clock() - sent.at > 10 then return end
+    if not string.find(msg, LP.Name, 1, true) and not string.find(msg, LP.DisplayName, 1, true) then return end
+    local kind = string.match(msg, "started a (%a+) Defense Mode")
+    if not kind then return end
+    local wasPrivate = kind == "Private"
+    local d = Learn.Load()
+    local friendsV = (sent.v == wasPrivate)          -- true sent + Private -> true = Friends Only
+    d.DefenseFlags = { Friends = friendsV, Public = not friendsV }
+    Features.DefenseSent = nil
+    pcall(function() if writefile then writefile(Learn.File, HttpService:JSONEncode(d)) end end)
+    if wasPrivate ~= sent.private then
+        Util.Notify("Defense opened as " .. kind .. " - fixed for next time")
+    end
+end)
+
 -- entering any dungeon (ours or a public one someone else opened): forget the last run
 task.spawn(pcall, function()
     local wv = LP:WaitForChild("World", 10)
