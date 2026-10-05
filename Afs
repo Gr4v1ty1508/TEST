@@ -5289,6 +5289,7 @@ local TShop     = Window:Tab("Shop / Transfer")
 local TOpen     = Window:Tab("Open UI")
 local THatch    = Window:Tab("Hatch", true)
 local TPassive  = Window:Tab("Passive")
+local TPrio     = Window:Tab("Priority / Team")
 local TSettings = Window:Tab("Settings", true)
 local TUI       = Window:Tab("UI Settings")
 
@@ -5730,7 +5731,7 @@ do
 
     -- PRIORITY: 1 = done first. The first feature in the list that has something to do gets the
     -- character; the ones under it wait until it's idle (trial closed, cooldown, nothing to hatch...)
-    local pc = TSettings:Card("Priority", "Right")
+    local pc = TPrio:Card("Priority", "Left")
     pc:Paragraph({ Body = "1 = most important. When two features both want the character, the lower number goes first;\n"
         .. "the other one waits until the first has nothing to do." })
     local orderText = pc:Paragraph({ Body = "Order : -" })
@@ -5815,7 +5816,7 @@ end
 -- EXTRAS UI ----------------------------------------------------------------------------------------
 do
     -- Main: teams per activity
-    local t = TMain:Card("Auto Equip Teams", "Right")
+    local t = TPrio:Card("Auto Equip Teams", "Right")
     t:Paragraph({ Body = "Uses the teams you saved in the game's Pets menu. Leave a slot empty to not switch for it." })
     local names = Extras.TeamNames()
     local drops = {
