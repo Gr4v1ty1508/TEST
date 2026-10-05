@@ -5841,12 +5841,35 @@ do
         Window.ToggleKey = key
     end })
     u:Slider({ Title = "UI Scale [%]", Min = 60, Max = 120, Default = 100, Flag = "UIScale", Callback = function(v) Window:SetScale(v / 100) end })
+    -- text size of the whole hub (every label / button / box), new rows included
+    do
+        local base = setmetatable({}, { __mode = "k" })
+        local fontScale = 1
+        local function apply(o)
+            if (o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox")) and not o.TextScaled then
+                if not base[o] then base[o] = o.TextSize end
+                o.TextSize = math.max(6, math.floor(base[o] * fontScale + 0.5))
+            end
+        end
+        function Features.SetFontScale(f)
+            fontScale = f
+            for _, root in ipairs({ Window.Main, Window.Icon }) do
+                if root then for _, o in ipairs(root:GetDescendants()) do pcall(apply, o) end end
+            end
+        end
+        if Window.Main then
+            track(Window.Main.DescendantAdded:Connect(function(o)
+                if fontScale ~= 1 then task.defer(function() pcall(apply, o) end) end
+            end))
+        end
+        u:Slider({ Title = "Font Size [%]", Min = 70, Max = 150, Default = 100, Flag = "FontScale",
+            Callback = function(v) Features.SetFontScale(v / 100) end })
+    end
     u:Toggle({ Title = "Show Floating Icon", Default = true, Flag = "ShowIcon", Callback = function(v) Window.Icon.Visible = v end })
     u:Button({ Title = "Reset Window Position", Callback = function() Window.Main.Position = UDim2.fromScale(0.5, 0.5) end })
     u:Button({ Title = "Unload Script", Callback = function()
-        pcall(function() Window:SaveConfig() end) autoSave = false  -- keep settings as they were before unload
-        for _, el in pairs(Flags) do if el.Type == "Toggle" then el:Set(false, true) end end
-        if getgenv and getgenv().GravityHubV3 then getgenv().GravityHubV3() getgenv().GravityHubV3 = nil else Window:Destroy() end
+        if getgenv and getgenv().GravityHubV3 then getgenv().GravityHubV3() getgenv().GravityHubV3 = nil
+        else Features.StopAll() end
     end })
 
     local s = TUI:Card("Stats", "Right")
@@ -6205,11 +6228,27 @@ task.spawn(function()
     end
 end)
 
-if getgenv then
-    getgenv().GravityHubV3 = function()
-        running = false
-        Window:Destroy()
+-- UNLOAD: settings are saved as they are first (so the next load starts the same), then every
+-- feature is switched off WITH its own clean-up (unhide players, teleport off, ...), the
+-- character is put back to normal, all loops stop and the window goes away.
+function Features.StopAll()
+    pcall(function() Window:SaveConfig() end)
+    autoSave = false
+    for _, el in pairs(Flags) do
+        if el.Type == "Toggle" and el:Get() == true then pcall(el.Set, el, false) end
     end
+    pcall(function()
+        local hum = Util.Humanoid()
+        if hum and hum.WalkSpeed ~= 16 then hum.WalkSpeed = 16 end
+    end)
+    pcall(function() Features.HideOthers(false) end)
+    Combat.InFarm = false
+    running = false
+    pcall(function() Window:Destroy() end)
+    Util.Notify("Gravity Hub unloaded - everything stopped")
+end
+if getgenv then
+    getgenv().GravityHubV3 = function() Features.StopAll() end
 end
 
 Util.Notify("Loaded - " .. #Data.FarmWorlds() .. " maps, " .. #(Data.Passives()) .. " passives")
