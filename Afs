@@ -5789,16 +5789,15 @@ local function joinGate()
     Net.Raw("JoinGatesMode", { Gate.id, n = 1 })
     Net.Raw("AttemptTravel", { "GatesMode", true, Gate.id, n = 3 })
 end
--- ranks to try, hardest first (bottom of the game's list): the picked ones, or every rank when
--- none is picked. A rank that made no gate (none left) is passed over for 10 min.
+-- the picked ranks, hardest first (bottom of the game's list). A rank that made no gate
+-- (none left) is passed over for 10 min.
 Gate.empty = {}
 function Features.GateRankOrder()
     local picked = F("GateRanks") or {}
-    local anyPicked = next(picked) ~= nil
     local out = {}
     for i = #CFG.GateRanks, 1, -1 do
         local r = CFG.GateRanks[i]
-        if (not anyPicked or picked[r]) and not (Gate.empty[r] and os.clock() < Gate.empty[r]) then out[#out + 1] = r end
+        if picked[r] and not (Gate.empty[r] and os.clock() < Gate.empty[r]) then out[#out + 1] = r end
     end
     return out
 end
@@ -5819,9 +5818,13 @@ function Features.GateRun(amount, wanted)
         if Util.Every("gate-join", 3) then joinGate() end
         return true
     end
+    if not next(F("GateRanks") or {}) then
+        if Util.Every("gate-pick", 60) then Util.Notify("Gate: pick the gate levels in Dungeon / Gate / Time") end
+        return false
+    end
     local ranks = Features.GateRankOrder()
     if #ranks == 0 then
-        if Util.Every("gate-allempty", 120) then Util.Notify("Gate: no gates left to open (checking again in a few minutes)") end
+        if Util.Every("gate-allempty", 120) then Util.Notify("Gate: no gates of the picked levels left (checking again in a few minutes)") end
         return false
     end
     if not Util.Every("gate-summon", 2) then return true end
@@ -5853,7 +5856,7 @@ BP.Run = {
         force("AutoOpenDungeon", "AutoFarmDungeon")
         return Features.Dungeon() == true
     end,
-    -- a "Portal" is a Gate: the hardest rank you still have (only the picked ones if any are picked)
+    -- a "Portal" is a Gate: the picked levels of Auto Gate, hardest first
     ["Complete Portal"] = function()
         force()
         return Features.GateRun(1, function() return On("AutoBattlePass") end)
@@ -6264,7 +6267,7 @@ do
     local c = TMain:Card("Auto Battle Pass", "Left")
     c:Paragraph({ Body = "Does the battle pass quests you pick until their repeats (5 a day) are used, then goes back to the rest. "
         .. "New quests come with the daily reset and start by themselves.\n"
-        .. "Dungeon uses Auto Dungeon's settings. Portal = a Gate run, hardest gate you have first (Auto Gate's levels if picked). Its place in the order: Priority / Team." })
+        .. "Dungeon uses Auto Dungeon's settings. Portal = a Gate run with Auto Gate's picked levels, hardest first. Its place in the order: Priority / Team." })
     local all = {}
     for _, k in ipairs(BP.KindNames()) do all[k] = true end
     c:Dropdown({ Title = "Select Quests", Items = BP.KindNames(), Multi = true, Default = all, Flag = "BPQuests" })
@@ -6389,7 +6392,7 @@ do
 
     local g = TDungeon:Card("Auto Gate !", "Right")
     local gateRuns = g:Label("Runs : 0")
-    g:Paragraph({ Body = "Opens the hardest gate you still have first (bottom of the list = hardest). Pick levels to only use those; pick none to use all." })
+    g:Paragraph({ Body = "With several levels picked, the hardest one is opened first (bottom of the list = hardest), then the next easier when it runs out." })
     g:Dropdown({ Title = "Select Gate Level", Items = CFG.GateRanks, Multi = true, Flag = "GateRanks" })
     g:Slider({ Title = "Amount", Min = 1, Max = 10, Default = 1, Flag = "GateAmount" })
     g:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "GateTarget" })
