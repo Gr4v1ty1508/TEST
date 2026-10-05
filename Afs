@@ -3735,33 +3735,6 @@ function Features.DungeonOpenDoor(important)
     return true
 end
 
--- one short visit to the nearest mob of a room nobody visited in the last 8 s (see FarmDungeon)
-Features.DungeonTags = {}                       -- { at = os.clock(), pos = Vector3 }
-function Features.DungeonTagStep(worldName, skip)
-    local now, me = os.clock(), Util.Root()
-    local recent = {}
-    for i = #Features.DungeonTags, 1, -1 do
-        local t = Features.DungeonTags[i]
-        if now - t.at > 8 then table.remove(Features.DungeonTags, i) else recent[#recent + 1] = t.pos end
-    end
-    local best, bestD
-    for _, e in ipairs(Combat.List(worldName)) do
-        local pos = not (skip and skip(e)) and Combat.Pos(e)
-        if pos then
-            local covered = false
-            for _, p in ipairs(recent) do if (p - pos).Magnitude < 130 then covered = true break end end
-            if not covered then
-                local d = me and (pos - me.Position).Magnitude or 0
-                if not bestD or d < bestD then best, bestD = e, d end
-            end
-        end
-    end
-    if not best then return false end
-    table.insert(Features.DungeonTags, { at = now, pos = Combat.Pos(best) })
-    Combat.Attack(best, function() return On("AutoFarmDungeon") end, { tag = true })
-    return true
-end
-
 function Features.FarmDungeon()
     if not Features.DungeonLayout then Features.LoadDungeonLayout() end
     dungeonStep = "inside"
@@ -3779,13 +3752,14 @@ function Features.FarmDungeon()
     -- after we left for the next altar). They block the next rooms, but can't be attacked until
     -- loaded: go back to the rooms we opened (newest first) until they show up.
     -- only fight mobs that are loaded (have a position) - the rest are handled above
+    -- mobs alive but none loaded (their room is far): back to the rooms we opened to load them
+    if Features.DungeonFindHidden(worldName, noChest) then return true end
     local chestSkip = noChest
     noChest = function(e) return Combat.Pos(e) == nil or (chestSkip ~= nil and chestSkip(e)) end
-    -- Yuto (whole run watched: 53 mob teleports for 41 rooms): it goes to ONE mob of a room for
-    -- ~0.7 s - the pets go on it and clear that room by themselves - and goes on opening the
-    -- next rooms meanwhile; it doesn't stand there until everything is dead. Same here: a room
-    -- whose mobs got a visit in the last 8 s is left to the pets.
-    if Features.DungeonTagStep(worldName, noChest) then Features.DungeonIdleSince = nil return true end
+    -- like Yuto (seen in game): open the next room(s), come back and fight every mob until it's
+    -- dead, then open the next ones
+    if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then Features.DungeonIdleSince = nil return true end
+    if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then Features.DungeonIdleSince = nil return true end
     -- no enemies: open the next room (stand on its altar ~1 s, fire "Activate"; its enemies spawn)
     -- keep opening the nearest room, one after another, until mobs show up - then stop and
     -- fight them first (the next tick comes back here once they're dead). Also after the boss is
@@ -3811,11 +3785,6 @@ function Features.FarmDungeon()
     end
     -- any other door (each again every 20 s)
     if Features.DungeonOpenDoor(false) then return true end
-    -- nothing left to open: mobs alive but none loaded -> back to the rooms we opened to load them
-    if Features.DungeonFindHidden(worldName, chestSkip) then return true end
-    -- stay on the mobs that are still alive until they're dead
-    if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then Features.DungeonIdleSince = nil return true end
-    if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then Features.DungeonIdleSince = nil return true end
     -- nothing to fight / press / open here: go and look at the rooms (far rooms aren't loaded,
     -- so their altar / door / mobs can't be seen from here). Big dungeons have 100+ rooms, so
     -- not all of them in a row: a room we've looked at that had nothing left (no altar or door
