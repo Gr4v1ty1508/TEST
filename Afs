@@ -3399,8 +3399,48 @@ function Features.Dungeon()
     end
     Features.DungeonBossAt, Features.DungeonIdleSince = nil, nil
     dungeonStep = "lobby"
-    if On("AutoOpenDungeon") then Features.OpenDungeon() return true end
+    if On("AutoOpenDungeon") then
+        -- the next dungeon can't be opened yet: don't try (and don't hold the character -
+        -- the next feature in the Priority list runs meanwhile)
+        local cd = Features.DungeonCooldown()
+        if cd > 0 then
+            dungeonStep = "cooldown"
+            if Util.Every("dungeon-cd-note", 120) then
+                Util.Notify(string.format("Dungeon: next one in %d:%02d", cd // 60, cd % 60))
+            end
+            return false
+        end
+        Features.OpenDungeon()
+        return true
+    end
     return false
+end
+-- seconds before a new dungeon can be opened (0 = now). The door in the Tower shows it
+-- ("0:04:14"); the save has LastDungeon (when the last one was opened): the cooldown is
+-- 4 min with the Dungeon artefact on (it's put on right before every summon) and 10 h without.
+function Features.DungeonCooldown()
+    local left = 0
+    pcall(function()
+        local last = tonumber(Data.StoreData().LastDungeon) or 0
+        local cdLen = On("DungeonArtifact") and 240 or 36000
+        local now = workspace:GetServerTimeNow()
+        if last > 0 and last + cdLen > now then left = last + cdLen - now end
+    end)
+    pcall(function()
+        local door = Worlds.Tower.DungeonDoor
+        for _, d in ipairs(door:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Visible then
+                local parts = {}
+                for n in string.gmatch(d.Text, "%d+") do parts[#parts + 1] = tonumber(n) end
+                if string.find(d.Text, "%d+:%d%d:%d%d") and #parts >= 3 then
+                    local secs = 0
+                    for i, n in ipairs(parts) do secs = (i == 2 and #parts == 4) and (secs * 24 + n) or (secs * 60 + n) end
+                    if secs > left then left = secs end
+                end
+            end
+        end
+    end)
+    return math.floor(left)
 end
 function Features.DungeonStep() return dungeonStep end
 
