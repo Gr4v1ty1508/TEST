@@ -1022,12 +1022,16 @@ Combat.Options = { Teleport = true, PetTP = false, Ult = false }
 Combat.InFarm = false
 function Combat.CanTP() return Combat.Options.Teleport or not Combat.InFarm end
 
+-- RequestPetTeleport(pet) for each of YOUR equipped pets (needs the pet-teleport passive; the
+-- game itself sends it too). Sent AFTER the character got to the enemy - sent before, it pulled
+-- the pets to the spot we were leaving, and they had to run all the way after us.
+function Combat.PetsToMe()
+    if not Combat.Options.PetTP then return end
+    for _, pet in ipairs(Data.EquippedPets()) do task.spawn(Net.Call, "PetTeleport", pet) end
+end
 function Combat.Attack(e, wanted)
     local t0 = os.clock()
-    if Combat.Options.PetTP then
-        -- RequestPetTeleport(pet): each of YOUR equipped pet models
-        for _, pet in ipairs(Data.EquippedPets()) do task.spawn(Net.Call, "PetTeleport", pet) end
-    end
+    local petsAt, movedAt = os.clock() - 2.7, nil   -- first call ~0.3 s in, or right after the teleport
     local streamedAt = 0
     local hp0, hpAt = Combat.HP(e), nil
     do
@@ -1057,7 +1061,13 @@ function Combat.Attack(e, wanted)
         end
         local root = Util.Root()
         local pos, part = Combat.Pos(e)
+        -- pets: one frame after we arrived, then again every 3 s while this enemy lives
+        if os.clock() - petsAt > 3 or (movedAt and os.clock() - movedAt > 0.05) then
+            petsAt, movedAt = os.clock(), nil
+            Combat.PetsToMe()
+        end
         if Combat.CanTP() and root and pos and (root.Position - pos).Magnitude > 12 then
+            movedAt = os.clock()
             if part then
                 root.CFrame = part.CFrame * CFrame.new(0, 0, 4)
             else
