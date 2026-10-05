@@ -5788,6 +5788,17 @@ function Features.GateFolder()
     local gm = Worlds:FindFirstChild("GatesMode")
     return gm and Gate.id and gm:FindFirstChild(Gate.id) or nil
 end
+-- where the gate's room line starts: its Spawns.Spawn (seen in the recording), else its
+-- PrimaryPart, else the spot we came in at
+function Features.GateStart(folder)
+    local sp = folder and folder:FindFirstChild("Spawns")
+    sp = sp and (sp:FindFirstChild("Spawn") or sp:FindFirstChildWhichIsA("BasePart"))
+    if sp and sp:IsA("BasePart") then return sp.Position end
+    local pp = folder and (folder.PrimaryPart or folder:FindFirstChild("PrimaryPart"))
+    if pp and pp:IsA("BasePart") then return pp.Position end
+    if not Gate.inPos then local r = Util.Root() Gate.inPos = r and r.Position or Vector3.zero end
+    return Gate.inPos
+end
 local function joinGate()
     Net.Raw("JoinGatesMode", { Gate.id, n = 1 })
     Net.Raw("AttemptTravel", { "GatesMode", true, Gate.id, n = 3 })
@@ -5823,20 +5834,37 @@ function Features.GateRun(amount, wanted)
             Gate.cleared = true
             for e in pairs(Combat.Skip) do Combat.Skip[e] = nil end
         end
-        -- only our own gate (other players' gates are in GatesMode too)
+        -- A gate is a line of rooms; every room's enemies spawn at once, but a room only takes
+        -- damage after the one before it is cleared (Yuto went room by room, ~150 studs each, away
+        -- from the gate's spawn). So: always the living enemy closest to the gate's START, never
+        -- the one closest to us. Only our own gate (other players' gates are in GatesMode too).
         local folder = Features.GateFolder()
-        local skip = folder and function(e) return not e:IsDescendantOf(folder) end or nil
-        if not Combat.Step("GatesMode", wanted, nil, F("GateTarget") or "Nearest", (not folder) and 600 or nil, skip) then
-            local n = 0
-            for _, e in ipairs(Combat.List("GatesMode")) do if not skip or not skip(e) then n = n + 1 end end
-            Combat.Log("gate", "gate " .. tostring(Gate.id) .. (folder and "" or " (folder not found)")
-                .. ": nothing to hit, " .. n .. " alive enemies in it")
-            -- next wave not loaded yet: anything skipped earlier gets another go
+        local start = Features.GateStart(folder)
+        local root = Util.Root()
+        local best, bestD
+        for _, e in ipairs(Combat.List("GatesMode")) do
+            if not folder or e:IsDescendantOf(folder) then
+                local pos = Combat.Pos(e)
+                if pos then
+                    local d = (pos - start).Magnitude
+                    -- no folder (loaded mid-gate): stay with enemies near where we came in
+                    if (folder or (root and (pos - root.Position).Magnitude < 900)) and (not bestD or d < bestD) then
+                        best, bestD = e, d
+                    end
+                end
+            end
+        end
+        if best then
+            Combat.Log("gate", string.format("gate %s: room enemy %s, %.0f studs from the start", tostring(Gate.id), Combat.Name(best), bestD))
+            Combat.Attack(best, wanted)
+        else
+            Combat.Log("gate", "gate " .. tostring(Gate.id) .. (folder and "" or " (folder not found)") .. ": no enemy left to hit")
+            -- anything skipped earlier ("no damage") gets another go
             if Util.Every("gate-unskip", 3) then for e in pairs(Combat.Skip) do Combat.Skip[e] = nil end end
         end
         return true
     end
-    Gate.inAt, Gate.cleared = nil, nil
+    Gate.inAt, Gate.cleared, Gate.inPos = nil, nil, nil
     -- just over: the game is sending us back
     if os.clock() - Gate.overAt < 1.5 then return true end
     -- ours was made but we're not in yet
