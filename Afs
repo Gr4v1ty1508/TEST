@@ -5945,8 +5945,9 @@ end)
 -- auto load this account's config, then auto save every 3 s when something changed
 pcall(function() Window:LoadConfig() end)
 pcall(function() if Features.ShowPrioOrder then Features.ShowPrioOrder() end end)
--- the pets picked for Auto Passive / Auto Lunar are NOT kept between games: start empty every join
-for _, flag in ipairs({ "PassivePets", "EQPets" }) do
+-- the pets picked for Auto Passive are NOT kept between games (start empty every join);
+-- Auto Lunar keeps its pets so it goes on by itself after a disconnect / rejoin
+for _, flag in ipairs({ "PassivePets" }) do
     local el = Flags[flag]
     if el then pcall(el.Set, el, {}, true) end
 end
