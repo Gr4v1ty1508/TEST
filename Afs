@@ -3625,6 +3625,18 @@ function Features.Hatch()
     end
     Features.HatchWantAt = os.clock()
     local w = Worlds:FindFirstChild(worldName)
+    -- "Summon Max Star" = the game's Max Open, the way Yuto Hub does it (recorded, same setting):
+    -- AttemptMultiOpen("<StarName>") once per Delay; the game's own button also fires
+    -- Bindable SetTargetEgg(star) first. Server answers ~every 2 s (thousands of stars each).
+    if modes["Summon Max Star"] then
+        if Features.HatchTarget ~= starName then
+            Features.HatchTarget = starName
+            local ste = Bindables:FindFirstChild("SetTargetEgg")
+            if ste and ste:IsA("BindableEvent") then pcall(ste.Fire, ste, starName) end
+        end
+        Net.Raw("AttemptMultiOpen", { starName, n = 1 })
+        return
+    end
     Net.Call("OpenEgg", (w and w:FindFirstChild(starName)) or starName, amount)
 end
 
