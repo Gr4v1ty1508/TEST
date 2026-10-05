@@ -3292,7 +3292,9 @@ function Features.DungeonActivate()
     if fireproximityprompt then pcall(fireproximityprompt, best.pp) else Prompt.Use(best.pp) end
     local prev = Features.DungeonActivated[best.cp]
     Features.DungeonActivated[best.cp] = { at = os.clock(), n = (prev and prev.n or 0) + 1 }
-    task.wait(1)
+    -- up to 1 s for this room's mobs to appear (the caller stops opening rooms as soon as they do)
+    local t0, worldName = os.clock(), root.Name
+    while os.clock() - t0 < 1 and #Combat.List(worldName) == 0 do task.wait(0.1) end
     return true
 end
 
@@ -3321,12 +3323,15 @@ function Features.FarmDungeon()
     -- (the treasure room behind the boss) and the chests are still taken.
     local bossDone = Features.DungeonBossAt ~= nil
     -- no enemies: open the next room (stand on its altar ~1 s, fire "Activate"; its enemies spawn)
-    -- Yuto opens TWO rooms back to back (~3 s apart) and then fights both rooms' mobs at once
-    -- (watched: 4.6 s + 7.7 s, 18.4 s + 21.5 s, 30.7 s + 33.8 s ...) - twice the mobs per fight
-    if not bossDone and Features.DungeonActivate() then
-        Features.DungeonIdleSince = nil
-        Features.DungeonActivate()
-        return true
+    -- keep opening the nearest room, one after another, until mobs show up - then stop and
+    -- fight them first (the next tick comes back here once they're dead)
+    if not bossDone then
+        local opened = 0
+        while On("AutoFarmDungeon") and Features.DungeonActivate() do
+            opened = opened + 1
+            if #Combat.List(worldName) > 0 then break end
+        end
+        if opened > 0 then Features.DungeonIdleSince = nil return true end
     end
     local root = Features.DungeonRoot()
     -- chests with a prompt (older dungeons)
