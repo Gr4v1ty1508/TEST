@@ -3878,6 +3878,8 @@ function Features.EventQuestStatus()
 end
 function Features.EventQuests()
     -- several pets: each one gets a reroll every round (old single-pet config still works)
+    -- right after a join the picks still hold last game's UIDs (other pets now!): wait
+    if not Features.PicksReady then task.wait(1) return end
     local pets = Util.SetToList(F("EQPets"))
     if #pets == 0 and type(F("EQPet")) == "string" and F("EQPet") ~= "" then pets = { F("EQPet") } end
     if #pets == 0 then
@@ -5568,6 +5570,8 @@ do
     local pets = p:Dropdown({ Title = "Select Pets To Roll", Items = Data.Pets(), Multi = true, CountOnly = true, Flag = "PassivePets" })
     Features.PetDrops = Features.PetDrops or {}
     table.insert(Features.PetDrops, pets)
+    Features.PetDropFlags = Features.PetDropFlags or {}
+    Features.PetDropFlags[pets] = "PassivePets"
     -- one refresh for every pet list (Auto Reroll Passive + Lunar vs Solar), keeps what was picked
     -- a picked pet is remembered by its label; labels can change (nickname, display name, an
     -- older hub version), so after every refresh the picks are matched again by UID "[...]":
@@ -5598,12 +5602,78 @@ do
         for _ in pairs(new) do n2 = n2 + 1 end
         if changed or n1 ~= n2 then d:Set(new, true) end
     end
+    -- THE GAME GIVES EVERY PET A NEW UID EACH TIME YOU JOIN (seen: the same "Lucky" Femto was
+    -- 866728, then 757944 after a rejoin). So the Lunar picks are also kept as a fingerprint of
+    -- the pet that doesn't change (PetId, nickname, FusedXP, BaseLevel, Shiny, Void, look) in
+    -- CONFIG/<name>_pets.json, and after a join they're found again by that fingerprint.
+    -- Identical fingerprints (same fodder pet twice) are handed out one per pick.
+    Features.PicksReady = false
+    local PICK_FILE = CFG.ConfigFolder .. "/CONFIG/" .. LP.Name .. "_pets.json"
+    local KEEP_PICKS = { EQPets = true }
+    function Data.PetSig(raw)
+        if type(raw) ~= "table" then return nil end
+        return table.concat({ tostring(raw.PetId), tostring(raw.CustomName or ""), tostring(raw.FusedXP or 0),
+            tostring(raw.BaseLevel or 0), tostring(raw.Shiny), tostring(raw.Void), tostring(raw.AppearanceId or ""),
+            tostring(raw.Skin or "") }, "|")
+    end
+    local function loadPicks()
+        local ok, t = pcall(function()
+            if not (isfile and readfile) or not isfile(PICK_FILE) then return {} end
+            return HttpService:JSONDecode(readfile(PICK_FILE))
+        end)
+        return (ok and type(t) == "table") and t or {}
+    end
+    function Features.SavePetPicks(flag, set)
+        if not KEEP_PICKS[flag] or not Features.PicksReady or not writefile then return end
+        local sigs = {}
+        for label, on in pairs(set or {}) do
+            local rec = on and Data.InventoryIndex[Data.PetId(label)]
+            local sig = rec and Data.PetSig(rec.raw)
+            if sig then sigs[#sigs + 1] = sig end
+        end
+        local all = loadPicks()
+        all[flag] = sigs
+        pcall(function()
+            if makefolder and isfolder and not isfolder(CFG.ConfigFolder .. "/CONFIG") then makefolder(CFG.ConfigFolder .. "/CONFIG") end
+            writefile(PICK_FILE, HttpService:JSONEncode(all))
+        end)
+    end
+    -- after a join: today's labels for the saved fingerprints
+    local function restorePicks(d, flag, list)
+        local sigs = loadPicks()[flag]
+        local bySig = {}
+        for _, label in ipairs(list) do
+            local rec = Data.InventoryIndex[Data.PetId(label)]
+            local sig = rec and Data.PetSig(rec.raw)
+            if sig then bySig[sig] = bySig[sig] or {} table.insert(bySig[sig], label) end
+        end
+        local new, n, want = {}, 0, type(sigs) == "table" and #sigs or 0
+        for _, sig in ipairs(type(sigs) == "table" and sigs or {}) do
+            local pool = bySig[sig]
+            if pool and #pool > 0 then new[table.remove(pool, 1)] = true n = n + 1 end
+        end
+        -- the labels in the config hold LAST game's UIDs (= other pets now): never keep those
+        d:Set(new, true)
+        if want > 0 then Util.Notify(string.format("Lunar pets: %d/%d picked again", n, want)) end
+    end
     function Features.RefreshPetLists(silent)
         Data.Inventory(true)
         local list = Data.Pets()
+        local loaded = next(Data.InventoryIndex) ~= nil
         for _, d in ipairs(Features.PetDrops) do
             pcall(d.Refresh, d, list)
-            pcall(Features.RemapPetPicks, d, list)
+            local flag = Features.PetDropFlags and Features.PetDropFlags[d]
+            if not Features.PicksReady and loaded and flag and KEEP_PICKS[flag] then
+                pcall(restorePicks, d, flag, list)
+            else
+                pcall(Features.RemapPetPicks, d, list)
+            end
+        end
+        if loaded and not Features.PicksReady then
+            Features.PicksReady = true
+            for d, flag in pairs(Features.PetDropFlags or {}) do
+                if KEEP_PICKS[flag] then Features.SavePetPicks(flag, d:Get()) end
+            end
         end
         if not silent then Util.Notify(#list .. " pets ( equipped + inventory )") end
         return list
@@ -5641,8 +5711,11 @@ do
     local labels, keys = {}, {}
     local info = Data.Module("TeamEventInfo")
     for _, key in ipairs(info and info.QuestOrder or {}) do keys[#keys + 1] = key end
-    local qpet = q:Dropdown({ Title = "Pets To Reroll", Items = Data.Pets(), Multi = true, CountOnly = true, Default = {}, Flag = "EQPets" })
+    local qpet = q:Dropdown({ Title = "Pets To Reroll", Items = Data.Pets(), Multi = true, CountOnly = true, Default = {}, Flag = "EQPets",
+        Callback = function(v) Features.SavePetPicks("EQPets", v) end })
     table.insert(Features.PetDrops, qpet)
+    Features.PetDropFlags = Features.PetDropFlags or {}
+    Features.PetDropFlags[qpet] = "EQPets"
     q:Button({ Title = "Refresh Pets", Callback = function() Features.RefreshPetLists() end })
     q:Dropdown({ Title = "Slot", Items = { "1", "2", "3" }, Default = "1", Required = true, Flag = "EQSlot" })
     local events = {}
@@ -6007,13 +6080,20 @@ loop(2, function() if Features.MegaStatus then pcall(function() Features.MegaSta
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
 -- after joining, the save (GameData) loads a bit after the hub: refresh the pet lists once it's there
 task.spawn(function()
-    for _ = 1, 60 do
+    for _ = 1, 90 do
         local st = Data.StoreData()
         if st and type(st.Pets) == "table" and next(st.Pets) then
             pcall(Features.RefreshPetLists, true)
-            return
+            if Features.PicksReady then return end
         end
         task.wait(1)
+    end
+    -- the save never loaded: the remembered picks can't be matched; the labels from the
+    -- config carry last game's UIDs (other pets now) -> clear them instead of rolling those
+    if not Features.PicksReady then
+        pcall(function() Flags.EQPets:Set({}, true) end)
+        Features.PicksReady = true
+        Util.Notify("Lunar pets: couldn't read your pets - pick them again")
     end
 end)
 loop(0.05, function() if On("AutoEventQuests") then Features.EventQuests() else task.wait(0.5) end end)
