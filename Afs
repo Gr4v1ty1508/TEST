@@ -3321,7 +3321,13 @@ function Features.FarmDungeon()
     -- (the treasure room behind the boss) and the chests are still taken.
     local bossDone = Features.DungeonBossAt ~= nil
     -- no enemies: open the next room (stand on its altar ~1 s, fire "Activate"; its enemies spawn)
-    if not bossDone and Features.DungeonActivate() then Features.DungeonIdleSince = nil return true end
+    -- Yuto opens TWO rooms back to back (~3 s apart) and then fights both rooms' mobs at once
+    -- (watched: 4.6 s + 7.7 s, 18.4 s + 21.5 s, 30.7 s + 33.8 s ...) - twice the mobs per fight
+    if not bossDone and Features.DungeonActivate() then
+        Features.DungeonIdleSince = nil
+        Features.DungeonActivate()
+        return true
+    end
     local root = Features.DungeonRoot()
     -- chests with a prompt (older dungeons)
     if not On("DungeonIgnoreChest") then
