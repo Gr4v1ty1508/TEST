@@ -3266,7 +3266,7 @@ function Features.DungeonActivate()
             local pp = cp:FindFirstChildWhichIsA("ProximityPrompt")
             local done = Features.DungeonActivated[cp]
             if pp and pp.Enabled and string.find(string.lower(pp.ActionText), "activ", 1, true)
-               and not (done and os.clock() - done < 30) then
+               and not done then
                 local d = (cp.Position - me.Position).Magnitude
                 if not bestD or d < bestD then best, bestD = { cp = cp, pp = pp }, d end
             end
@@ -3300,15 +3300,14 @@ function Features.FarmDungeon()
     local noChest = On("DungeonIgnoreChest") and function(e)
         return string.find(string.lower(e.Name .. " " .. Combat.Name(e)), "chest", 1, true) ~= nil
     end or nil
-    if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then return true end
-    if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then return true end
+    if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then Features.DungeonIdleSince = nil return true end
+    if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then Features.DungeonIdleSince = nil return true end
     -- the boss can die before every room is open (its key can drop early; the number of rooms
     -- changes every run, there's one boss room). Boss dead = the run is done: only the doors
-    -- (the treasure room behind the boss) and the chests are still taken, unless
-    -- "Clear Every Room After Boss" is on.
-    local bossDone = Features.DungeonBossAt ~= nil and not On("DungeonFinishRooms")
+    -- (the treasure room behind the boss) and the chests are still taken.
+    local bossDone = Features.DungeonBossAt ~= nil
     -- no enemies: open the next room (stand on its altar ~1 s, fire "Activate"; its enemies spawn)
-    if not bossDone and Features.DungeonActivate() then return true end
+    if not bossDone and Features.DungeonActivate() then Features.DungeonIdleSince = nil return true end
     local root = Features.DungeonRoot()
     -- chests with a prompt (older dungeons)
     if not On("DungeonIgnoreChest") then
@@ -3320,9 +3319,10 @@ function Features.FarmDungeon()
     end
     -- room doors ("Open"): each one tried at most every 20 s (a boss door waits for the key)
     for _, door in ipairs(Prompt.Find(root, { "door", "next", "open", "portal", "gate" })) do
-        local t = Features.DungeonDoorTried[door]
-        if not (t and os.clock() - t < 20) then
-            Features.DungeonDoorTried[door] = os.clock()
+        local t = Features.DungeonDoorTried[door] or { at = -99, n = 0 }
+        if t.n < 3 and os.clock() - t.at > 20 then
+            Features.DungeonDoorTried[door] = { at = os.clock(), n = t.n + 1 }
+            Features.DungeonIdleSince = nil
             Prompt.Use(door)
             if door.Parent and door.Parent:IsA("BasePart") then Net.Call("OpenDungeonDoor", door.Parent) end
             task.wait(1)
@@ -3332,6 +3332,10 @@ function Features.FarmDungeon()
     -- boss down and nothing left (a few seconds for the treasure chests to show up): run finished
     if Features.DungeonBossAt and os.clock() - Features.DungeonBossAt > 8 then return false end
     if Features.DungeonBossAt then task.wait(0.5) return true end
+    -- safety net if the boss message was missed: nothing to fight / press / open for 30 s
+    -- (only walking rooms to load them) -> also finished, instead of walking until time is up
+    Features.DungeonIdleSince = Features.DungeonIdleSince or os.clock()
+    if os.clock() - Features.DungeonIdleSince > 30 then return false end
     -- nothing loaded near us: visit the rooms one by one so their enemies load in (Yuto does this too)
     if On("DungeonLoadAll") then
         local rooms = Features.DungeonRooms()
@@ -3358,7 +3362,7 @@ function Features.Dungeon()
         end
         return false
     end
-    Features.DungeonBossAt = nil
+    Features.DungeonBossAt, Features.DungeonIdleSince = nil, nil
     dungeonStep = "lobby"
     if On("AutoOpenDungeon") then Features.OpenDungeon() return true end
     return false
@@ -5566,7 +5570,6 @@ do
     d:Toggle({ Title = "Friend Only", Flag = "DungeonFriends" })
     d:Toggle({ Title = "Auto Open Dungeon", Flag = "AutoOpenDungeon" })
     d:Toggle({ Title = "Teleport To Load All Dungeon", Flag = "DungeonLoadAll" })
-    d:Toggle({ Title = "Clear Every Room After Boss", Flag = "DungeonFinishRooms" })
     d:Toggle({ Title = "Auto Farm Dungeon", Flag = "AutoFarmDungeon" })
     Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(dw, Data.FarmWorldLabels()) end
 
@@ -6053,11 +6056,11 @@ end)
 -- dungeon run state from the game's messages
 Net.Listen("SendSubtleMessage", function(msg)
     if type(msg) == "string" and string.find(string.upper(msg), "BOSS HAS BEEN DEFEATED", 1, true)
-       and Features.InDungeon() then
+       and Util.World() == "Dungeon" then
         Features.DungeonBossAt = os.clock()
     end
 end)
-Net.Listen("JoinDungeon", function() Features.DungeonBossAt = nil end)
+Net.Listen("JoinDungeon", function() Features.DungeonBossAt = nil Features.DungeonIdleSince = nil end)
 Net.Listen("SetTowerFloor", function(floor)
     if type(floor) == "number" then
         Stats.TrialFloor = floor + 1
