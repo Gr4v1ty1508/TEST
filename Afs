@@ -4,7 +4,8 @@
 
     Tabs
       Main              auto farm (worlds / mobs / mode), quest, click, collect,
-                        ult, mount, pet TP, next world, rebirth, re-equip pets
+                        ult, mount, pet TP, next world, rebirth, re-equip pets,
+                        auto battle pass (picked daily quests, 5 repeats each)
       Teleport          any world (numbered like the in-game list)
       Time Trial/Tower  trials multi-select, leave on floor, Infinity Tower
       Raid/Defense/Met. raid world + mode, defense, meteor / fallen star
@@ -1953,7 +1954,9 @@ local function F(flag)
     if not el then return nil end
     return el:Get()
 end
-local function On(flag) return F(flag) == true end
+-- flags the Battle Pass turns on for the quest it's doing right now (never saved to the config)
+local Forced = {}
+local function On(flag) return Forced[flag] == true or F(flag) == true end
 local function worldsFrom(flag)
     local out = {}
     for _, label in ipairs(Util.SetToList(F(flag))) do out[#out + 1] = Data.FromLabel(label) end
@@ -5365,6 +5368,520 @@ function Extras.StatsText()
     return string.format("FPS : %d   Ping : %s ms   World : %s", fps, ping, Data.WorldDisplay(Util.World()))
 end
 
+-- BATTLE PASS ---------------------------------------------------------------------------------------
+-- MainGui.BattlePass shows the day's quests (season 7 "Straw Hat Pass"):
+--   Complete Dungeon   Repeats: 2/5   + 25 exp   0/1
+--   Complete Portal    Repeats: 0/5   + 25 exp   0/5
+--   Open Star          Repeats: 0/5   + 25 exp   0/1000000
+--   Open Divine        Repeats: 0/5   + 25 exp   0/1
+-- and "Quests reset in 18:34:55". Reaching a quest's goal gives its exp and the quest starts over
+-- until its repeats are used up (5 a day); the reset brings a new set of quests.
+-- The quests are read from the window (opened once if the game never built it), the save
+-- (tables with "battlepass" / "bp" in their name) and the GetBPdata remote. Each picked quest is
+-- done with the hub's own features - using the settings of their tabs (dungeon world, gate rank,
+-- trials, defense world ...) - one after the other until its repeats are full, then the hub goes
+-- back to the rest of the Priority list. When the day resets it starts again by itself.
+do
+local BP = {
+    quests = {}, readAt = -math.huge, task = nil, since = 0, resetAt = nil, opened = 0,
+    counts = {}, prev = {}, moved = {}, skipUntil = {}, data = nil, raw = nil, saveKeys = {},
+}
+Features.BattlePass = BP
+BP.Repeats = 5   -- per quest per day (the window's "Repeats: x/5" wins when it can be read)
+BP.StuckAfter = 15 * 60   -- a quest that doesn't move for this long is left alone for 30 min
+
+-- what the hub does for a quest: the first kind whose word is in the quest's name
+BP.Kinds = {
+    { "Complete Dungeon", { "dungeon" } },
+    { "Complete Portal",  { "portal" } },
+    { "Open Divine",      { "divine" } },
+    { "Open Star",        { "star", "egg", "hatch", "summon", "open" } },
+    { "Complete Raid",    { "raid" } },
+    { "Complete Gate",    { "gate" } },
+    { "Time Trial",       { "trial" } },
+    { "Infinity Tower",   { "infinity" } },
+    { "Defense",          { "defense", "defence", "titan" } },
+    { "Meteor",           { "meteor", "fallen" } },
+    { "Global Boss",      { "global" } },
+    { "Rebirth",          { "rebirth" } },
+    { "Quest",            { "quest" } },
+    { "Kill Enemies",     { "kill", "defeat", "enem", "mob", "boss" } },
+}
+function BP.KindNames()
+    local out = {}
+    for _, k in ipairs(BP.Kinds) do out[#out + 1] = k[1] end
+    return out
+end
+function BP.KindOf(name)
+    local l = string.lower(tostring(name or ""))
+    for _, k in ipairs(BP.Kinds) do
+        for _, w in ipairs(k[2]) do
+            if string.find(l, w, 1, true) then return k[1] end
+        end
+    end
+    return nil
+end
+
+local function clean(s)
+    s = string.gsub(tostring(s or ""), "<[^>]->", "")   -- rich text tags
+    s = string.gsub(s, "%s+", " ")
+    return string.match(s, "^%s*(.-)%s*$")
+end
+-- "CompleteDungeon" / "complete_dungeon" -> "Complete Dungeon"
+local function pretty(s)
+    s = string.gsub(tostring(s or ""), "[_%-]", " ")
+    s = string.gsub(s, "(%l)(%u)", "%1 %2")
+    return (string.gsub(clean(s), "^%l", string.upper))
+end
+local function num(s)
+    if type(s) == "number" then return s end
+    s = string.gsub(tostring(s or ""), ",", "")
+    local n, suf = string.match(s, "^%s*([%d%.]+)%s*(%a?)%s*$")
+    n = tonumber(n)
+    if not n then return nil end
+    local mult = ({ k = 1e3, m = 1e6, b = 1e9, t = 1e12 })[string.lower(suf or "")] or 1
+    return n * mult
+end
+local function short(n)
+    if not n then return "?" end
+    if n >= 1e6 then return (string.gsub(string.format("%.1fM", n / 1e6), "%.0M", "M")) end
+    if n >= 1e4 then return (string.gsub(string.format("%.1fK", n / 1e3), "%.0K", "K")) end
+    return tostring(math.floor(n))
+end
+local function key(s) return string.lower((string.gsub(tostring(s or ""), "[%s_%-]", ""))) end
+local function isText(o) return o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") end
+local PROG = "^([%d%.,]+%a?)%s*/%s*([%d%.,]+%a?)$"
+local REPS = "repeats?%s*:?%s*(%d+)%s*/%s*(%d+)"
+
+function BP.Window()
+    local mg = Data.MainGui()
+    return mg and mg:FindFirstChild("BattlePass")
+end
+
+-- one quest row of the window: its name, the "x/y" progress and "Repeats: a/b"
+local function readRow(row)
+    local q = {}
+    for _, o in ipairs(row:GetDescendants()) do
+        if isText(o) then
+            local t = clean(o.Text)
+            local lt = string.lower(t)
+            local ra, rb = string.match(lt, REPS)
+            if ra then
+                q.reps, q.max = tonumber(ra), tonumber(rb)
+            elseif string.find(t, PROG) then
+                if not q.goal then
+                    local a, b = string.match(t, PROG)
+                    q.prog, q.goal = num(a), num(b)
+                end
+            elseif string.find(t, "%a") and not string.find(lt, "exp", 1, true) and not string.find(lt, "reset", 1, true) then
+                if not q.name or #t > #q.name then q.name = t end
+            end
+        end
+    end
+    return q
+end
+
+-- quests in the window + seconds until the reset (nil when not shown)
+function BP.ReadGui()
+    local win = BP.Window()
+    if not win then return {}, nil end
+    local out, seenRow, seenName, reset = {}, {}, {}, nil
+    for _, o in ipairs(win:GetDescendants()) do
+        if isText(o) then
+            local t = clean(o.Text)
+            local lt = string.lower(t)
+            if not reset and string.find(lt, "reset", 1, true) then
+                local clock = string.match(t, "(%d+:%d+:%d+)") or string.match(t, "(%d+:%d+)")
+                local days = tonumber(string.match(lt, "(%d+)%s*d[%s%d]"))
+                local secs = clock and parseClock(clock)
+                if secs then reset = secs + (days or 0) * 86400 end
+            elseif string.find(lt, REPS) then
+                -- climb from the "Repeats" text to the row that also holds a name and an x/y
+                local row = o.Parent
+                for _ = 1, 4 do
+                    if not row or row == win then break end
+                    local q = readRow(row)
+                    if q.name and q.goal then
+                        local hidden = row:IsA("GuiObject") and not row.Visible
+                        if not seenRow[row] and not hidden and not seenName[key(q.name)] then
+                            seenRow[row], seenName[key(q.name)] = true, true
+                            q.source = "window"
+                            out[#out + 1] = q
+                        end
+                        break
+                    end
+                    row = row.Parent
+                end
+            end
+        end
+    end
+    return out, reset
+end
+
+-- tables in the save that belong to the battle pass
+function BP.SaveTables()
+    local st = Data.StoreData and Data.StoreData()
+    local out = {}
+    if type(st) ~= "table" then return out end
+    for k, v in pairs(st) do
+        local lk = string.lower(tostring(k))
+        if type(v) == "table" and (string.find(lk, "battlepass", 1, true) or string.find(lk, "battle_pass", 1, true)
+            or string.sub(lk, 1, 2) == "bp") then
+            out[tostring(k)] = v
+        end
+    end
+    return out
+end
+
+-- quest-looking tables anywhere in `root`: a name (or its key) + progress / repeats
+local function fieldOf(t, names) for _, n in ipairs(names) do if t[n] ~= nil then return t[n] end end return nil end
+local function questsIn(root)
+    local out, seen = {}, {}
+    local function scan(t, k, depth)
+        if type(t) ~= "table" or depth > 5 or seen[t] then return end
+        seen[t] = true
+        local name = fieldOf(t, { "Name", "DisplayName", "QuestName", "Quest", "Title", "Type", "Id" })
+        local prog = tonumber(fieldOf(t, { "Progress", "Current", "Amount", "Count", "Value", "Done" }))
+        local goal = tonumber(fieldOf(t, { "Goal", "Required", "Target", "Max", "Needed", "Requirement", "Total" }))
+        local reps = tonumber(fieldOf(t, { "Repeats", "Repeat", "Completed", "Completions", "Times", "TimesCompleted" }))
+        if type(name) ~= "string" and type(k) == "string" and (prog or reps) then name = k end
+        if type(name) == "string" and (prog or reps) then
+            out[#out + 1] = { name = pretty(name), prog = prog, goal = goal, reps = reps, source = "data" }
+            return
+        end
+        for k2, v in pairs(t) do scan(v, k2, depth + 1) end
+    end
+    scan(root, nil, 0)
+    return out
+end
+
+-- save + GetBPdata, in the background (the remote can take a few seconds to answer)
+function BP.FetchData()
+    if BP.fetching then return end
+    BP.fetching = true
+    task.spawn(function()
+        local found, keys = {}, {}
+        pcall(function()
+            for k, t in pairs(BP.SaveTables()) do
+                keys[#keys + 1] = k
+                for _, q in ipairs(questsIn(t)) do found[#found + 1] = q end
+            end
+        end)
+        local ok, reply = pcall(Net.Raw, "GetBPdata", {})
+        if ok and reply ~= nil then
+            BP.raw = reply
+            if type(reply) == "table" then for _, q in ipairs(questsIn(reply)) do found[#found + 1] = q end end
+        end
+        BP.data, BP.saveKeys, BP.fetching = found, keys, false
+    end)
+end
+
+-- the window is only built after it was opened once: open it for a moment, then close it
+function BP.OpenOnce()
+    local win = BP.Window()
+    local wasOpen = isShown(win)
+    Features.OpenMenu("BattlePass", true)
+    task.wait(1)
+    if #BP.ReadGui() == 0 then
+        -- the game's own Battle Pass button (left / right menu)
+        local mg = Data.MainGui()
+        for _, b in ipairs(mg and mg:GetDescendants() or {}) do
+            if b:IsA("GuiButton") and (not win or not b:IsDescendantOf(win)) then
+                local n = string.lower(b.Name .. " " .. (b.Parent and b.Parent.Name or ""))
+                if string.find(n, "battlepass", 1, true) or string.find(n, "battle pass", 1, true) then
+                    Features.FireGui(b, { "MouseButton1Down", "MouseButton1Click", "Activated" })
+                    task.wait(1)
+                    break
+                end
+            end
+        end
+    end
+    local list, reset = BP.ReadGui()
+    if not wasOpen then Features.OpenMenu("BattlePass", false) end
+    return list, reset
+end
+
+-- the reset moment, rounded, names one "day" of quests (repeats counted by the hub live in it)
+local function dayKey()
+    if BP.resetAt then return tostring(math.floor((os.time() + (BP.resetAt - os.clock())) / 600)) end
+    return os.date("!%Y-%m-%d")
+end
+
+-- when the window has no "Repeats" text: count a repeat each time the progress falls back
+local function countRepeat(q)
+    local day = dayKey()
+    BP.counts[day] = BP.counts[day] or {}
+    local c, k = BP.counts[day], key(q.name)
+    local before = BP.prev[k]
+    if before and q.prog and before.prog and q.prog < before.prog then c[k] = (c[k] or 0) + 1 end
+    BP.prev[k] = { prog = q.prog }
+    return c[k] or 0
+end
+
+function BP.Read(force)
+    if not force and os.clock() - BP.readAt < 3 then return BP.quests end
+    BP.readAt = os.clock()
+    -- the day reset: forget the counts / skips, read everything again
+    if BP.resetAt and os.clock() > BP.resetAt + 3 then
+        BP.resetAt, BP.counts, BP.prev, BP.moved, BP.skipUntil, BP.opened, BP.allDone = nil, {}, {}, {}, {}, 0, false
+        Util.Notify("Battle Pass: new day - new quests")
+    end
+    local list, reset = BP.ReadGui()
+    if #list == 0 and (force or On("AutoBattlePass")) and BP.opened < 3 and (force or Util.Every("bp-open", 20)) then
+        BP.opened = BP.opened + 1
+        list, reset = BP.OpenOnce()
+    end
+    if force or Util.Every("bp-data", 30) then BP.FetchData() end
+    -- fill gaps from the save / remote (and use them alone when the window can't be read)
+    local data = BP.data or {}
+    if #list == 0 then
+        for _, q in ipairs(data) do list[#list + 1] = q end
+    else
+        for _, q in ipairs(list) do
+            for _, d in ipairs(data) do
+                if key(d.name) == key(q.name) then
+                    q.reps = q.reps or d.reps
+                    q.prog = q.prog or d.prog
+                    q.goal = q.goal or d.goal
+                end
+            end
+        end
+    end
+    if reset then BP.resetAt = os.clock() + reset end
+    for _, q in ipairs(list) do
+        q.name = pretty(q.name)
+        q.kind = BP.KindOf(q.name)
+        q.max = q.max or BP.Repeats
+        if q.reps == nil then q.reps = countRepeat(q) end
+        q.done = q.reps >= q.max
+    end
+    BP.quests = list
+    return list
+end
+
+-- picked quests that still have repeats left today
+function BP.Pending()
+    local pick = F("BPQuests") or {}
+    local out = {}
+    for _, q in ipairs(BP.Read()) do
+        if q.kind and pick[q.kind] and not q.done then out[#out + 1] = q end
+    end
+    return out
+end
+
+-- a quest that doesn't move for BP.StuckAfter (locked mode, no tokens ...) is skipped for 30 min
+local function watch(q)
+    local k = key(q.name)
+    local sig = tostring(q.prog) .. ":" .. tostring(q.reps)
+    local m = BP.moved[k]
+    if not m or m.sig ~= sig then BP.moved[k] = { sig = sig, at = os.clock() } return end
+    if os.clock() - m.at > BP.StuckAfter then
+        BP.skipUntil[k] = os.clock() + 1800
+        BP.moved[k] = nil
+        Util.Notify("Battle Pass: " .. q.name .. " isn't moving - trying the other quests for 30 min")
+    end
+end
+local function skipped(q)
+    local u = BP.skipUntil[key(q.name)]
+    return u ~= nil and os.clock() < u
+end
+
+local function force(...)
+    table.clear(Forced)
+    for _, f in ipairs({ ... }) do Forced[f] = true end
+end
+local function note(id, msg)
+    if Util.Every("bp-note-" .. id, 120) then Util.Notify("Battle Pass: " .. msg) end
+end
+
+-- the star to open: Battle Pass star, else the Hatch tab's, else the first star of your farm world
+function BP.Star()
+    local pick = F("BPStar") or F("HatchStar")
+    if type(pick) == "string" and pick ~= "" then return pick end
+    local world = Data.IsFarmWorldName(Util.World()) and Util.World() or HomeWorld
+    for _, s in ipairs(Data.Stars()) do
+        if string.match(s, " | (.+)$") == world then return s end
+    end
+    return nil
+end
+function BP.Hatch()
+    local pick = BP.Star()
+    local starName, worldName = string.match(pick or "", "^(.-) | (.+)$")
+    if not starName then note("star", "pick a star for Open Star / Divine") return false end
+    if Util.World() ~= worldName then Travel.To(worldName) return true end
+    local w = Worlds:FindFirstChild(worldName)
+    local star = w and w:FindFirstChild(starName)
+    local root = Util.Root()
+    if star and root and (root.Position - star:GetPivot().Position).Magnitude > 12 then
+        Util.MoveTo(star:GetPivot() * CFrame.new(0, 0, 7))
+        task.wait(0.3)
+    end
+    if Util.Every("bp-hatch", F("HatchDelay") or 1) then
+        local modes = F("HatchModes") or {}
+        local amount = modes["Summon Max Star"] and CFG.HatchAmount.Max
+            or modes["Summon Multiple Star"] and CFG.HatchAmount.Multiple or CFG.HatchAmount.Single
+        Net.Call("OpenEgg", star or starName, amount)
+    end
+    return true
+end
+
+-- Portal: not in the game dump in detail - go in (a portal prompt where you are, else the
+-- Portal world), clear what's there and use its prompts. Check it once by hand if it stalls.
+function BP.Portal()
+    local wanted = function() return On("AutoBattlePass") end
+    if Util.World() == "Portal" then
+        if not Combat.Step("Portal", wanted) then
+            local p = Prompt.Find(Worlds:FindFirstChild("Portal"), { "portal", "next", "start", "open", "enter", "exit", "leave" })[1]
+            if p and Util.Every("bp-portal-prompt", 3) then Prompt.Use(p) end
+        end
+        return true
+    end
+    local here = Prompt.Find(Worlds:FindFirstChild(Util.World()), { "portal" })[1]
+    if here then
+        if Util.Every("bp-portal-use", 5) then Prompt.Use(here) end
+        return true
+    end
+    if Util.Every("bp-portal-join", 15) then Travel.To("Portal", true) end
+    return true
+end
+
+local function farm()
+    Combat.InFarm = true
+    local ok, err = pcall(Features.Farm)
+    Combat.InFarm = false
+    if not ok then warn("[" .. CFG.Name .. "] Battle Pass farm: " .. tostring(err)) end
+    return true
+end
+
+-- each kind: true = it has the character now, false = nothing it can do right now (next quest)
+BP.Run = {
+    ["Complete Dungeon"] = function()
+        force("AutoOpenDungeon", "AutoFarmDungeon")
+        return Features.Dungeon() == true
+    end,
+    ["Complete Portal"] = function() force() return BP.Portal() end,
+    ["Open Star"] = function() force() return BP.Hatch() end,
+    ["Open Divine"] = function() force() return BP.Hatch() end,
+    ["Complete Raid"] = function()
+        force("AutoRaid", "RaidAllWorlds")
+        return Features.Raid() == true
+    end,
+    ["Complete Gate"] = function()
+        force("AutoGate")
+        if Util.World() ~= "GatesMode" and #Util.SetToList(F("GateRanks")) == 0 then
+            note("gate", "pick a gate level in Dungeon / Gate / Time") return false
+        end
+        Features.Gates()
+        return true
+    end,
+    ["Time Trial"] = function()
+        force("AutoTrial")
+        if not Extras.InTrialRun() and #Util.SetToList(F("Trials")) == 0 then
+            note("trial", "pick the time trials in Time Trial / Tower") return false
+        end
+        return Features.TimeTrial() == true
+    end,
+    ["Infinity Tower"] = function()
+        force("AutoInf", "InfAllTiers")
+        Features.InfinityTower()
+        return true
+    end,
+    ["Defense"] = function()
+        force("AutoDefense")
+        return Features.Defense() == true
+    end,
+    ["Meteor"] = function()
+        force("AutoMeteor", "MeteorAllWorlds")
+        return Features.Meteor() == true
+    end,
+    ["Global Boss"] = function()
+        force("AutoGlobalBoss")
+        return Features.GlobalBoss() == true
+    end,
+    ["Rebirth"] = function()
+        force()
+        if Util.Every("bp-rebirth", 5) then Net.Call("Rebirth") end
+        return false   -- doesn't need the character
+    end,
+    ["Quest"] = function()
+        force("AutoQuest", "AutoFarm")
+        Features.Quest()
+        return farm()
+    end,
+    ["Kill Enemies"] = function()
+        force("AutoFarm")
+        return farm()
+    end,
+}
+
+-- in the middle of a run of this kind: finish it before switching quests
+function BP.Inside(kind)
+    local w = Util.World()
+    if kind == "Complete Dungeon" then return Features.InDungeon() end
+    if kind == "Complete Raid" then return w == "Raid" end
+    if kind == "Complete Gate" then return w == "GatesMode" end
+    if kind == "Time Trial" then return Extras.InTrialRun() end
+    if kind == "Defense" then return w == "Titan" end
+    return false
+end
+
+-- called by the Brain at Battle Pass's place in the Priority list
+function BP.Step()
+    if not On("AutoBattlePass") then return false end
+    if not next(F("BPQuests") or {}) then
+        note("pick", "pick the quests to do first")
+        return false
+    end
+    local cur = BP.task
+    if cur and BP.Inside(cur) and BP.Run[cur] then
+        local ok, busy = pcall(BP.Run[cur])
+        if ok and busy then return true end
+    end
+    local pending = BP.Pending()
+    for _, q in ipairs(pending) do
+        local run = BP.Run[q.kind]
+        if run and not skipped(q) then
+            local ok, busy = pcall(run, q)
+            if not ok then
+                warn("[" .. CFG.Name .. "] Battle Pass " .. tostring(q.kind) .. ": " .. tostring(busy))
+            elseif busy then
+                if BP.task ~= q.kind then
+                    BP.task, BP.since = q.kind, os.clock()
+                    Util.Notify(string.format("Battle Pass: %s (repeat %d/%d)", q.name, (q.reps or 0) + 1, q.max or BP.Repeats))
+                end
+                BP.allDone = false
+                watch(q)
+                return true
+            end
+        end
+    end
+    table.clear(Forced)
+    BP.task = nil
+    if #pending == 0 and #BP.quests > 0 and not BP.allDone then
+        BP.allDone = true
+        Util.Notify("Battle Pass: picked quests done for today")
+    end
+    return false
+end
+
+function BP.StatusText()
+    local lines = {}
+    local left = BP.resetAt and math.max(0, math.floor(BP.resetAt - os.clock()))
+    lines[1] = "Reset In : " .. (left and string.format("%d:%02d:%02d", left // 3600, (left % 3600) // 60, left % 60) or "?")
+        .. "    Doing : " .. (BP.task or "-")
+    if #BP.quests == 0 then
+        lines[#lines + 1] = "No quests read yet - press Read Quests (opens the Battle Pass window once)"
+    end
+    local pick = F("BPQuests") or {}
+    for _, q in ipairs(BP.quests) do
+        local mark = q.done and "[done]" or (q.kind and pick[q.kind]) and (skipped(q) and "[skip]" or "[ on ]") or "[ -- ]"
+        lines[#lines + 1] = string.format("%s %s  %s/%s  Repeats %d/%d%s", mark, q.name, short(q.prog), short(q.goal),
+            q.reps or 0, q.max or BP.Repeats, q.kind and "" or "  (not supported)")
+    end
+    return table.concat(lines, "\n")
+end
+end
+
 -- BRAIN: one owner of the character at a time ----------------------------------------------------
 -- DIAGNOSTICS ---------------------------------------------------------------------------------------
 -- One text file (GravityHub/AFS/diagnostics.txt) with what the hub sees in YOUR game:
@@ -5481,18 +5998,35 @@ function Diag.Report()
 
     section("GAME GUI (MainGui)")
     diagTree(Data.MainGui(), 1, 200, out)
-    for _, n in ipairs({ "DungeonSummon", "DungeonTravel", "DungeonTimer", "TowerTimer", "TimeTrialTeleport", "RaidPicker", "RaidTransport", "Quest", "MountButtonFrame" }) do
+    for _, n in ipairs({ "DungeonSummon", "DungeonTravel", "DungeonTimer", "TowerTimer", "TimeTrialTeleport", "RaidPicker", "RaidTransport", "Quest", "MountButtonFrame", "BattlePass" }) do
         local g = Data.MainGui() and Data.MainGui():FindFirstChild(n)
         if g then diagTree(g, 3, 12, out, "  ") end
     end
 
     section("MODULES")
-    for _, n in ipairs({ "WorldData", "PassiveStats", "ArtefactData", "RebirthBossData", "QuestData", "EggStats", "EnemyStats" }) do
+    for _, n in ipairs({ "WorldData", "PassiveStats", "ArtefactData", "RebirthBossData", "QuestData", "EggStats", "EnemyStats", "BattlePassInfo", "BattlepassQuest" }) do
         local m = Data.Module(n)
         local keys = {}
         for k in pairs(m or {}) do keys[#keys + 1] = tostring(k) if #keys >= 8 then break end end
         add(string.format("%-16s %s  %s", n, m and "OK" or "BLOCKED/MISSING", table.concat(keys, ", ")))
     end
+
+    section("BATTLE PASS")
+    pcall(function()
+        local BP = Features.BattlePass
+        add(BP.StatusText())
+        add("save tables: " .. table.concat(BP.saveKeys or {}, ", "))
+        for k, t in pairs(BP.SaveTables()) do
+            local ok, j = pcall(HttpService.JSONEncode, HttpService, t)
+            add("save." .. k .. "  " .. string.sub(ok and j or "?", 1, 1500))
+        end
+        local ok, j = pcall(HttpService.JSONEncode, HttpService, BP.raw)
+        add("GetBPdata  " .. string.sub(ok and tostring(j) or tostring(BP.raw), 1, 1500))
+        for _, n in ipairs({ "BattlepassQuest", "BattlePassInfo" }) do
+            local okm, jm = pcall(HttpService.JSONEncode, HttpService, Data.Module(n))
+            add(n .. "  " .. string.sub(okm and tostring(jm) or "?", 1, 1500))
+        end
+    end)
 
     section("LEARNED CALLS")
     pcall(function()
@@ -5555,6 +6089,9 @@ Features.Tasks = {
             Features.GoPotionMaster() return true
         end
     end },
+    { id = "BattlePass", name = "Battle Pass", run = function()
+        return Features.BattlePass ~= nil and Features.BattlePass.Step()
+    end },
     { id = "Infinity", name = "Infinity Tower", run = function()
         if On("AutoInf") then Features.InfinityTower() return true end
     end },
@@ -5588,8 +6125,8 @@ Features.Tasks = {
     end },
 }
 -- default order (Settings > Priority changes it)
-Features.DefaultPrio = { Lunar = 1, Trial = 2, Dungeon = 3, Hatch = 4, Passive = 5, Mega = 6, Infinity = 7, Gate = 8,
-    Raid = 9, Defense = 10, Event = 11, GlobalBoss = 12, Meteor = 13, Farm = 14, TimeChamber = 15 }
+Features.DefaultPrio = { Lunar = 1, Trial = 2, BattlePass = 3, Dungeon = 4, Hatch = 5, Passive = 6, Mega = 7, Infinity = 8,
+    Gate = 9, Raid = 10, Defense = 11, Event = 12, GlobalBoss = 13, Meteor = 14, Farm = 15, TimeChamber = 16 }
 -- the tasks sorted by their Priority number (ties keep the default order)
 function Features.TaskOrder()
     local list = {}
@@ -5673,6 +6210,29 @@ do
     f:Paragraph({ Title = "Re equip Pets", Body = "For smooth farming set this correctly. Use 3 minutes for general farming and 1-2 minutes for the Infinity Tower." })
     f:Toggle({ Title = "Auto Re Equip Pets", Flag = "AutoReEquip" })
     f:Slider({ Title = "Delayed [minutes]", Min = 1, Max = 10, Default = 2, Flag = "ReEquipDelay" })
+end
+
+-- BATTLE PASS -------------------------------------------------------------------------------
+do
+    local BP = Features.BattlePass
+    local c = TMain:Card("Auto Battle Pass", "Left")
+    c:Paragraph({ Body = "Does the battle pass quests you pick until their repeats (5 a day) are used, then goes back to the rest. "
+        .. "New quests come with the daily reset and start by themselves.\n"
+        .. "Dungeon / Gate / Trial / Defense / Raid use the settings of their own tab. Its place in the order: Priority / Team." })
+    c:Dropdown({ Title = "Select Quests", Items = BP.KindNames(), Multi = true, Flag = "BPQuests" })
+    local star = c:Dropdown({ Title = "Star For Open Star / Divine", Items = Data.Stars(), Flag = "BPStar" })
+    BP.Label = c:Paragraph({ Body = "Reset In : -" })
+    c:Button({ Title = "Read Quests", Callback = function()
+        BP.opened = 0
+        BP.Read(true)
+        task.wait(1.5)   -- GetBPdata answers in the background
+        BP.Read(true)
+        pcall(function() BP.Label:Set(BP.StatusText()) end)
+    end })
+    c:Toggle({ Title = "Auto Battle Pass", Flag = "AutoBattlePass", Callback = function(v)
+        if not v then table.clear(Forced) BP.task = nil end
+    end })
+    Refreshers[#Refreshers + 1] = function() star:Refresh(Data.Stars()) end
 end
 
 -- TELEPORT -------------------------------------------------------------------------------
@@ -6506,6 +7066,12 @@ task.spawn(function()
 end)
 loop(0.05, function() if On("AutoEventQuests") then Features.EventQuests() else task.wait(0.5) end end)
 loop(2, function() if PassiveStatus then PassiveStatus:Set(Features.PassiveStatusText()) end end)
+loop(2, function()
+    local BP = Features.BattlePass
+    if not (BP and BP.Label) then return end
+    if On("AutoBattlePass") or Util.Every("bp-idle-read", 10) then BP.Read() end
+    BP.Label:Set(BP.StatusText())
+end)
 
 -- extras
 loop(0.3, function() if On("AutoFreeGifts") then Extras.FreeGifts() end end)
