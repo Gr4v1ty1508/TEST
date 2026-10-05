@@ -3462,12 +3462,97 @@ function Features.RoomRevealed(room)
     if type(col) ~= "table" then return false end
     return (col[tonumber(y)] or col[tostring(y)]) == true
 end
+-- DUNGEON LAYOUT -----------------------------------------------------------------------------------
+-- JoinDungeon(data): data.Map[x][y] = false | { door+x, door+y, door-x, door-y, type }
+-- type (the order of data.Config.RoomModels): 1 Normal, 2 Treasure (chest room), 3 Boss,
+-- 4 FinalTreasure, 5 Start. Door N of room "x, y" leads to 1 -> x+1, 2 -> y+1, 3 -> x-1, 4 -> y-1
+-- (checked on a recorded run: start "1, 3" has only Door4 -> "1, 2"; Yuto opened "7, 1".Door2 and
+-- fought the chest in "7, 2", "8, 7".Door4 -> EpicChest in "8, 6", "6, 8".Door2 -> boss "6, 9").
+Features.DungeonDirs = { { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 } }
+Features.DungeonOpened = {}                     -- "x, y" of chest / boss rooms whose door we opened
+function Features.DungeonCell(x, y)
+    local m = Features.DungeonLayout
+    if type(m) ~= "table" or not x or not y then return nil end
+    local col = m[x] or m[tostring(x)]
+    local c = type(col) == "table" and (col[y] or col[tostring(y)]) or nil
+    return type(c) == "table" and c or nil
+end
+function Features.DungeonRoomType(name)
+    local x, y = string.match(name or "", "^(%d+), (%d+)$")
+    local c = x and Features.DungeonCell(tonumber(x), tonumber(y))
+    return c and tonumber(c[5]) or nil
+end
+-- the room ("x, y") a door part leads into, from its Door1..Door4 model
+function Features.DoorTarget(doorPart)
+    local room = doorPart and Features.DungeonRoomOf(doorPart)
+    local dm = doorPart and doorPart.Parent
+    local k = dm and tonumber(string.match(dm.Name, "^Door(%d)$"))
+    local x, y = string.match(room and room.Name or "", "^(%d+), (%d+)$")
+    local d = k and Features.DungeonDirs[k]
+    if not (x and d) then return nil end
+    return (tonumber(x) + d[1]) .. ", " .. (tonumber(y) + d[2])
+end
+-- what Auto Farm Dungeon heads for: chest rooms not opened yet, then the boss room (until the boss
+-- is dead), then the last treasure room behind the boss; nil = nothing special (nearest first)
+function Features.DungeonGoals()
+    local m = Features.DungeonLayout
+    if type(m) ~= "table" then return nil end
+    local byType = { [2] = {}, [3] = {}, [4] = {} }
+    for x, col in pairs(m) do
+        if type(col) == "table" then
+            for y, c in pairs(col) do
+                local t = type(c) == "table" and tonumber(c[5])
+                if t and byType[t] then
+                    local name = tostring(tonumber(x)) .. ", " .. tostring(tonumber(y))
+                    if not Features.DungeonOpened[name] then table.insert(byType[t], name) end
+                end
+            end
+        end
+    end
+    if #byType[2] > 0 then return byType[2], "chest rooms" end
+    if not Features.DungeonBossAt and #byType[3] > 0 then return byType[3], "boss room" end
+    if #byType[4] > 0 then return byType[4], "last treasure room" end
+    return nil
+end
+-- rooms between every room and the nearest goal room (walking through the layout's doors)
+function Features.DungeonDistances(goals)
+    local dist, queue, head = {}, {}, 1
+    for _, g in ipairs(goals or {}) do dist[g] = 0 queue[#queue + 1] = g end
+    while head <= #queue do
+        local name = queue[head]
+        head = head + 1
+        local x, y = string.match(name, "^(%d+), (%d+)$")
+        x, y = tonumber(x), tonumber(y)
+        local c = Features.DungeonCell(x, y)
+        for k, d in ipairs(Features.DungeonDirs) do
+            if c and c[k] == true then
+                local nx, ny = x + d[1], y + d[2]
+                local n = nx .. ", " .. ny
+                if dist[n] == nil and Features.DungeonCell(nx, ny) then
+                    dist[n] = dist[name] + 1
+                    queue[#queue + 1] = n
+                end
+            end
+        end
+    end
+    return dist
+end
+-- steps from a room (model or name) to the current goal; math.huge = no goal / not connected
+function Features.DungeonGoalCost(room, dist)
+    if not dist then return 0 end
+    local name = type(room) == "string" and room or (room and room.Name)
+    return (name and dist[name]) or math.huge
+end
+
 function Features.DungeonActivate()
     local root = Features.DungeonRoot()
     local map = root and root:FindFirstChild("Map")
     local me = Util.Root()
     if not (map and me) then return false end
-    local best, bestD
+    -- chest rooms first, then the boss room: the altar on the shortest way there is next
+    local goals, goalName = Features.DungeonGoals()
+    local dist = goals and Features.DungeonDistances(goals) or nil
+    local best, bestD, bestC
     for _, cp in ipairs(map:GetDescendants()) do
         if cp.Name == "ConfirmPart" and cp:IsA("BasePart") then
             local pp = cp:FindFirstChildWhichIsA("ProximityPrompt")
@@ -3480,13 +3565,15 @@ function Features.DungeonActivate()
             if pp and pp.Enabled and string.find(string.lower(pp.ActionText), "activ", 1, true)
                and again and Features.RoomRevealed(Features.DungeonRoomOf(cp)) then
                 local d = (cp.Position - me.Position).Magnitude
-                if not bestD or d < bestD then best, bestD = { cp = cp, pp = pp }, d end
+                local c = Features.DungeonGoalCost(Features.DungeonRoomOf(cp), dist)
+                if not bestD or c < bestC or (c == bestC and d < bestD) then best, bestD, bestC = { cp = cp, pp = pp }, d, c end
             end
         end
     end
     if not best then return false end
     local room = Features.DungeonRoomOf(best.cp)
-    Combat.Log("dng", "activate altar of room " .. (room and room.Name or "?"))
+    Combat.Log("dng", "activate altar of room " .. (room and room.Name or "?")
+        .. (goalName and bestC < math.huge and (" (" .. bestC .. " rooms from the " .. goalName .. ")") or ""))
     pcall(function() LP:RequestStreamAroundAsync(best.cp.Position) end)
     Util.MoveTo(best.cp.CFrame * CFrame.new(0, 5, 0))
     task.wait(1)
@@ -3507,6 +3594,56 @@ end
 Features.DungeonDoorTried = setmetatable({}, { __mode = "k" })
 Features.DungeonRoomDone = setmetatable({}, { __mode = "k" })   -- room model -> nothing left in it
 Features.DungeonRoomSeen = setmetatable({}, { __mode = "k" })   -- room model -> last looked at (os.clock)
+-- room doors ("Open"). Yuto (watched): teleport onto the door (+5 up), wait 1 s, press "Open" -
+-- the game then sends OpenDungeonDoor(<Door part>) itself; ~2 s later the room behind is fought.
+-- Each door again every 20 s at most (a boss door waits for the key; all doors are tried again
+-- at once when the key drops). Order: door into a chest room, into the boss room (with the key),
+-- into the last treasure room (boss dead), then any other - nearest first.
+-- important = true: only those first three kinds
+function Features.DungeonOpenDoor(important)
+    local root = Features.DungeonRoot()
+    local me = Util.Root()
+    local best, bestD, bestP
+    for _, door in ipairs(Prompt.Find(root, { "door", "next", "open", "portal", "gate" })) do
+        local t = Features.DungeonDoorTried[door]
+        local part = door.Parent
+        if (not t or os.clock() - t.at > 20) and part and part:IsA("BasePart") then
+            local target = Features.DoorTarget(part)
+            local kind = Features.DungeonRoomType(target)
+            local prio = 9
+            if target and not Features.DungeonOpened[target] then
+                if kind == 2 then prio = 1
+                elseif kind == 3 and Features.DungeonHasKey then prio = 2
+                elseif kind == 4 and Features.DungeonBossAt then prio = 3 end
+            end
+            if not important or prio < 9 then
+                local d = me and (part.Position - me.Position).Magnitude or 0
+                if not bestD or prio < bestP or (prio == bestP and d < bestD) then best, bestD, bestP = door, d, prio end
+            end
+        end
+    end
+    if not best then return false end
+    local part = best.Parent
+    local t = Features.DungeonDoorTried[best] or { n = 0 }
+    Features.DungeonDoorTried[best] = { at = os.clock(), n = t.n + 1 }
+    Features.DungeonIdleSince = nil
+    local room = Features.DungeonRoomOf(part)
+    local target = Features.DoorTarget(part)
+    local kind = Features.DungeonRoomType(target)
+    Combat.Log("dng", "open door " .. (room and room.Name or "?") .. "/" .. (part.Parent and part.Parent.Name or "?")
+        .. " -> " .. tostring(target) .. " (" .. (({ "normal", "chest room", "boss room", "last treasure", "start" })[kind or 0] or "?")
+        .. ", try " .. (t.n + 1) .. ")")
+    pcall(function() LP:RequestStreamAroundAsync(part.Position) end)
+    Util.MoveTo(part.CFrame + Vector3.new(0, 5, 0))
+    task.wait(1)
+    if fireproximityprompt then pcall(fireproximityprompt, best) else Prompt.Use(best) end
+    Net.Call("OpenDungeonDoor", part)
+    task.wait(1)
+    -- the prompt went away = open: that chest / boss room is no longer a goal
+    if target and (not best.Parent or not best.Enabled) then Features.DungeonOpened[target] = true end
+    return true
+end
+
 function Features.FarmDungeon()
     dungeonStep = "inside"
     nextSummon = 0
@@ -3532,6 +3669,8 @@ function Features.FarmDungeon()
     -- keep opening the nearest room, one after another, until mobs show up - then stop and
     -- fight them first (the next tick comes back here once they're dead). Also after the boss is
     -- dead (its key can drop early): like Yuto, the rest of the rooms are still cleared.
+    -- a door into a chest room (or the boss room with the key) that can be opened: that first
+    if Features.DungeonOpenDoor(true) then return true end
     do
         local opened = 0
         while On("AutoFarmDungeon") and Features.DungeonActivate() do
@@ -3549,39 +3688,8 @@ function Features.FarmDungeon()
             task.wait(0.3)
         end
     end
-    -- room doors ("Open"): each one tried at most every 20 s (a boss door waits for the key)
-    -- Yuto (watched): teleport onto the door (+5 up), wait 1 s, press "Open" - the game then
-    -- sends OpenDungeonDoor(<Door part>) itself; ~2 s later the room behind is fought (chest).
-    -- The old way pressed 0.25 s after arriving (the server didn't see us there yet) and gave a
-    -- door up after 3 tries for good: a boss door tried before the key dropped never opened.
-    -- Now: nearest door first, each again every 20 s, all tried again at once when the key drops.
-    do
-        local me = Util.Root()
-        local best, bestD
-        for _, door in ipairs(Prompt.Find(root, { "door", "next", "open", "portal", "gate" })) do
-            local t = Features.DungeonDoorTried[door]
-            local part = door.Parent
-            if (not t or os.clock() - t.at > 20) and part and part:IsA("BasePart") then
-                local d = me and (part.Position - me.Position).Magnitude or 0
-                if not bestD or d < bestD then best, bestD = door, d end
-            end
-        end
-        if best then
-            local part = best.Parent
-            local t = Features.DungeonDoorTried[best] or { n = 0 }
-            Features.DungeonDoorTried[best] = { at = os.clock(), n = t.n + 1 }
-            Features.DungeonIdleSince = nil
-            local room = Features.DungeonRoomOf(part)
-            Combat.Log("dng", "open door " .. (room and room.Name or "?") .. "/" .. (part.Parent and part.Parent.Name or "?") .. " (try " .. (t.n + 1) .. ")")
-            pcall(function() LP:RequestStreamAroundAsync(part.Position) end)
-            Util.MoveTo(part.CFrame + Vector3.new(0, 5, 0))
-            task.wait(1)
-            if fireproximityprompt then pcall(fireproximityprompt, best) else Prompt.Use(best) end
-            Net.Call("OpenDungeonDoor", part)
-            task.wait(1)
-            return true
-        end
-    end
+    -- any other door (each again every 20 s)
+    if Features.DungeonOpenDoor(false) then return true end
     -- nothing to fight / press / open here: go and look at the rooms (far rooms aren't loaded,
     -- so their altar / door / mobs can't be seen from here). Big dungeons have 100+ rooms, so
     -- not all of them in a row: a room we've looked at that had nothing left (no altar or door
@@ -3594,12 +3702,15 @@ function Features.FarmDungeon()
     if #rooms > 0 then
         local done, seen = Features.DungeonRoomDone, Features.DungeonRoomSeen
         local me = Util.Root()
-        local pick, pickD
+        local goals = Features.DungeonGoals()
+        local dist = goals and Features.DungeonDistances(goals) or nil
+        local pick, pickD, pickC
         for _, r in ipairs(rooms) do
             if not done[r] and os.clock() - (seen[r] or -99) > 60 then
                 local ok, cf = pcall(r.GetPivot, r)
                 local d = (ok and me) and (cf.Position - me.Position).Magnitude or 0
-                if not pickD or d < pickD then pick, pickD = r, d end
+                local c = Features.DungeonGoalCost(Features.DungeonRoomOf(r) or r, dist)
+                if not pickD or c < pickC or (c == pickC and d < pickD) then pick, pickD, pickC = r, d, c end
             end
         end
         local left = 0
@@ -7205,7 +7316,25 @@ Net.Listen("SendSubtleMessage", function(msg)
         Features.DungeonBossAt = os.clock()
     end
 end)
-Net.Listen("JoinDungeon", function() Features.DungeonBossAt = nil Features.DungeonIdleSince = nil Features.DungeonMap = nil end)
+Net.Listen("JoinDungeon", function(data)
+    Features.DungeonBossAt = nil Features.DungeonIdleSince = nil Features.DungeonMap = nil
+    Features.DungeonHasKey = false
+    Features.DungeonOpened = {}
+    Features.DungeonLayout = type(data) == "table" and type(data.Map) == "table" and data.Map or nil
+    if Features.DungeonLayout then
+        local n = { 0, 0, 0, 0, 0 }
+        for _, col in pairs(Features.DungeonLayout) do
+            if type(col) == "table" then
+                for _, c in pairs(col) do
+                    local t = type(c) == "table" and tonumber(c[5])
+                    if t and n[t] then n[t] = n[t] + 1 end
+                end
+            end
+        end
+        Combat.Log("dng", string.format("dungeon map: %d rooms, %d chest rooms, %d boss room",
+            n[1] + n[2] + n[3] + n[4] + n[5], n[2], n[3]))
+    end
+end)
 -- "... has found the boss key!" -> UpdateDungeonKey(true): every door may open now (boss door)
 Net.Listen("UpdateDungeonKey", function(has)
     Features.DungeonHasKey = has == true
