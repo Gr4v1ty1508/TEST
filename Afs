@@ -3286,6 +3286,23 @@ function Features.OpenDungeon()
 end
 
 Features.DungeonActivated = setmetatable({}, { __mode = "k" })
+-- the "x, y" room model a part belongs to, and whether the minimap shows it yet
+function Features.DungeonRoomOf(inst)
+    local o = inst
+    while o and o ~= workspace do
+        if o:IsA("Model") and string.match(o.Name, "^%d+, %d+$") then return o end
+        o = o.Parent
+    end
+    return nil
+end
+function Features.RoomRevealed(room)
+    local grid = Features.DungeonMap
+    if not (grid and room) then return true end                 -- no map yet: don't block
+    local x, y = string.match(room.Name, "^(%d+), (%d+)$")
+    local col = grid[tonumber(x)] or grid[tostring(x)]
+    if type(col) ~= "table" then return false end
+    return (col[tonumber(y)] or col[tostring(y)]) == true
+end
 function Features.DungeonActivate()
     local root = Features.DungeonRoot()
     local map = root and root:FindFirstChild("Map")
@@ -3300,7 +3317,7 @@ function Features.DungeonActivate()
             local done = Features.DungeonActivated[cp]
             local again = done == nil or (done.n < 3 and os.clock() - done.at > 15)
             if pp and pp.Enabled and string.find(string.lower(pp.ActionText), "activ", 1, true)
-               and again then
+               and again and Features.RoomRevealed(Features.DungeonRoomOf(cp)) then
                 local d = (cp.Position - me.Position).Magnitude
                 if not bestD or d < bestD then best, bestD = { cp = cp, pp = pp }, d end
             end
@@ -3374,7 +3391,10 @@ function Features.FarmDungeon()
     end
     -- nothing to fight / press / open: walk the rooms one by one (like Yuto, also after the boss)
     -- so far mobs load in and rooms not cleared yet are found - until the game ends the run
-    local rooms = Features.DungeonRooms()
+    local rooms = {}
+    for _, r in ipairs(Features.DungeonRooms()) do
+        if Features.RoomRevealed(Features.DungeonRoomOf(r) or r) then rooms[#rooms + 1] = r end
+    end
     if #rooms > 0 then
         roomIndex = roomIndex % #rooms + 1
         local cf = rooms[roomIndex]:GetPivot()
@@ -6130,7 +6150,10 @@ Net.Listen("SendSubtleMessage", function(msg)
         Features.DungeonBossAt = os.clock()
     end
 end)
-Net.Listen("JoinDungeon", function() Features.DungeonBossAt = nil Features.DungeonIdleSince = nil end)
+Net.Listen("JoinDungeon", function() Features.DungeonBossAt = nil Features.DungeonIdleSince = nil Features.DungeonMap = nil end)
+-- UpdateMap(grid): grid[x][y] = true for every room the minimap shows (= reachable now).
+-- Rooms open one by one from the start room; a hidden one can't be activated or walked to.
+Net.Listen("UpdateMap", function(grid) if type(grid) == "table" then Features.DungeonMap = grid end end)
 Net.Listen("SetTowerFloor", function(floor)
     if type(floor) == "number" then
         Stats.TrialFloor = floor + 1
