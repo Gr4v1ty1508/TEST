@@ -5744,6 +5744,7 @@ function BP.Star()
     return nil
 end
 function BP.Hatch()
+    if BP.bagFullAt and os.clock() - BP.bagFullAt < 30 then return false end
     local pick = BP.Star()
     local starName, worldName = string.match(pick or "", "^(.-) | (.+)$")
     if not starName then note("star", "pick a star for Open Star / Divine") return false end
@@ -5756,14 +5757,54 @@ function BP.Hatch()
         task.wait(0.3)
     end
     if Util.Every("bp-hatch", F("HatchDelay") or 1) then
-        Net.Call("OpenEgg", star or starName, BP.MaxOpen())
+        local amount = BP.MaxOpen()
+        if amount <= 0 then
+            local _, used, size = BP.BagSpace()
+            note("bag", string.format("pet bag full (%s/%s) - Open Star / Divine waits for room", tostring(used), tostring(size)))
+            BP.bagFullAt = os.clock()
+            return false
+        end
+        Net.Call("OpenEgg", star or starName, amount)
     end
     return true
 end
--- the quest counts every star opened, so always open as many as the game lets you at once:
--- the number on the game's Open button (CFG.HatchAmount.Max, read every 5 s) or the most you
--- opened by hand in one go (OpenEgg is learned when you open a star yourself) - the higher one
+-- Max open = as many as still fit in your pet bag. Free space is read from:
+--   1. the game's Pets window "123/500" (pets / bag size)
+--   2. the save: pets in it vs. a bag-size number (a key named like Storage / MaxPets / Slots)
+-- If neither can be read: the number on the game's Open button, else the most you opened by
+-- hand in one go (OpenEgg is learned when you open a star yourself).
+-- Bag full -> nothing is opened (the other quests go on) until there's room again.
+function BP.BagSpace()
+    local used, size
+    pcall(function()
+        local pets = mainChild("Pets")
+        for _, l in ipairs(pets and pets:GetDescendants() or {}) do
+            if l:IsA("TextLabel") then
+                local a, b = string.match(string.gsub(l.Text, ",", ""), "^%s*(%d+)%s*/%s*(%d+)%s*$")
+                a, b = tonumber(a), tonumber(b)
+                if a and b and b >= 20 and a <= b + 50 and (not size or b > size) then used, size = a, b end
+            end
+        end
+    end)
+    if not size then
+        pcall(function()
+            local st = Data.StoreData()
+            for k, v in pairs(st or {}) do
+                local lk = string.lower(tostring(k))
+                if type(v) == "number" and v >= 20 and (string.find(lk, "storage", 1, true) or string.find(lk, "maxpet", 1, true)
+                    or string.find(lk, "petslot", 1, true) or string.find(lk, "capacity", 1, true)) then
+                    size = math.max(size or 0, v)
+                end
+            end
+            if size then used = #Data.Inventory() end
+        end)
+    end
+    if used and size then return math.max(0, size - used), used, size end
+    return nil
+end
 function BP.MaxOpen()
+    local free = BP.BagSpace()
+    if free then return math.min(free, 1000) end
     pcall(Extras.MaxHatch)
     local n = tonumber(CFG.HatchAmount.Max) or 1
     for _, h in ipairs(Learn.History("OpenEgg")) do
