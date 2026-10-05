@@ -5393,9 +5393,9 @@ end
 -- until its repeats are used up (5 a day); the reset brings a new set of quests.
 -- The quests are read from the window (opened once if the game never built it), the save
 -- (tables with "battlepass" / "bp" in their name) and the GetBPdata remote. Each picked quest is
--- done with the hub's own features - using the settings of their tabs (dungeon world, gate rank,
--- trials, defense world ...) - one after the other until its repeats are full, then the hub goes
--- back to the rest of the Priority list. When the day resets it starts again by itself.
+-- done with the hub's own features - Dungeon = Auto Dungeon, Portal = a Gate run (Auto Gate
+-- settings), Open Star / Divine = open the picked star - one after the other until its repeats
+-- are full, then the hub goes back to the rest of the Priority list. The day reset starts it again.
 do
 local BP = {
     quests = {}, readAt = -math.huge, task = nil, since = 0, resetAt = nil, opened = 0,
@@ -5405,22 +5405,12 @@ Features.BattlePass = BP
 BP.Repeats = 5   -- per quest per day (the window's "Repeats: x/5" wins when it can be read)
 BP.StuckAfter = 15 * 60   -- a quest that doesn't move for this long is left alone for 30 min
 
--- what the hub does for a quest: the first kind whose word is in the quest's name
+-- the battle pass always has these 4 quests ("Portal" in the game = a Gate run)
 BP.Kinds = {
     { "Complete Dungeon", { "dungeon" } },
-    { "Complete Portal",  { "portal" } },
+    { "Complete Portal",  { "portal", "gate" } },
     { "Open Divine",      { "divine" } },
-    { "Open Star",        { "star", "egg", "hatch", "summon", "open" } },
-    { "Complete Raid",    { "raid" } },
-    { "Complete Gate",    { "gate" } },
-    { "Time Trial",       { "trial" } },
-    { "Infinity Tower",   { "infinity" } },
-    { "Defense",          { "defense", "defence", "titan" } },
-    { "Meteor",           { "meteor", "fallen" } },
-    { "Global Boss",      { "global" } },
-    { "Rebirth",          { "rebirth" } },
-    { "Quest",            { "quest" } },
-    { "Kill Enemies",     { "kill", "defeat", "enem", "mob", "boss" } },
+    { "Open Star",        { "star", "egg", "open" } },
 }
 function BP.KindNames()
     local out = {}
@@ -5740,103 +5730,30 @@ function BP.Hatch()
     return true
 end
 
--- Portal: not in the game dump in detail - go in (a portal prompt where you are, else the
--- Portal world), clear what's there and use its prompts. Check it once by hand if it stalls.
-function BP.Portal()
-    local wanted = function() return On("AutoBattlePass") end
-    if Util.World() == "Portal" then
-        if not Combat.Step("Portal", wanted) then
-            local p = Prompt.Find(Worlds:FindFirstChild("Portal"), { "portal", "next", "start", "open", "enter", "exit", "leave" })[1]
-            if p and Util.Every("bp-portal-prompt", 3) then Prompt.Use(p) end
-        end
-        return true
-    end
-    local here = Prompt.Find(Worlds:FindFirstChild(Util.World()), { "portal" })[1]
-    if here then
-        if Util.Every("bp-portal-use", 5) then Prompt.Use(here) end
-        return true
-    end
-    if Util.Every("bp-portal-join", 15) then Travel.To("Portal", true) end
-    return true
-end
-
-local function farm()
-    Combat.InFarm = true
-    local ok, err = pcall(Features.Farm)
-    Combat.InFarm = false
-    if not ok then warn("[" .. CFG.Name .. "] Battle Pass farm: " .. tostring(err)) end
-    return true
-end
-
 -- each kind: true = it has the character now, false = nothing it can do right now (next quest)
 BP.Run = {
     ["Complete Dungeon"] = function()
         force("AutoOpenDungeon", "AutoFarmDungeon")
         return Features.Dungeon() == true
     end,
-    ["Complete Portal"] = function() force() return BP.Portal() end,
-    ["Open Star"] = function() force() return BP.Hatch() end,
-    ["Open Divine"] = function() force() return BP.Hatch() end,
-    ["Complete Raid"] = function()
-        force("AutoRaid", "RaidAllWorlds")
-        return Features.Raid() == true
-    end,
-    ["Complete Gate"] = function()
+    -- a "Portal" is a Gate: summon / join / clear it with the Auto Gate settings
+    ["Complete Portal"] = function()
         force("AutoGate")
         if Util.World() ~= "GatesMode" and #Util.SetToList(F("GateRanks")) == 0 then
-            note("gate", "pick a gate level in Dungeon / Gate / Time") return false
+            note("gate", "pick a gate level in Dungeon / Gate / Time (Portal = Gate)") return false
         end
         Features.Gates()
         return true
     end,
-    ["Time Trial"] = function()
-        force("AutoTrial")
-        if not Extras.InTrialRun() and #Util.SetToList(F("Trials")) == 0 then
-            note("trial", "pick the time trials in Time Trial / Tower") return false
-        end
-        return Features.TimeTrial() == true
-    end,
-    ["Infinity Tower"] = function()
-        force("AutoInf", "InfAllTiers")
-        Features.InfinityTower()
-        return true
-    end,
-    ["Defense"] = function()
-        force("AutoDefense")
-        return Features.Defense() == true
-    end,
-    ["Meteor"] = function()
-        force("AutoMeteor", "MeteorAllWorlds")
-        return Features.Meteor() == true
-    end,
-    ["Global Boss"] = function()
-        force("AutoGlobalBoss")
-        return Features.GlobalBoss() == true
-    end,
-    ["Rebirth"] = function()
-        force()
-        if Util.Every("bp-rebirth", 5) then Net.Call("Rebirth") end
-        return false   -- doesn't need the character
-    end,
-    ["Quest"] = function()
-        force("AutoQuest", "AutoFarm")
-        Features.Quest()
-        return farm()
-    end,
-    ["Kill Enemies"] = function()
-        force("AutoFarm")
-        return farm()
-    end,
+    ["Open Star"] = function() force() return BP.Hatch() end,
+    ["Open Divine"] = function() force() return BP.Hatch() end,
 }
 
 -- in the middle of a run of this kind: finish it before switching quests
 function BP.Inside(kind)
     local w = Util.World()
     if kind == "Complete Dungeon" then return Features.InDungeon() end
-    if kind == "Complete Raid" then return w == "Raid" end
-    if kind == "Complete Gate" then return w == "GatesMode" end
-    if kind == "Time Trial" then return Extras.InTrialRun() end
-    if kind == "Defense" then return w == "Titan" end
+    if kind == "Complete Portal" then return w == "GatesMode" end
     return false
 end
 
@@ -6233,8 +6150,10 @@ do
     local c = TMain:Card("Auto Battle Pass", "Left")
     c:Paragraph({ Body = "Does the battle pass quests you pick until their repeats (5 a day) are used, then goes back to the rest. "
         .. "New quests come with the daily reset and start by themselves.\n"
-        .. "Dungeon / Gate / Trial / Defense / Raid use the settings of their own tab. Its place in the order: Priority / Team." })
-    c:Dropdown({ Title = "Select Quests", Items = BP.KindNames(), Multi = true, Flag = "BPQuests" })
+        .. "Dungeon uses Auto Dungeon's settings, Portal = Gate (Auto Gate's level / amount). Its place in the order: Priority / Team." })
+    local all = {}
+    for _, k in ipairs(BP.KindNames()) do all[k] = true end
+    c:Dropdown({ Title = "Select Quests", Items = BP.KindNames(), Multi = true, Default = all, Flag = "BPQuests" })
     local star = c:Dropdown({ Title = "Star For Open Star / Divine", Items = Data.Stars(), Flag = "BPStar" })
     BP.Label = c:Paragraph({ Body = "Reset In : -" })
     c:Button({ Title = "Read Quests", Callback = function()
