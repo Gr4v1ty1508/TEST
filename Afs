@@ -5744,8 +5744,7 @@ function BP.Star()
     return nil
 end
 Net.Listen("AttemptMultiOpen", function()
-    BP.multiAnswerAt, BP.multiMiss = os.clock(), 0
-    BP.noMulti = nil
+    BP.multiAnswerAt, BP.noMulti = os.clock(), nil
 end)
 function BP.Hatch()
     if BP.bagFullAt and os.clock() - BP.bagFullAt < 30 then return false end
@@ -5760,27 +5759,27 @@ function BP.Hatch()
         Util.MoveTo(star:GetPivot() * CFrame.new(0, 0, 7))
         task.wait(0.3)
     end
-    -- Max Open (recorded): the game sends AttemptMultiOpen("<StarName>") and answers with IN
-    -- AttemptMultiOpen({ pets... }) ~0.5 s later; one of them moved the Open quest by ~6000.
-    -- The next one goes out as soon as the answer came (or after 6 s). If no answer ever comes
-    -- (no Max Open) it falls back to single opens (OpenEgg) for 5 min.
+    -- Max Open, as Yuto Hub does it (recorded): in the star's world, AttemptMultiOpen("<StarName>")
+    -- about once a second; the server answers (IN AttemptMultiOpen) every ~2 s and each answer
+    -- moved the Open quest by ~5900. The game's own button also fires Bindable SetTargetEgg(star).
+    -- No answer for 10 s (no Max Open) -> single opens (OpenEgg) for 5 min.
     if not (BP.noMulti and os.clock() < BP.noMulti) then
-        local waiting = BP.multiSentAt and (BP.multiAnswerAt or 0) < BP.multiSentAt
-        if not waiting or os.clock() - BP.multiSentAt > 6 then
-            if waiting then
-                BP.multiMiss = (BP.multiMiss or 0) + 1
-                if BP.multiMiss >= 3 then
-                    BP.noMulti, BP.multiMiss = os.clock() + 300, 0
-                    note("multi", "no answer to Max Open - opening one by one for 5 min")
-                end
+        BP.multiSince = BP.multiSince or os.clock()
+        if os.clock() - math.max(BP.multiAnswerAt or 0, BP.multiSince) > 10 then
+            BP.noMulti, BP.multiSince = os.clock() + 300, nil
+            note("multi", "no answer to Max Open - opening one by one for 5 min")
+        elseif os.clock() - (BP.multiSentAt or 0) >= 1 then
+            BP.multiSentAt = os.clock()
+            if BP.multiTarget ~= starName then
+                BP.multiTarget = starName
+                local ste = Bindables:FindFirstChild("SetTargetEgg")
+                if ste and ste:IsA("BindableEvent") then pcall(ste.Fire, ste, starName) end
             end
-            if not (BP.noMulti and os.clock() < BP.noMulti) and os.clock() - (BP.multiSentAt or 0) > 1 then
-                BP.multiSentAt = os.clock()
-                Net.Raw("AttemptMultiOpen", { starName, n = 1 })
-            end
+            Net.Raw("AttemptMultiOpen", { starName, n = 1 })
         end
         return true
     end
+    BP.multiSince = nil
     if Util.Every("bp-hatch", F("HatchDelay") or 1) then
         local amount = BP.MaxOpen()
         if amount <= 0 then
