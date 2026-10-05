@@ -165,7 +165,9 @@ local CFG = {
         Rebirth         = { "AttemptRebirth",           function() return {} end },
         StartQuest      = { "StartQuest",               function(quest) return { quest } end },
         FinishQuest     = { "FinishQuest",              function(quest) return { quest } end },
-        ReEquipPets     = { "ManagePet",                function() return { "EquipBest" } end },
+        -- the game's own team button (watched): ManagePet(uid, "Unequip") / ManagePet(uid, "Equip", slot)
+        ManagePetEquip   = { "ManagePet",               function(uid, slot) return { uid, "Equip", slot } end },
+        ManagePetUnequip = { "ManagePet",               function(uid) return { uid, "Unequip" } end },
         SkipQuest       = { "SkipQuest",                function() return {} end },
 
         JoinTimeTrial   = { "JoinTimeTrial",            function(trial) return { trial } end },
@@ -3137,6 +3139,7 @@ function Features.OpenDungeon()
     if os.clock() < nextSummon then
         -- a dungeon was just summoned: keep trying to get in instead of summoning again
         if Util.Every("dungeon-rejoin", 5) then
+            Net.Call("DungeonLobby")
             Net.Raw("JoinDungeon", Learn.Get("JoinDungeon") or {})
         end
         return
@@ -3198,6 +3201,34 @@ function Features.OpenDungeon()
     dungeonStep = "joining"
 end
 
+local dungeonActivated = setmetatable({}, { __mode = "k" })
+function Features.DungeonActivate()
+    local root = Features.DungeonRoot()
+    local map = root and root:FindFirstChild("Map")
+    local me = Util.Root()
+    if not (map and me) then return false end
+    local best, bestD
+    for _, cp in ipairs(map:GetDescendants()) do
+        if cp.Name == "ConfirmPart" and cp:IsA("BasePart") then
+            local pp = cp:FindFirstChildWhichIsA("ProximityPrompt")
+            local done = dungeonActivated[cp]
+            if pp and pp.Enabled and string.find(string.lower(pp.ActionText), "activ", 1, true)
+               and not (done and os.clock() - done < 30) then
+                local d = (cp.Position - me.Position).Magnitude
+                if not bestD or d < bestD then best, bestD = { cp = cp, pp = pp }, d end
+            end
+        end
+    end
+    if not best then return false end
+    pcall(function() LP:RequestStreamAroundAsync(best.cp.Position) end)
+    Util.MoveTo(best.cp.CFrame * CFrame.new(0, 4, 0))
+    task.wait(1)
+    if fireproximityprompt then pcall(fireproximityprompt, best.pp) else Prompt.Use(best.pp) end
+    dungeonActivated[best.cp] = os.clock()
+    task.wait(1)
+    return true
+end
+
 function Features.FarmDungeon()
     dungeonStep = "inside"
     nextSummon = 0
@@ -3212,6 +3243,9 @@ function Features.FarmDungeon()
     end or nil
     if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then return end
     if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then return end
+    -- no enemies: open the next room (Yuto Hub, watched): stand on the room's altar
+    -- (Map.Model["x, y"].ConfirmPart) ~1 s, fire its "Activate" prompt; its enemies spawn
+    if Features.DungeonActivate() then return end
     local root = Features.DungeonRoot()
     -- chests
     if not On("DungeonIgnoreChest") then
@@ -3478,6 +3512,20 @@ function Data.PetPassive(id, slot)
         return p
     end
     return nil
+end
+
+-- take every equipped pet off and put it back in the same slot order (what "re equip" means:
+-- fresh pet models = they attack again right away)
+function Features.ReEquipPets()
+    local uids = {}
+    for _, m in ipairs(Data.EquippedPets()) do
+        local uid = Data.PetUID(m)
+        if uid then uids[#uids + 1] = tonumber(uid) or uid end
+    end
+    if #uids == 0 then return end
+    for _, uid in ipairs(uids) do Net.Call("ManagePetUnequip", uid) end
+    task.wait(0.4)
+    for slot, uid in ipairs(uids) do Net.Call("ManagePetEquip", uid, slot) end
 end
 
 function Features.Fuse()
@@ -4857,12 +4905,24 @@ function DungeonGui.SummonDirect()
         return false
     end
     local sizeIndex = table.find(CFG.DungeonSizes, F("DungeonSize") or "Small") or 1
+    -- Yuto Hub (watched): EquipArtefact("Dungeon") -> SummonDungeon(true, {Size, Theme})
+    --   -> ~1 s -> EquipArtefact(<the one you had>) -> AttemptTravel("Dungeon") = you're in
+    local prevArt
+    pcall(function() prevArt = Data.StoreData().CurrentArtefact end)
     if On("DungeonArtifact") then Features.EquipOpenArtifact() end
     -- first value: Yuto Hub sends true; "Friend Only" off sends true too, on sends false
     local flag = not On("DungeonFriends")
     if CFG.DungeonSummonFlag ~= nil then flag = CFG.DungeonSummonFlag end
     Net.Call("SummonDungeon", flag, sizeIndex, world)
     Features.LastSummon = { source = "direct (Yuto Hub args)", artifact = "-", at = os.clock() }
+    task.wait(1)
+    if On("DungeonArtifact") and type(prevArt) == "string" and prevArt ~= "" and prevArt ~= "Dungeon" then
+        Net.Call("EquipArtifact", prevArt, "CurrentArtefact")      -- your own artefact back on
+    end
+    Net.Call("DungeonLobby")                                        -- AttemptTravel("Dungeon")
+    local t0 = os.clock()
+    while os.clock() - t0 < 3 and not Features.InDungeon() do task.wait(0.1) end
+    if Features.InDungeon() then DungeonGui.waitUntil, DungeonGui.directTries = 0, 0 end
     return true
 end
 function Features.OpenDungeon()
@@ -4871,6 +4931,7 @@ function Features.OpenDungeon()
         local dt = mainChild("DungeonTravel")
         if isShown(dt) then Extras.Press(dt:FindFirstChild("Yes", true)) end
         if Util.Every("dungeon-rejoin", 5) then
+            Net.Call("DungeonLobby")
             Net.Raw("JoinDungeon", Learn.Get("JoinDungeon") or {})
             -- the door's teleporter (DungeonDoor.Teleporter.TriggerPart), like walking in
             local door = DungeonGui.Door()
@@ -4889,8 +4950,8 @@ function Features.OpenDungeon()
     DungeonGui.directTries = DungeonGui.directTries or 0
     if DungeonGui.directTries < 6 then
         if not Util.Every("dungeon-direct", 1.5) then return end
-        if Util.World() ~= "Tower" then Travel.To("Tower", true) end
         if DungeonGui.SummonDirect() then
+            if Features.InDungeon() then return end
             DungeonGui.directTries = DungeonGui.directTries + 1
             task.wait(0.8)
             local dt = mainChild("DungeonTravel")
@@ -5943,7 +6004,7 @@ loop(1, function()
     if On("AutoNextWorld") and Util.Every("nextworld", 15) then Features.NextWorld() end
     -- backup check; only acts when we can actually tell you're not mounted
     if On("AutoMount") and Util.Every("mount", 3) and Features.IsMounted() == false then Features.Mount() end
-    if On("AutoReEquip") and Util.Every("reequip", (F("ReEquipDelay") or 2) * 60) then Net.Call("ReEquipPets") end
+    if On("AutoReEquip") and Util.Every("reequip", (F("ReEquipDelay") or 2) * 60) then Features.ReEquipPets() end
     if On("AutoSpin") and Util.Every("spin", 60) then Net.Call("DailySpin") end
     if On("AutoTicket") and Util.Every("ticket", 60) then Net.Call("ClaimTicket") end
     if On("AutoBoost") and Util.Every("boost", 60) then Net.Call("ClaimBoost") end
