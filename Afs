@@ -1025,13 +1025,19 @@ function Combat.CanTP() return Combat.Options.Teleport or not Combat.InFarm end
 -- RequestPetTeleport(pet) for each of YOUR equipped pets (needs the pet-teleport passive; the
 -- game itself sends it too). Sent AFTER the character got to the enemy - sent before, it pulled
 -- the pets to the spot we were leaving, and they had to run all the way after us.
+-- Only pets that are far away (left behind) are pulled: pulling a pet that is already fighting
+-- puts it back on the player and it stops hitting (seen: every pet stacked on the player).
 function Combat.PetsToMe()
     if not Combat.Options.PetTP then return end
-    for _, pet in ipairs(Data.EquippedPets()) do task.spawn(Net.Call, "PetTeleport", pet) end
+    local root = Util.Root()
+    for _, pet in ipairs(Data.EquippedPets()) do
+        local ok, far = pcall(function() return (pet:GetPivot().Position - root.Position).Magnitude > 60 end)
+        if not ok or far then task.spawn(Net.Call, "PetTeleport", pet) end
+    end
 end
 function Combat.Attack(e, wanted)
     local t0 = os.clock()
-    local petsAt, movedAt = os.clock() - 2.7, nil   -- first call ~0.3 s in, or right after the teleport
+    local movedAt = nil
     local streamedAt = 0
     local hp0, hpAt = Combat.HP(e), nil
     do
@@ -1061,9 +1067,9 @@ function Combat.Attack(e, wanted)
         end
         local root = Util.Root()
         local pos, part = Combat.Pos(e)
-        -- pets: one frame after we arrived, then again every 3 s while this enemy lives
-        if os.clock() - petsAt > 3 or (movedAt and os.clock() - movedAt > 0.05) then
-            petsAt, movedAt = os.clock(), nil
+        -- pets left behind: pulled once, right after we arrived at the enemy
+        if movedAt and os.clock() - movedAt > 0.05 then
+            movedAt = nil
             Combat.PetsToMe()
         end
         if Combat.CanTP() and root and pos and (root.Position - pos).Magnitude > 12 then
@@ -1081,7 +1087,7 @@ function Combat.Attack(e, wanted)
         end
         -- pets need the enemy's parts to walk to it
         -- the game's own attack call is SendPet:Fire(enemy, true, true) (seen while watching)
-        if SendPet and e:FindFirstChild("HumanoidRootPart") then pcall(SendPet.Fire, SendPet, e, true, true) end
+        if SendPet and (e:FindFirstChild("HumanoidRootPart") or part) then pcall(SendPet.Fire, SendPet, e, true, true) end
         task.wait()
     end
 end
