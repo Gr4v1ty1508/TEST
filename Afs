@@ -5803,20 +5803,63 @@ local function joinGate()
     Net.Raw("JoinGatesMode", { Gate.id, n = 1 })
     Net.Raw("AttemptTravel", { "GatesMode", true, Gate.id, n = 3 })
 end
--- the picked ranks, hardest first (bottom of the game's list). A rank that made no gate
--- (none left) is passed over for 10 min.
+-- how many gates of a rank you have: save Items "<Rank>RankGate" (the drops are named
+-- "CRankGate", "BRankGate" ...). nil = can't tell (then it's just tried)
+function Features.GateItems(rank)
+    local st = Data.StoreData and Data.StoreData()
+    local items = type(st) == "table" and st.Items
+    if type(items) ~= "table" then return nil end
+    local n = items[rank .. "RankGate"] or items[rank .. "Gate"]
+    if n ~= nil then return tonumber(n) or 0 end
+    -- other gate items are listed but not this one: none of it (Anniversary may be named differently)
+    if rank ~= "Anniversary" then
+        for k in pairs(items) do if type(k) == "string" and string.find(k, "RankGate$") then return 0 end end
+    end
+    return nil
+end
+-- the picked ranks you still have, hardest first (bottom of the game's list). A rank that made
+-- no gate is passed over for 10 min.
 Gate.empty = {}
 function Features.GateRankOrder()
     local picked = F("GateRanks") or {}
     local out = {}
     for i = #CFG.GateRanks, 1, -1 do
         local r = CFG.GateRanks[i]
-        if picked[r] and not (Gate.empty[r] and os.clock() < Gate.empty[r]) then out[#out + 1] = r end
+        local have = Features.GateItems(r)
+        if picked[r] and not (Gate.empty[r] and os.clock() < Gate.empty[r]) and (have == nil or have > 0) then out[#out + 1] = r end
     end
     return out
 end
+-- gate over: MainGui.GatesModeLose (results) -> press its Return button, the game sends you out
+function Features.GateReturn()
+    local g = mainChild("GatesModeLose")
+    if not isShown(g) then return false end
+    local pick
+    for _, b in ipairs(g:GetDescendants()) do
+        if b:IsA("GuiButton") then
+            local t = string.lower(b.Name .. " " .. (b:IsA("TextButton") and b.Text or ""))
+            for _, l in ipairs(b:GetDescendants()) do
+                if l:IsA("TextLabel") then t = t .. " " .. string.lower(l.Text) end
+            end
+            if string.find(t, "return", 1, true) or string.find(t, "leave", 1, true) or string.find(t, "back", 1, true) then pick = b break end
+            pick = pick or b
+        end
+    end
+    if pick and Util.Every("gate-return", 1.5) then
+        Combat.Log("gate", "gate over: pressing " .. pick.Name)
+        Extras.Press(pick)
+    end
+    return true
+end
 -- one step; true = busy with a gate, false = no gate could be summoned
 function Features.GateRun(amount, wanted)
+    -- the end screen first (it's up while we're still in GatesMode)
+    if Features.GateReturn() then return true end
+    if Util.World() == "GatesMode" and not Gate.id and os.clock() - Gate.overAt < 20 then
+        -- our gate is over but the Return screen didn't come / got closed: leave by ourselves
+        if os.clock() - Gate.overAt > 4 and Util.Every("gate-leave", 5) then Travel.To("TimeChamber", true) end
+        return true
+    end
     if Util.World() == "GatesMode" then
         Gate.inAt = Gate.inAt or os.clock()
         -- the gate only takes damage after it started: hitting it before that made every enemy
