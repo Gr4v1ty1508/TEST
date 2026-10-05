@@ -5776,7 +5776,10 @@ Net.Listen("GateCreated", function(id)
     Gate.id, Gate.createdAt, Gate.started = tostring(id), os.clock(), false
     Gate.count = Gate.count + 1
 end)
-Net.Listen("GateStarted", function() Gate.started = true end)
+Net.Listen("GateStarted", function()
+    Gate.started = true
+    for e in pairs(Combat.Skip) do Combat.Skip[e] = nil end   -- hittable now
+end)
 Net.Listen("GatesModeLost", function()
     Gate.id, Gate.started, Gate.overAt = nil, false, os.clock()
     if BP.data then BP.FetchData() end   -- the Portal quest just moved
@@ -5804,13 +5807,36 @@ end
 -- one step; true = busy with a gate, false = no gate could be summoned
 function Features.GateRun(amount, wanted)
     if Util.World() == "GatesMode" then
-        if not Gate.started and Util.Every("gate-skip", 0.5) then Net.Raw("SkipGateWait", {}) end
+        Gate.inAt = Gate.inAt or os.clock()
+        -- the gate only takes damage after it started: hitting it before that made every enemy
+        -- "no damage for 8 s -> skipped 30 s" and the character just stood there.
+        -- Started = IN GateStarted, or (script loaded mid-gate) 6 s after we got in
+        if not Gate.started then
+            if Util.Every("gate-skip", 0.5) then Net.Raw("SkipGateWait", {}) end
+            if os.clock() - Gate.inAt < 6 then
+                Combat.Log("gate", "in gate " .. tostring(Gate.id) .. ", waiting for it to start")
+                return true
+            end
+            Gate.started = true
+        end
+        if not Gate.cleared then
+            Gate.cleared = true
+            for e in pairs(Combat.Skip) do Combat.Skip[e] = nil end
+        end
         -- only our own gate (other players' gates are in GatesMode too)
         local folder = Features.GateFolder()
         local skip = folder and function(e) return not e:IsDescendantOf(folder) end or nil
-        Combat.Step("GatesMode", wanted, nil, F("GateTarget") or "Nearest", (not folder) and 600 or nil, skip)
+        if not Combat.Step("GatesMode", wanted, nil, F("GateTarget") or "Nearest", (not folder) and 600 or nil, skip) then
+            local n = 0
+            for _, e in ipairs(Combat.List("GatesMode")) do if not skip or not skip(e) then n = n + 1 end end
+            Combat.Log("gate", "gate " .. tostring(Gate.id) .. (folder and "" or " (folder not found)")
+                .. ": nothing to hit, " .. n .. " alive enemies in it")
+            -- next wave not loaded yet: anything skipped earlier gets another go
+            if Util.Every("gate-unskip", 3) then for e in pairs(Combat.Skip) do Combat.Skip[e] = nil end end
+        end
         return true
     end
+    Gate.inAt, Gate.cleared = nil, nil
     -- just over: the game is sending us back
     if os.clock() - Gate.overAt < 1.5 then return true end
     -- ours was made but we're not in yet
