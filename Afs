@@ -5580,43 +5580,45 @@ do
     -- CONFIG/<name>_pets.json, and after a join they're found again by that fingerprint.
     -- Identical fingerprints (same fodder pet twice) are handed out one per pick.
     Features.PicksReady = false
-    local PICK_FILE = CFG.ConfigFolder .. "/CONFIG/" .. LP.Name .. "_pets.json"
     local KEEP_PICKS = { EQPets = true }
+    -- the fingerprints live in the normal config as a hidden flag "<flag>Sigs" (saved / loaded
+    -- with everything else, no extra file)
+    local pickSigs = {}
+    for flag in pairs(KEEP_PICKS) do
+        Library.Flags[flag .. "Sigs"] = { Type = "Hidden",
+            Get = function() return pickSigs[flag] end,
+            Set = function(_, v) if type(v) == "table" then pickSigs[flag] = v end end }
+    end
     function Data.PetSig(raw)
         if type(raw) ~= "table" then return nil end
         return table.concat({ tostring(raw.PetId), tostring(raw.CustomName or ""), tostring(raw.FusedXP or 0),
             tostring(raw.BaseLevel or 0), tostring(raw.Shiny), tostring(raw.Void), tostring(raw.AppearanceId or ""),
             tostring(raw.Skin or "") }, "|")
     end
-    local function loadPicks()
-        local ok, t = pcall(function()
-            if not (isfile and readfile) or not isfile(PICK_FILE) then return {} end
-            return HttpService:JSONDecode(readfile(PICK_FILE))
-        end)
-        return (ok and type(t) == "table") and t or {}
+    -- uid -> the pet's record in the save (GameData.Pets), read fresh
+    local function savedPets()
+        local out = {}
+        local st = Data.StoreData()
+        for _, t in pairs(st and type(st.Pets) == "table" and st.Pets or {}) do
+            if type(t) == "table" and t.UID ~= nil then out[tostring(t.UID)] = t end
+        end
+        return out
     end
     function Features.SavePetPicks(flag, set)
-        if not KEEP_PICKS[flag] or not Features.PicksReady or not writefile then return end
-        local sigs = {}
+        if not KEEP_PICKS[flag] or not Features.PicksReady then return end
+        local pets, sigs = savedPets(), {}
         for label, on in pairs(set or {}) do
-            local rec = on and Data.InventoryIndex[Data.PetId(label)]
-            local sig = rec and Data.PetSig(rec.raw)
+            local sig = on and Data.PetSig(pets[Data.PetId(label)])
             if sig then sigs[#sigs + 1] = sig end
         end
-        local all = loadPicks()
-        all[flag] = sigs
-        pcall(function()
-            if makefolder and isfolder and not isfolder(CFG.ConfigFolder .. "/CONFIG") then makefolder(CFG.ConfigFolder .. "/CONFIG") end
-            writefile(PICK_FILE, HttpService:JSONEncode(all))
-        end)
+        pickSigs[flag] = sigs
     end
     -- after a join: today's labels for the saved fingerprints
     local function restorePicks(d, flag, list)
-        local sigs = loadPicks()[flag]
-        local bySig = {}
+        local sigs = pickSigs[flag]
+        local pets, bySig = savedPets(), {}
         for _, label in ipairs(list) do
-            local rec = Data.InventoryIndex[Data.PetId(label)]
-            local sig = rec and Data.PetSig(rec.raw)
+            local sig = Data.PetSig(pets[Data.PetId(label)])
             if sig then bySig[sig] = bySig[sig] or {} table.insert(bySig[sig], label) end
         end
         local new, n, want = {}, 0, type(sigs) == "table" and #sigs or 0
@@ -5627,11 +5629,12 @@ do
         -- the labels in the config hold LAST game's UIDs (= other pets now): never keep those
         d:Set(new, true)
         if want > 0 then Util.Notify(string.format("Lunar pets: %d/%d picked again", n, want)) end
+        return want > 0
     end
     function Features.RefreshPetLists(silent)
         Data.Inventory(true)
         local list = Data.Pets()
-        local loaded = next(Data.InventoryIndex) ~= nil
+        local loaded = next(savedPets()) ~= nil
         for _, d in ipairs(Features.PetDrops) do
             pcall(d.Refresh, d, list)
             local flag = Features.PetDropFlags and Features.PetDropFlags[d]
@@ -5643,8 +5646,10 @@ do
         end
         if loaded and not Features.PicksReady then
             Features.PicksReady = true
+            -- keep the old fingerprints if nothing matched (e.g. the save was half loaded):
+            -- they're only replaced when you pick pets yourself
             for d, flag in pairs(Features.PetDropFlags or {}) do
-                if KEEP_PICKS[flag] then Features.SavePetPicks(flag, d:Get()) end
+                if KEEP_PICKS[flag] and next(d:Get() or {}) then Features.SavePetPicks(flag, d:Get()) end
             end
         end
         if not silent then Util.Notify(#list .. " pets ( equipped + inventory )") end
