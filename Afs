@@ -5569,10 +5569,42 @@ do
     Features.PetDrops = Features.PetDrops or {}
     table.insert(Features.PetDrops, pets)
     -- one refresh for every pet list (Auto Reroll Passive + Lunar vs Solar), keeps what was picked
+    -- a picked pet is remembered by its label; labels can change (nickname, display name, an
+    -- older hub version), so after every refresh the picks are matched again by UID "[...]":
+    -- an old label becomes today's label for the same pet, doubles are merged, and picks of
+    -- pets you don't have any more are dropped (only once the inventory is really loaded)
+    function Features.RemapPetPicks(d, list)
+        local byUid = {}
+        for _, label in ipairs(list) do byUid[Data.PetId(label)] = label end
+        local loaded = next(Data.InventoryIndex) ~= nil
+        local cur = d:Get()
+        if type(cur) ~= "table" then return end
+        local new, changed = {}, false
+        for label, on in pairs(cur) do
+            if on then
+                local now = byUid[Data.PetId(label)]
+                if now then
+                    if now ~= label then changed = true end
+                    new[now] = true
+                elseif loaded then
+                    changed = true                       -- that pet is gone
+                else
+                    new[label] = true                    -- inventory not read yet: keep it
+                end
+            end
+        end
+        local n1, n2 = 0, 0
+        for _ in pairs(cur) do n1 = n1 + 1 end
+        for _ in pairs(new) do n2 = n2 + 1 end
+        if changed or n1 ~= n2 then d:Set(new, true) end
+    end
     function Features.RefreshPetLists(silent)
         Data.Inventory(true)
         local list = Data.Pets()
-        for _, d in ipairs(Features.PetDrops) do pcall(d.Refresh, d, list) end
+        for _, d in ipairs(Features.PetDrops) do
+            pcall(d.Refresh, d, list)
+            pcall(Features.RemapPetPicks, d, list)
+        end
         if not silent then Util.Notify(#list .. " pets ( equipped + inventory )") end
         return list
     end
