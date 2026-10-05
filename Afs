@@ -1060,11 +1060,51 @@ function Combat.PetsToMe()
         if not ok or far then task.spawn(Net.Call, "PetTeleport", pet) end
     end
 end
+-- how many of my equipped pets are on this enemy right now (pet.Data.Attacking / ServerAttacking,
+-- seen in the pet dump) and how many are equipped
+function Combat.PetsOn(e, pets)
+    local on = 0
+    for _, p in ipairs(pets) do
+        local d = p:FindFirstChild("Data")
+        local a = d and d:FindFirstChild("Attacking")
+        local s = d and d:FindFirstChild("ServerAttacking")
+        local av, sv = a and a.Value, s and s.Value
+        if (av and (av == e or av:IsDescendantOf(e))) or (sv and (sv == e or sv:IsDescendantOf(e))) then on = on + 1 end
+    end
+    return on, #pets
+end
+-- pets that are far from the enemy and not fighting it: put them next to us (what other open
+-- hubs do after every teleport: the pet model's TargetPart + HumanoidRootPart moved onto you)
+function Combat.PullFarPets(e, pets, pos)
+    local root = Util.Root()
+    if not (root and pos) then return 0 end
+    local n = 0
+    for _, p in ipairs(pets) do
+        local d = p:FindFirstChild("Data")
+        local a = d and d:FindFirstChild("Attacking")
+        local av = a and a.Value
+        if not (av and (av == e or av:IsDescendantOf(e))) then
+            local ok, far = pcall(function() return (p:GetPivot().Position - pos).Magnitude > 80 end)
+            if ok and far then
+                n = n + 1
+                for _, nm in ipairs({ "TargetPart", "HumanoidRootPart" }) do
+                    local part = p:FindFirstChild(nm)
+                    if part and part:IsA("BasePart") then pcall(function() part.CFrame = root.CFrame end) end
+                end
+            end
+        end
+    end
+    return n
+end
 function Combat.Attack(e, wanted)
     local t0 = os.clock()
-    local movedAt, sentAt, ultAt = nil, nil, 0
+    local movedAt, sentAt, ultAt, pulledAt = nil, -99, 0, 0
+    local arrived = true
     local streamedAt = 0
     local hp0, hpAt = Combat.HP(e), nil
+    local hpStart = hp0
+    local stats = { sends = 0, pulls = 0, maxOn = 0, firstHit = nil, tps = 0 }
+    local pets, petsAt = Data.EquippedPets(), os.clock()
     do
         local pos, part = Combat.Pos(e)
         local root = Util.Root()
@@ -1083,13 +1123,18 @@ function Combat.Attack(e, wanted)
         -- skip it for 30 s so the rest of the hub can move on
         if e:FindFirstChild("HumanoidRootPart") then
             hpAt = hpAt or os.clock()
-            if Combat.HP(e) < hp0 then hp0, hpAt = Combat.HP(e), os.clock() end
+            if Combat.HP(e) < hp0 then
+                hp0, hpAt = Combat.HP(e), os.clock()
+                stats.firstHit = stats.firstHit or (os.clock() - t0)
+            end
             if os.clock() - hpAt > 8 then
-                Combat.Log("atk", "no damage on " .. e.Name .. " for 8 s -> skipped 30 s")
+                local on, total = Combat.PetsOn(e, pets)
+                Combat.Log("atk", "no damage on " .. e.Name .. " for 8 s (pets on it " .. on .. "/" .. total .. ") -> skipped 30 s")
                 Combat.Skip[e] = os.clock() + 30
                 break
             end
         end
+        if os.clock() - petsAt > 1 then pets, petsAt = Data.EquippedPets(), os.clock() end
         local root = Util.Root()
         local pos, part = Combat.Pos(e)
         -- optional per-fight hook (off: see Combat.FightTick note next to Features.Ult)
@@ -1098,12 +1143,14 @@ function Combat.Attack(e, wanted)
             Combat.FightTick()
         end
         -- pets left behind: pulled once, right after we arrived at the enemy
-        if movedAt and os.clock() - movedAt > 0.05 then
-            movedAt = nil
+        if movedAt and not arrived and os.clock() - movedAt > 0.05 then
+            arrived = true
             Combat.PetsToMe()
         end
+        local moved = false
         if Combat.CanTP() and root and pos and (root.Position - pos).Magnitude > 12 then
-            movedAt = os.clock()
+            movedAt, moved, arrived = os.clock(), true, false
+            stats.tps = stats.tps + 1
             if part then
                 root.CFrame = part.CFrame * CFrame.new(0, 0, 4)
             else
@@ -1115,19 +1162,41 @@ function Combat.Attack(e, wanted)
                 end
             end
         end
-        -- pets need the enemy's parts to walk to it
-        -- the game's own attack call is SendPet:Fire(enemy, true, true) (seen while watching).
-        -- Every Fire makes the game re-send ALL pets to the enemy, which restarts their attack:
-        -- it used to be fired every frame (= pets kept restarting, the HP bar barely moved).
-        -- The game itself fires it about once per target (22 times in 75 s of Yuto's dungeon):
-        -- now once when we're there, and again only every 5 s or right after we moved.
-        if SendPet and (e:FindFirstChild("HumanoidRootPart") or part)
-           and (not sentAt or os.clock() - sentAt > 5 or movedAt) then
-            sentAt = os.clock()
-            pcall(SendPet.Fire, SendPet, e, true, true)
+        -- send the pets (the game's click: SendPet:Fire(enemy, true, true)).
+        -- Not in the same frame as a teleport: right after one the game withdraws the pets
+        -- (WithdrawPets fires again and again while you move - seen in the logs), which undid the
+        -- send, and the old code only sent again 5 s later = ~6 s per mob. Now it looks at the
+        -- pets themselves: none on this enemy -> send again every 0.3 s; some on it -> every 1.5 s;
+        -- all on it -> leave them alone (a send restarts their attack).
+        if not moved and SendPet and (e:FindFirstChild("HumanoidRootPart") or part)
+           and (not movedAt or os.clock() - movedAt > 0.1) then
+            local on, total = Combat.PetsOn(e, pets)
+            if on > stats.maxOn then stats.maxOn = on end
+            local every = (on == 0 and 0.3) or (on < total and 1.5) or math.huge
+            -- it's taking damage although no pet reads as "on it" (the game may not fill those
+            -- values everywhere): don't keep re-sending fast
+            if on == 0 and stats.firstHit and os.clock() - hpAt < 1 then every = 3 end
+            if os.clock() - sentAt > every then
+                sentAt = os.clock()
+                stats.sends = stats.sends + 1
+                pcall(SendPet.Fire, SendPet, e, true, true)
+            end
+            -- pets still far away a moment after we arrived: bring them over (every 2 s at most)
+            if on < total and os.clock() - pulledAt > 2 and (not movedAt or os.clock() - movedAt > 0.4) then
+                pulledAt = os.clock()
+                local n = Combat.PullFarPets(e, pets, pos)
+                if n > 0 then stats.pulls = stats.pulls + 1 end
+            end
         end
         task.wait()
     end
+    -- one line per enemy in combat_log.txt: where the time went
+    pcall(function()
+        Combat.Log("done", string.format("%s [%s] %s in %.1f s | first hit %s | pets on it max %d/%d | sends %d | pulls %d | tps %d | hp %.3g -> %.3g",
+            e.Name, Combat.Name(e), Combat.Alive(e) and "LEFT" or "killed", os.clock() - t0,
+            stats.firstHit and string.format("%.1f s", stats.firstHit) or "never", stats.maxOn, #pets,
+            stats.sends, stats.pulls, stats.tps, hpStart, Combat.HP(e)))
+    end)
 end
 
 -- one attack step; false when nothing is left
