@@ -3286,6 +3286,44 @@ function Features.OpenDungeon()
 end
 
 Features.DungeonActivated = setmetatable({}, { __mode = "k" })
+-- true = there are living mobs but none of them is loaded -> we went to load them
+function Features.DungeonFindHidden(worldName, skip)
+    if (Features.DungeonHiddenPause or 0) > os.clock() then return false end
+    local world = Worlds:FindFirstChild(worldName or "")
+    if not world then return false end
+    local hidden, visible = 0, 0
+    for _, f in ipairs(Combat.EnemyFolders(world)) do
+        for _, e in ipairs(f:GetChildren()) do
+            local hp = e:FindFirstChild("Health")
+            if (not hp or hp.Value > 0) and not (skip and skip(e)) then
+                if Combat.Pos(e) then visible = visible + 1 else hidden = hidden + 1 end
+            end
+        end
+    end
+    if hidden == 0 or visible > 0 then Features.DungeonHiddenSince = nil return false end
+    -- left-over models that never load: give up for a while, open/walk rooms normally
+    Features.DungeonHiddenSince = Features.DungeonHiddenSince or os.clock()
+    if os.clock() - Features.DungeonHiddenSince > 25 then
+        Features.DungeonHiddenSince = nil
+        Features.DungeonHiddenPause = os.clock() + 20
+        return false
+    end
+    local list = {}
+    for cp, info in pairs(Features.DungeonActivated) do
+        if cp.Parent then list[#list + 1] = { cp = cp, at = info.at } end
+    end
+    if #list == 0 then return false end
+    table.sort(list, function(a, b) return a.at > b.at end)
+    Features.DungeonLoadIdx = (Features.DungeonLoadIdx or 0) % #list + 1
+    local cp = list[Features.DungeonLoadIdx].cp
+    pcall(function() LP:RequestStreamAroundAsync(cp.Position) end)
+    Util.MoveTo(cp.CFrame * CFrame.new(0, 4, 0))
+    task.wait(0.8)
+    -- what was loaded can be attacked again right away
+    for e in pairs(Combat.Skip) do if Combat.Pos(e) then Combat.Skip[e] = nil end end
+    return true
+end
+
 -- the "x, y" room model a part belongs to, and whether the minimap shows it yet
 function Features.DungeonRoomOf(inst)
     local o = inst
@@ -3354,6 +3392,13 @@ function Features.FarmDungeon()
     local noChest = On("DungeonIgnoreChest") and function(e)
         return string.find(string.lower(e.Name .. " " .. Combat.Name(e)), "chest", 1, true) ~= nil
     end or nil
+    -- mobs of a room we opened can be "invisible" (not loaded: the room is far, they spawned
+    -- after we left for the next altar). They block the next rooms, but can't be attacked until
+    -- loaded: go back to the rooms we opened (newest first) until they show up.
+    if Features.DungeonFindHidden(worldName, noChest) then return true end
+    -- only fight mobs that are loaded (have a position) - the rest are handled above
+    local chestSkip = noChest
+    noChest = function(e) return Combat.Pos(e) == nil or (chestSkip ~= nil and chestSkip(e)) end
     if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then Features.DungeonIdleSince = nil return true end
     if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then Features.DungeonIdleSince = nil return true end
     -- no enemies: open the next room (stand on its altar ~1 s, fire "Activate"; its enemies spawn)
