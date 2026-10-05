@@ -3302,8 +3302,13 @@ function Features.FarmDungeon()
     end or nil
     if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then return true end
     if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then return true end
+    -- the boss can die before every room is open (its key can drop early; the number of rooms
+    -- changes every run, there's one boss room). Boss dead = the run is done: only the doors
+    -- (the treasure room behind the boss) and the chests are still taken, unless
+    -- "Clear Every Room After Boss" is on.
+    local bossDone = Features.DungeonBossAt ~= nil and not On("DungeonFinishRooms")
     -- no enemies: open the next room (stand on its altar ~1 s, fire "Activate"; its enemies spawn)
-    if Features.DungeonActivate() then return true end
+    if not bossDone and Features.DungeonActivate() then return true end
     local root = Features.DungeonRoot()
     -- chests with a prompt (older dungeons)
     if not On("DungeonIgnoreChest") then
@@ -3324,8 +3329,9 @@ function Features.FarmDungeon()
             return true
         end
     end
-    -- boss down and nothing left: this run is finished
-    if Features.DungeonBossAt then return false end
+    -- boss down and nothing left (a few seconds for the treasure chests to show up): run finished
+    if Features.DungeonBossAt and os.clock() - Features.DungeonBossAt > 8 then return false end
+    if Features.DungeonBossAt then task.wait(0.5) return true end
     -- nothing loaded near us: visit the rooms one by one so their enemies load in (Yuto does this too)
     if On("DungeonLoadAll") then
         local rooms = Features.DungeonRooms()
@@ -5560,6 +5566,7 @@ do
     d:Toggle({ Title = "Friend Only", Flag = "DungeonFriends" })
     d:Toggle({ Title = "Auto Open Dungeon", Flag = "AutoOpenDungeon" })
     d:Toggle({ Title = "Teleport To Load All Dungeon", Flag = "DungeonLoadAll" })
+    d:Toggle({ Title = "Clear Every Room After Boss", Flag = "DungeonFinishRooms" })
     d:Toggle({ Title = "Auto Farm Dungeon", Flag = "AutoFarmDungeon" })
     Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(dw, Data.FarmWorldLabels()) end
 
