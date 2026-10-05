@@ -323,7 +323,7 @@ end
 -- GravityHub/AFS/learned_calls.json and reused, so the script sends what the
 -- game really expects instead of a guess.
 local Learn = { data = nil }
-Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true, TrialShopPurchase = true, UpgradePotion = true }
+Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true, TrialShopPurchase = true, UpgradePotion = true, OpenEgg = true }
 Learn.File = CFG.ConfigFolder .. "/learned_calls.json"
 function Learn.Load()
     if Learn.data then return Learn.data end
@@ -5756,12 +5756,21 @@ function BP.Hatch()
         task.wait(0.3)
     end
     if Util.Every("bp-hatch", F("HatchDelay") or 1) then
-        local modes = F("HatchModes") or {}
-        local amount = modes["Summon Max Star"] and CFG.HatchAmount.Max
-            or modes["Summon Multiple Star"] and CFG.HatchAmount.Multiple or CFG.HatchAmount.Single
-        Net.Call("OpenEgg", star or starName, amount)
+        Net.Call("OpenEgg", star or starName, BP.MaxOpen())
     end
     return true
+end
+-- the quest counts every star opened, so always open as many as the game lets you at once:
+-- the number on the game's Open button (CFG.HatchAmount.Max, read every 5 s) or the most you
+-- opened by hand in one go (OpenEgg is learned when you open a star yourself) - the higher one
+function BP.MaxOpen()
+    pcall(Extras.MaxHatch)
+    local n = tonumber(CFG.HatchAmount.Max) or 1
+    for _, h in ipairs(Learn.History("OpenEgg")) do
+        local a = tonumber(h[2])
+        if a and a > n and a <= 1000 then n = a end
+    end
+    return math.max(1, math.floor(n))
 end
 
 -- GATES (= the battle pass "Portal"), the way Yuto Hub does it (recorded):
