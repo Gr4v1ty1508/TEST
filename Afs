@@ -5199,9 +5199,10 @@ function DungeonGui.SummonDirect()
     local known = Learn.Load().DungeonFlags or {}
     local flag
     if On("DungeonFriends") then flag = known.Friends else flag = known.Public end
-    -- not learned yet: like Defense Mode (SummonTitan(trigger, true) = Private), and with
-    -- false sent for Friend Only others could join -> true = Friends Only, false = Public
+    -- watched: SummonDungeon(true, ...) -> "<you> just summoned a private Dungeon!"
+    -- -> true = Friends Only, false = Public
     if flag == nil then flag = On("DungeonFriends") end
+    Features.DungeonSent = { v = flag, private = On("DungeonFriends"), at = os.clock() }
     if CFG.DungeonSummonFlag ~= nil then flag = CFG.DungeonSummonFlag end
     Net.Call("SummonDungeon", flag, sizeIndex, world)
     Features.LastSummon = { source = "direct (Yuto Hub args)", artifact = "-", at = os.clock() }
@@ -5237,11 +5238,9 @@ function Features.OpenDungeon()
         return
     end
     -- 1. direct summon (every 1.5 s, like Yuto Hub) for up to 6 tries
-    -- Friend Only: only once we know what the game sends for its "Friends Only" button
-    -- (click it by hand once); until then the window is used and the button pressed
     DungeonGui.directTries = DungeonGui.directTries or 0
-    local friendsUnknown = On("DungeonFriends") and (Learn.Load().DungeonFlags or {}).Friends == nil
-    if friendsUnknown then DungeonGui.directTries = 6 end
+    -- confirmed in game: SummonDungeon(true, ...) -> "... just summoned a private Dungeon!"
+    local friendsUnknown = false
     if DungeonGui.directTries < 6 then
         if not Util.Every("dungeon-direct", 1.5) then return end
         if DungeonGui.SummonDirect() then
@@ -6284,6 +6283,22 @@ Net.Listen("SendSubtleMessage", function(msg)
     if wasPrivate ~= sent.private then
         Util.Notify("Defense opened as " .. kind .. " - fixed for next time")
     end
+end)
+
+-- "<you> just summoned a private / public Dungeon!" -> check it's what Friend Only asked for
+Net.Listen("SendSubtleMessage", function(msg)
+    local sent = Features.DungeonSent
+    if type(msg) ~= "string" or not sent or os.clock() - sent.at > 10 then return end
+    if not string.find(msg, LP.Name, 1, true) and not string.find(msg, LP.DisplayName, 1, true) then return end
+    local kind = string.match(string.lower(msg), "summoned a (%a+) dungeon")
+    if kind ~= "private" and kind ~= "public" then return end
+    local wasPrivate = kind == "private"
+    local d = Learn.Load()
+    local friendsV = (sent.v == wasPrivate)
+    d.DungeonFlags = { Friends = friendsV, Public = not friendsV }
+    Features.DungeonSent = nil
+    pcall(function() if writefile then writefile(Learn.File, HttpService:JSONEncode(d)) end end)
+    if wasPrivate ~= sent.private then Util.Notify("Dungeon opened as " .. kind .. " - fixed for next time") end
 end)
 
 -- entering any dungeon (ours or a public one someone else opened): forget the last run
