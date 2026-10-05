@@ -723,6 +723,18 @@ function Data.FarmWorldLabels()
     return out
 end
 
+-- Defense Mode (world "Titan") is summoned with a Defense Token at a world's TitanSummon
+-- point; only some worlds have one (19 in the dump: Jojo, JJK, MadeInAbyss, Frieren, AOT ...)
+function Data.DefenseWorldLabels()
+    local out = {}
+    for _, label in ipairs(Data.FarmWorldLabels()) do
+        local w = Worlds:FindFirstChild(Data.FromLabel(label) or "")
+        if w and w:FindFirstChild("TitanSummon") then out[#out + 1] = label end
+    end
+    if #out == 0 then return Data.FarmWorldLabels() end   -- worlds not loaded yet: show all
+    return out
+end
+
 function Data.EventWorlds()
     local out = {}
     for _, f in ipairs(Worlds:GetChildren()) do
@@ -4652,6 +4664,53 @@ function Features.Raid()
     return joining
 end
 
+-- DEFENSE: the game's way - in the picked world, stand at its TitanSummon and press its prompt
+-- -> MainGui.TitanSummon ("Defense Mode": Public / Friends Only, costs Defense Tokens)
+-- -> MainGui.TitanTravel ("join this battle?" Yes) -> you're in world "Titan"
+Features.DefenseState = { at = 0 }
+function Features.Defense()
+    if Util.World() == "Titan" then
+        Combat.Step("Titan", function() return On("AutoDefense") end, nil, F("DefenseTarget") or "Nearest")
+        return true
+    end
+    -- popups of a summon that's already going
+    local travel = mainChild("TitanTravel")
+    if isShown(travel) then Extras.Press(travel:FindFirstChild("Yes", true)) task.wait(1) return true end
+    local win = mainChild("TitanSummon")
+    if isShown(win) then
+        Extras.Press(win:FindFirstChild(On("DefenseFriends") and "Friends" or "Public", true))
+        Features.DefenseState.at = os.clock()
+        task.wait(1)
+        return true
+    end
+    -- just summoned: give the travel popup a moment
+    if os.clock() - Features.DefenseState.at < 8 then return false end
+    local world = Data.FromLabel(F("DefenseWorld") or "")
+    if world == "" then
+        if Util.Every("defense-pick", 60) then Util.Notify("Defense: pick a world first") end
+        return false
+    end
+    if not Util.Every("defense-join", 10) then return false end
+    if Util.World() ~= world then Travel.To(world) task.wait(1) end
+    local w = Worlds:FindFirstChild(world)
+    local spot = w and w:FindFirstChild("TitanSummon")
+    local prompt = spot and spot:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if not prompt then
+        Util.Notify("Defense: no summon point in " .. Data.WorldDisplay(world))
+        return false
+    end
+    local part = spot:FindFirstChildWhichIsA("BasePart", true)
+    if part then
+        pcall(function() LP:RequestStreamAroundAsync(part.Position) end)
+        Util.MoveTo(part.CFrame * CFrame.new(0, 3, 6))
+        task.wait(0.4)
+    end
+    Prompt.Use(prompt)
+    -- the Defense Mode window opens -> pressed on the next tick
+    task.wait(1)
+    return true
+end
+
 local baseInf = Features.InfinityTower
 function Features.InfinityTower()
     baseInf()
@@ -5457,14 +5516,15 @@ do
     m:Toggle({ Title = "Auto Meteor / Fallen Star", Flag = "AutoMeteor" })
 
     local d = TRaid:Card("Auto Defense !", "Right")
-    local dw = d:Dropdown({ Title = "Select Defense World", Items = Data.FarmWorldLabels(), Flag = "DefenseWorld" })
+    local dw = d:Dropdown({ Title = "Select Defense World", Items = Data.DefenseWorldLabels(), Flag = "DefenseWorld" })
     d:Toggle({ Title = "Friend Only", Flag = "DefenseFriends" })
     d:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "DefenseTarget" })
     d:Toggle({ Title = "Auto Defense Selected", Flag = "AutoDefense" })
 
     Refreshers[#Refreshers + 1] = function()
         local labels = Data.FarmWorldLabels()
-        Data.RefreshWorldDrop(rw, labels) Data.RefreshWorldDrop(mw, labels) Data.RefreshWorldDrop(dw, labels)
+        Data.RefreshWorldDrop(rw, labels) Data.RefreshWorldDrop(mw, labels)
+        Data.RefreshWorldDrop(dw, Data.DefenseWorldLabels())
     end
 end
 
