@@ -3041,7 +3041,9 @@ function Features.DungeonRooms()
     local out, root = {}, Features.DungeonRoot()
     if not root then return out end
     for _, d in ipairs(root:GetDescendants()) do
-        if d:IsA("Model") then
+        if d:IsA("Model") and string.match(d.Name, "^%d+, %d+$") then
+            out[#out + 1] = d                                   -- Map.Model["x, y"] (new dungeons)
+        elseif d:IsA("Model") then
             for _, w in ipairs(ROOM_WORDS) do
                 if string.find(d.Name, w, 1, true) then out[#out + 1] = d break end
             end
@@ -3252,7 +3254,7 @@ function Features.OpenDungeon()
     dungeonStep = "joining"
 end
 
-local dungeonActivated = setmetatable({}, { __mode = "k" })
+Features.DungeonActivated = setmetatable({}, { __mode = "k" })
 function Features.DungeonActivate()
     local root = Features.DungeonRoot()
     local map = root and root:FindFirstChild("Map")
@@ -3262,7 +3264,7 @@ function Features.DungeonActivate()
     for _, cp in ipairs(map:GetDescendants()) do
         if cp.Name == "ConfirmPart" and cp:IsA("BasePart") then
             local pp = cp:FindFirstChildWhichIsA("ProximityPrompt")
-            local done = dungeonActivated[cp]
+            local done = Features.DungeonActivated[cp]
             if pp and pp.Enabled and string.find(string.lower(pp.ActionText), "activ", 1, true)
                and not (done and os.clock() - done < 30) then
                 local d = (cp.Position - me.Position).Magnitude
@@ -3275,11 +3277,17 @@ function Features.DungeonActivate()
     Util.MoveTo(best.cp.CFrame * CFrame.new(0, 4, 0))
     task.wait(1)
     if fireproximityprompt then pcall(fireproximityprompt, best.pp) else Prompt.Use(best.pp) end
-    dungeonActivated[best.cp] = os.clock()
+    Features.DungeonActivated[best.cp] = os.clock()
     task.wait(1)
     return true
 end
 
+-- Yuto Hub, a whole run watched (Easter2026, size 2, ~5.5 min):
+--   no enemies -> next room's altar "Activate" (Map.Model["x, y"].ConfirmPart), ~3 s per room
+--   room doors: prompt "Open" (Door1..4.Door.DungeonRoomDoorRemotePrompt) -> OpenDungeonDoor(<Door part>)
+--   the key room gives the boss key ("... has found the boss key!"), the boss door opens with it,
+--   "THE BOSS HAS BEEN DEFEATED" -> the last door -> RareChest / CommonChest (they're enemies) -> done
+Features.DungeonDoorTried = setmetatable({}, { __mode = "k" })
 function Features.FarmDungeon()
     dungeonStep = "inside"
     nextSummon = 0
@@ -3292,13 +3300,12 @@ function Features.FarmDungeon()
     local noChest = On("DungeonIgnoreChest") and function(e)
         return string.find(string.lower(e.Name .. " " .. Combat.Name(e)), "chest", 1, true) ~= nil
     end or nil
-    if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then return end
-    if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then return end
-    -- no enemies: open the next room (Yuto Hub, watched): stand on the room's altar
-    -- (Map.Model["x, y"].ConfirmPart) ~1 s, fire its "Activate" prompt; its enemies spawn
-    if Features.DungeonActivate() then return end
+    if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then return true end
+    if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then return true end
+    -- no enemies: open the next room (stand on its altar ~1 s, fire "Activate"; its enemies spawn)
+    if Features.DungeonActivate() then return true end
     local root = Features.DungeonRoot()
-    -- chests
+    -- chests with a prompt (older dungeons)
     if not On("DungeonIgnoreChest") then
         for _, p in ipairs(Prompt.Find(root, { "chest", "treasure" })) do
             Prompt.Use(p)
@@ -3306,15 +3313,20 @@ function Features.FarmDungeon()
             task.wait(0.3)
         end
     end
-    -- doors
-    local door = Prompt.Find(root, { "door", "next", "open", "portal", "gate" })[1]
-    if door then
-        Prompt.Use(door)
-        Net.Call("OpenDungeonDoor", door.Parent)
-        task.wait(0.5)
-        return
+    -- room doors ("Open"): each one tried at most every 20 s (a boss door waits for the key)
+    for _, door in ipairs(Prompt.Find(root, { "door", "next", "open", "portal", "gate" })) do
+        local t = Features.DungeonDoorTried[door]
+        if not (t and os.clock() - t < 20) then
+            Features.DungeonDoorTried[door] = os.clock()
+            Prompt.Use(door)
+            if door.Parent and door.Parent:IsA("BasePart") then Net.Call("OpenDungeonDoor", door.Parent) end
+            task.wait(1)
+            return true
+        end
     end
-    -- nothing loaded near us: visit the rooms one by one so their enemies load in
+    -- boss down and nothing left: this run is finished
+    if Features.DungeonBossAt then return false end
+    -- nothing loaded near us: visit the rooms one by one so their enemies load in (Yuto does this too)
     if On("DungeonLoadAll") then
         local rooms = Features.DungeonRooms()
         if #rooms > 0 then
@@ -3325,15 +3337,25 @@ function Features.FarmDungeon()
             task.wait(0.6)
         end
     end
+    return true
 end
 
+-- false = nothing to do here (lets the next feature in the Priority list run)
 function Features.Dungeon()
     if Features.InDungeon() then
-        if On("AutoFarmDungeon") then Features.FarmDungeon() end
-        return
+        if On("AutoFarmDungeon") and Features.FarmDungeon() ~= false then return true end
+        -- run finished: leave (Time Chamber), the next one is summoned from outside like Yuto
+        -- does it - summoning from inside would look "already in a dungeon" and repeat
+        if On("AutoOpenDungeon") then
+            if Util.Every("dungeon-leave", 8) then Travel.To("TimeChamber", true) end
+            return true
+        end
+        return false
     end
+    Features.DungeonBossAt = nil
     dungeonStep = "lobby"
-    if On("AutoOpenDungeon") then Features.OpenDungeon() end
+    if On("AutoOpenDungeon") then Features.OpenDungeon() return true end
+    return false
 end
 function Features.DungeonStep() return dungeonStep end
 
@@ -5321,7 +5343,7 @@ Features.Tasks = {
         if On("AutoInf") then Features.InfinityTower() return true end
     end },
     { id = "Dungeon", name = "Dungeon", run = function()
-        if On("AutoOpenDungeon") or (On("AutoFarmDungeon") and Features.InDungeon()) then Features.Dungeon() return true end
+        if On("AutoOpenDungeon") or (On("AutoFarmDungeon") and Features.InDungeon()) then return Features.Dungeon() end
     end },
     { id = "Gate", name = "Gate", run = function()
         if On("AutoGate") then Features.Gates() return true end
@@ -6021,6 +6043,14 @@ pcall(function()
     end))
 end)
 
+-- dungeon run state from the game's messages
+Net.Listen("SendSubtleMessage", function(msg)
+    if type(msg) == "string" and string.find(string.upper(msg), "BOSS HAS BEEN DEFEATED", 1, true)
+       and Features.InDungeon() then
+        Features.DungeonBossAt = os.clock()
+    end
+end)
+Net.Listen("JoinDungeon", function() Features.DungeonBossAt = nil end)
 Net.Listen("SetTowerFloor", function(floor)
     if type(floor) == "number" then
         Stats.TrialFloor = floor + 1
