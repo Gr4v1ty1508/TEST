@@ -1106,7 +1106,8 @@ function Combat.PullFarPets(e, pets, pos)
     end
     return n
 end
-function Combat.Attack(e, wanted)
+function Combat.Attack(e, wanted, opts)
+    local tag = opts and opts.tag
     local t0 = os.clock()
     local movedAt, sentAt, ultAt, pulledAt = nil, -99, 0, 0
     local arrived = true
@@ -1200,12 +1201,18 @@ function Combat.Attack(e, wanted)
                 if n > 0 then stats.pulls = stats.pulls + 1 end
             end
         end
+        -- a short visit (dungeon): leave once the pets are on it, at most 1.5 s
+        if tag and not moved then
+            local on = Combat.PetsOn(e, pets)
+            if on > stats.maxOn then stats.maxOn = on end
+            if (on > 0 and movedAt and os.clock() - movedAt > 0.4) or os.clock() - t0 > 1.5 then break end
+        end
         task.wait()
     end
     -- one line per enemy in combat_log.txt: where the time went
     pcall(function()
         Combat.Log("done", string.format("%s [%s] %s in %.1f s | first hit %s | pets on it max %d/%d | sends %d | pulls %d | tps %d | hp %.3g -> %.3g",
-            e.Name, Combat.Name(e), Combat.Alive(e) and "LEFT" or "killed", os.clock() - t0,
+            e.Name, Combat.Name(e), Combat.Alive(e) and (tag and "visited (pets on it)" or "LEFT") or "killed", os.clock() - t0,
             stats.firstHit and string.format("%.1f s", stats.firstHit) or "never", stats.maxOn, #pets,
             stats.sends, stats.pulls, stats.tps, hpStart, Combat.HP(e)))
     end)
@@ -3521,6 +3528,35 @@ function Features.LoadDungeonLayout()
     local model = root and root:FindFirstChild("Map") and root.Map:FindFirstChild("Model")
     if not model or #model:GetChildren() == 0 then return end
     Features.DungeonLayoutTried = true
+    local function matches(m)
+        local rooms, bad = 0, 0
+        for _, r in ipairs(model:GetChildren()) do
+            local x, y = string.match(r.Name, "^(%d+), (%d+)$")
+            if x then
+                rooms = rooms + 1
+                local col = m[tonumber(x)]
+                if not (type(col) == "table" and type(col[tonumber(y)]) == "table") then bad = bad + 1 end
+            end
+        end
+        return rooms > 0 and bad == 0
+    end
+    -- the game's own copy: its dungeon script keeps the JoinDungeon data { Seed, Config, Map, ... }
+    -- in memory for the whole run (no file needed, also when the script started inside the run)
+    if getgc then
+        local okg, found = pcall(function()
+            for _, t in ipairs(getgc(true)) do
+                if type(t) == "table" and type(rawget(t, "Map")) == "table" and rawget(t, "Seed") ~= nil
+                   and type(rawget(t, "Config")) == "table" and matches(t.Map) then
+                    return t.Map
+                end
+            end
+        end)
+        if okg and found then
+            Features.DungeonLayout = found
+            Combat.Log("dng", "dungeon map found in the game's memory")
+            return
+        end
+    end
     local ok, map = pcall(function()
         if not (isfile and readfile and isfile(Features.DungeonLayoutFile)) then return nil end
         return HttpService:JSONDecode(readfile(Features.DungeonLayoutFile))
@@ -3699,6 +3735,33 @@ function Features.DungeonOpenDoor(important)
     return true
 end
 
+-- one short visit to the nearest mob of a room nobody visited in the last 8 s (see FarmDungeon)
+Features.DungeonTags = {}                       -- { at = os.clock(), pos = Vector3 }
+function Features.DungeonTagStep(worldName, skip)
+    local now, me = os.clock(), Util.Root()
+    local recent = {}
+    for i = #Features.DungeonTags, 1, -1 do
+        local t = Features.DungeonTags[i]
+        if now - t.at > 8 then table.remove(Features.DungeonTags, i) else recent[#recent + 1] = t.pos end
+    end
+    local best, bestD
+    for _, e in ipairs(Combat.List(worldName)) do
+        local pos = not (skip and skip(e)) and Combat.Pos(e)
+        if pos then
+            local covered = false
+            for _, p in ipairs(recent) do if (p - pos).Magnitude < 130 then covered = true break end end
+            if not covered then
+                local d = me and (pos - me.Position).Magnitude or 0
+                if not bestD or d < bestD then best, bestD = e, d end
+            end
+        end
+    end
+    if not best then return false end
+    table.insert(Features.DungeonTags, { at = now, pos = Combat.Pos(best) })
+    Combat.Attack(best, function() return On("AutoFarmDungeon") end, { tag = true })
+    return true
+end
+
 function Features.FarmDungeon()
     if not Features.DungeonLayout then Features.LoadDungeonLayout() end
     dungeonStep = "inside"
@@ -3715,12 +3778,14 @@ function Features.FarmDungeon()
     -- mobs of a room we opened can be "invisible" (not loaded: the room is far, they spawned
     -- after we left for the next altar). They block the next rooms, but can't be attacked until
     -- loaded: go back to the rooms we opened (newest first) until they show up.
-    if Features.DungeonFindHidden(worldName, noChest) then return true end
     -- only fight mobs that are loaded (have a position) - the rest are handled above
     local chestSkip = noChest
     noChest = function(e) return Combat.Pos(e) == nil or (chestSkip ~= nil and chestSkip(e)) end
-    if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then Features.DungeonIdleSince = nil return true end
-    if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then Features.DungeonIdleSince = nil return true end
+    -- Yuto (whole run watched: 53 mob teleports for 41 rooms): it goes to ONE mob of a room for
+    -- ~0.7 s - the pets go on it and clear that room by themselves - and goes on opening the
+    -- next rooms meanwhile; it doesn't stand there until everything is dead. Same here: a room
+    -- whose mobs got a visit in the last 8 s is left to the pets.
+    if Features.DungeonTagStep(worldName, noChest) then Features.DungeonIdleSince = nil return true end
     -- no enemies: open the next room (stand on its altar ~1 s, fire "Activate"; its enemies spawn)
     -- keep opening the nearest room, one after another, until mobs show up - then stop and
     -- fight them first (the next tick comes back here once they're dead). Also after the boss is
@@ -3746,6 +3811,11 @@ function Features.FarmDungeon()
     end
     -- any other door (each again every 20 s)
     if Features.DungeonOpenDoor(false) then return true end
+    -- nothing left to open: mobs alive but none loaded -> back to the rooms we opened to load them
+    if Features.DungeonFindHidden(worldName, chestSkip) then return true end
+    -- stay on the mobs that are still alive until they're dead
+    if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then Features.DungeonIdleSince = nil return true end
+    if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then Features.DungeonIdleSince = nil return true end
     -- nothing to fight / press / open here: go and look at the rooms (far rooms aren't loaded,
     -- so their altar / door / mobs can't be seen from here). Big dungeons have 100+ rooms, so
     -- not all of them in a row: a room we've looked at that had nothing left (no altar or door
@@ -5101,7 +5171,7 @@ end
 
 -- attack wrapper: right team first, pets pulled in, and "fighting" flag for the team loop
 local baseAttack = Combat.Attack
-function Combat.Attack(e, wanted)
+function Combat.Attack(e, wanted, opts)
     Extras.Fighting = true
     if On("AutoTeams") then pcall(Extras.TeamFor, e) end
     if On("PullPets") then
@@ -5109,7 +5179,7 @@ function Combat.Attack(e, wanted)
         if Combat.CanTP() and root and pos then root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 4)) end
         pcall(Extras.PullPets)
     end
-    local ok, err = pcall(baseAttack, e, wanted)
+    local ok, err = pcall(baseAttack, e, wanted, opts)
     Extras.Fighting = false
     if not ok then warn("[" .. CFG.Name .. "] " .. tostring(err)) end
 end
