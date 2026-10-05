@@ -45,7 +45,10 @@ local SPAM = { ClickerDamage = true, SendPet = true, PetAttack = true, PetAbilit
     TrackDPS = true, EnemyDamagedEffect = true, UpdateLocalEnemyHealth = true, GetLocalEnemyHealth = true,
     HandlePlayerHealth = true, CreatePickups = true, DestroyPickup = true, RegisterPickup = true, Pickup = true,
     UpdateBpGui = true, TowerTimer = true, InfinityTowerTimer = true, GatesModeTimer = true, GlobalBossTimer = true,
-    UpdateDungeonTimer = true, CreateGems = true, CreateItems = true, DropPXP = true, Yen = true }
+    UpdateDungeonTimer = true, CreateGems = true, CreateItems = true, DropPXP = true, Yen = true,
+    -- the game sends these many times a second: they filled the log before a dungeon ended
+    ManageTrack = true, CreateTrack = true, WithdrawPets = true, GetBoosts = true,
+    GameAnalyticsError = true, ReportClientError = true }
 
 local running = true
 local conns = {}
@@ -487,8 +490,16 @@ local function flushRepeat()
     if lastCount > 1 then calls[#calls] = calls[#calls] .. "   (x" .. lastCount .. ")" end
     lastLine, lastCount = nil, 0
 end
+local partNo = 0
 local function rec(line)
-    if #calls >= 8000 then return end
+    -- long runs (a whole dungeon): every 15000 lines go to their own part file, nothing is lost
+    if #calls >= 15000 then
+        flushRepeat()
+        partNo = partNo + 1
+        local t0 = calls.t0
+        pcall(save, (watchAll and "watch_" or "calls_") .. os.date("%H%M%S") .. "_part" .. partNo .. ".txt", calls)
+        calls = { t0 = t0 }
+    end
     -- the same call again and again (attacks...) is written once with a count
     if line == lastLine then lastCount = lastCount + 1 return end
     flushRepeat()
@@ -528,7 +539,9 @@ if hookmetamethod and getnamecallmethod then
             local isRemote = (method == "FireServer" or method == "InvokeServer")
             local parent = self.Parent
             local isBindable = watchAll and (method == "Fire" or method == "Invoke") and parent and parent.Name == "Bindable"
-            if (isRemote or isBindable) and (watchAll or not SPAM[self.Name]) then
+            -- the game's own spam is skipped even while watching; other scripts' calls never are
+            local fromScript = checkcaller and checkcaller()
+            if (isRemote or isBindable) and (not SPAM[self.Name] or (watchAll and fromScript)) then
                 local args, obj, tag = table.pack(...), self, who()
                 local function head()
                     return tag .. "OUT " .. obj.Name .. ":" .. method .. "(" .. argsText(args, args.n) .. ")"
@@ -649,6 +662,7 @@ end
 
 local function startRecord(all)
     calls = { t0 = os.clock() }
+    partNo = 0
     lastIncoming = {}
     lastLine, lastCount = nil, 0
     watchAll = all and true or false
