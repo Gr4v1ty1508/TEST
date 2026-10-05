@@ -775,12 +775,27 @@ function Data.Stars()
             else isStar = string.sub(n, -3) == "Egg" or string.sub(n, -4) == "Star" end
             if isStar and obj:IsA("Model") and not seen[world.Name .. n] then
                 seen[world.Name .. n] = true
-                out[#out + 1] = n .. " | " .. world.Name
+                out[#out + 1] = { label = n .. " | " .. world.Name, world = world.Name, star = n,
+                    cost = type(info) == "table" and tonumber(info.Cost or info.Price) or nil }
             end
         end
     end
-    table.sort(out)
-    return out
+    -- in world order, like the world lists (pinned events, other events, then world 1, 2, 3 ...);
+    -- inside a world the cheapest star first
+    local worlds, rank = {}, {}
+    for _, e in ipairs(out) do
+        if not rank[e.world] then rank[e.world] = 0 worlds[#worlds + 1] = e.world end
+    end
+    pcall(Data.SortForDisplay, worlds)
+    for i, w in ipairs(worlds) do rank[w] = i end
+    table.sort(out, function(a, b)
+        if rank[a.world] ~= rank[b.world] then return rank[a.world] < rank[b.world] end
+        if a.cost and b.cost and a.cost ~= b.cost then return a.cost < b.cost end
+        return a.star < b.star
+    end)
+    local labels = {}
+    for i, e in ipairs(out) do labels[i] = e.label end
+    return labels
 end
 
 function Data.Passives()
