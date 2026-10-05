@@ -3496,7 +3496,60 @@ function Features.DoorTarget(doorPart)
 end
 -- what Auto Farm Dungeon heads for: chest rooms not opened yet, then the boss room (until the boss
 -- is dead), then the last treasure room behind the boss; nil = nothing special (nearest first)
+-- the layout only comes once, when you enter (JoinDungeon). Saved to a file so a script started
+-- again inside the same run (re-execute) still has it: read back when it matches the rooms there.
+Features.DungeonLayoutFile = CFG.ConfigFolder .. "/dungeon_layout.json"
+function Features.SaveDungeonLayout(map)
+    pcall(function()
+        if not writefile then return end
+        local plain = {}
+        for x, col in pairs(map) do
+            if type(col) == "table" then
+                local pc = {}
+                for y, c in pairs(col) do
+                    if type(c) == "table" then pc[tostring(y)] = { c[1] == true, c[2] == true, c[3] == true, c[4] == true, tonumber(c[5]) } end
+                end
+                plain[tostring(x)] = pc
+            end
+        end
+        writefile(Features.DungeonLayoutFile, HttpService:JSONEncode(plain))
+    end)
+end
+function Features.LoadDungeonLayout()
+    if Features.DungeonLayout or Features.DungeonLayoutTried then return end
+    local root = Features.DungeonRoot()
+    local model = root and root:FindFirstChild("Map") and root.Map:FindFirstChild("Model")
+    if not model or #model:GetChildren() == 0 then return end
+    Features.DungeonLayoutTried = true
+    local ok, map = pcall(function()
+        if not (isfile and readfile and isfile(Features.DungeonLayoutFile)) then return nil end
+        return HttpService:JSONDecode(readfile(Features.DungeonLayoutFile))
+    end)
+    if not ok or type(map) ~= "table" then return end
+    -- every room of this dungeon must be a room in the saved map (else it's an older run)
+    local rooms, bad = 0, 0
+    for _, r in ipairs(model:GetChildren()) do
+        local x, y = string.match(r.Name, "^(%d+), (%d+)$")
+        if x then
+            rooms = rooms + 1
+            local col = map[x]
+            if not (type(col) == "table" and type(col[y]) == "table") then bad = bad + 1 end
+        end
+    end
+    if rooms > 0 and bad == 0 then
+        local fixed = {}
+        for x, col in pairs(map) do
+            fixed[tonumber(x)] = {}
+            for y, c in pairs(col) do fixed[tonumber(x)][tonumber(y)] = c end
+        end
+        Features.DungeonLayout = fixed
+        Combat.Log("dng", "dungeon map read back from the file (script started inside the run)")
+    else
+        Combat.Log("dng", "no dungeon map for this run (script started inside it): chest / boss rooms first can't be used")
+    end
+end
 function Features.DungeonGoals()
+    if not Features.DungeonLayout then Features.LoadDungeonLayout() end
     local m = Features.DungeonLayout
     if type(m) ~= "table" then return nil end
     local byType = { [2] = {}, [3] = {}, [4] = {} }
@@ -3647,6 +3700,7 @@ function Features.DungeonOpenDoor(important)
 end
 
 function Features.FarmDungeon()
+    if not Features.DungeonLayout then Features.LoadDungeonLayout() end
     dungeonStep = "inside"
     nextSummon = 0
     local wanted = function() return On("AutoFarmDungeon") end
@@ -7332,7 +7386,9 @@ Net.Listen("JoinDungeon", function(data)
     Features.DungeonBossAt = nil Features.DungeonIdleSince = nil Features.DungeonMap = nil
     Features.DungeonHasKey = false
     Features.DungeonOpened = {}
+    Features.DungeonLayoutTried = nil
     Features.DungeonLayout = type(data) == "table" and type(data.Map) == "table" and data.Map or nil
+    if Features.DungeonLayout then Features.SaveDungeonLayout(Features.DungeonLayout) end
     if Features.DungeonLayout then
         local n = { 0, 0, 0, 0, 0 }
         for _, col in pairs(Features.DungeonLayout) do
