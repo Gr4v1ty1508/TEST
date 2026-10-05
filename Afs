@@ -1078,9 +1078,10 @@ function Combat.Attack(e, wanted)
         -- Yuto Hub in a dungeon fight (watched, 30 s): it doesn't send pets at enemies at all -
         -- it stands there and fires PetAttack + PetAbility for every pet ~2-3x a second.
         -- Done here too while fighting (the "Attack While Ult" loop already does it when on).
-        if not On("AttackUlt") and os.clock() - ultAt > 0.31 then
+        -- (Combat is defined before On / Features: the hook is set once they exist)
+        if Combat.FightTick and os.clock() - ultAt > 0.31 then
             ultAt = os.clock()
-            task.spawn(pcall, Features.Ult)
+            Combat.FightTick()
         end
         -- pets left behind: pulled once, right after we arrived at the enemy
         if movedAt and os.clock() - movedAt > 0.05 then
@@ -2126,6 +2127,10 @@ function Features.Ult()
         Net.Raw("PetAttack", { pet })
         Net.Raw("PetAbility", { pet })
     end
+end
+-- fired by Combat.Attack ~3x a second while fighting (unless "Attack While Ult" already does it)
+Combat.FightTick = function()
+    if not On("AttackUlt") then task.spawn(pcall, Features.Ult) end
 end
 
 -- MOUNT -------------------------------------------------------------------------------
@@ -3464,7 +3469,7 @@ function Features.FarmDungeon()
         local cf = rooms[roomIndex]:GetPivot()
         pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
         Util.MoveTo(cf + Vector3.new(0, 5, 0))
-        task.wait(0.6)
+        task.wait(1)                                            -- Yuto: one room a second
     end
     return true
 end
