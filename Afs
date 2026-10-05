@@ -3505,6 +3505,8 @@ end
 --   the key room gives the boss key ("... has found the boss key!"), the boss door opens with it,
 --   "THE BOSS HAS BEEN DEFEATED" -> the last door -> RareChest / CommonChest (they're enemies) -> done
 Features.DungeonDoorTried = setmetatable({}, { __mode = "k" })
+Features.DungeonRoomDone = setmetatable({}, { __mode = "k" })   -- room model -> nothing left in it
+Features.DungeonRoomSeen = setmetatable({}, { __mode = "k" })   -- room model -> last looked at (os.clock)
 function Features.FarmDungeon()
     dungeonStep = "inside"
     nextSummon = 0
@@ -3580,19 +3582,59 @@ function Features.FarmDungeon()
             return true
         end
     end
-    -- nothing to fight / press / open: walk the rooms one by one (like Yuto, also after the boss)
-    -- so far mobs load in and rooms not cleared yet are found - until the game ends the run
+    -- nothing to fight / press / open here: go and look at the rooms (far rooms aren't loaded,
+    -- so their altar / door / mobs can't be seen from here). Big dungeons have 100+ rooms, so
+    -- not all of them in a row: a room we've looked at that had nothing left (no altar or door
+    -- to press, no living mob in it) is "done" and skipped; the nearest room not done (and not
+    -- looked at in the last 60 s) is next. All done -> start over, one room a second like Yuto.
     local rooms = {}
     for _, r in ipairs(Features.DungeonRooms()) do
         if Features.RoomRevealed(Features.DungeonRoomOf(r) or r) then rooms[#rooms + 1] = r end
     end
     if #rooms > 0 then
-        roomIndex = roomIndex % #rooms + 1
-        Combat.Log("dng", "nothing to fight / open here: walking the rooms (" .. #rooms .. " shown on the minimap)")
-        local cf = rooms[roomIndex]:GetPivot()
+        local done, seen = Features.DungeonRoomDone, Features.DungeonRoomSeen
+        local me = Util.Root()
+        local pick, pickD
+        for _, r in ipairs(rooms) do
+            if not done[r] and os.clock() - (seen[r] or -99) > 60 then
+                local ok, cf = pcall(r.GetPivot, r)
+                local d = (ok and me) and (cf.Position - me.Position).Magnitude or 0
+                if not pickD or d < pickD then pick, pickD = r, d end
+            end
+        end
+        local left = 0
+        for _, r in ipairs(rooms) do if not done[r] then left = left + 1 end end
+        if not pick then
+            -- every room looked at: go round all of them again
+            roomIndex = roomIndex % #rooms + 1
+            pick = rooms[roomIndex]
+            if roomIndex == #rooms then table.clear(done) end
+        end
+        Combat.Log("dng", "nothing to do here: checking rooms (" .. left .. " of " .. #rooms .. " not cleared yet)")
+        local cf = pick:GetPivot()
         pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
         Util.MoveTo(cf + Vector3.new(0, 5, 0))
         task.wait(1)                                            -- Yuto: one room a second
+        seen[pick] = os.clock()
+        -- loaded now: anything left in it?
+        local busy = false
+        for _, p in ipairs(pick:GetDescendants()) do
+            if p:IsA("ProximityPrompt") and p.Enabled then
+                local t = string.lower(p.ActionText)
+                if string.find(t, "activ", 1, true) or string.find(t, "open", 1, true) then busy = true break end
+            end
+        end
+        if not busy then
+            local world = Worlds:FindFirstChild(worldName)
+            for _, f in ipairs(world and Combat.EnemyFolders(world) or {}) do
+                for _, e in ipairs(f:GetChildren()) do
+                    local pos = Combat.Alive(e) and Combat.Pos(e)
+                    if pos and math.abs(pos.X - cf.Position.X) < 110 and math.abs(pos.Z - cf.Position.Z) < 110 then busy = true break end
+                end
+                if busy then break end
+            end
+        end
+        if not busy then done[pick] = true end
     end
     return true
 end
@@ -7219,6 +7261,8 @@ task.spawn(pcall, function()
                 Features.DungeonHiddenSince, Features.DungeonHiddenPause = nil, nil
                 table.clear(Features.DungeonActivated)
                 table.clear(Features.DungeonDoorTried)
+                table.clear(Features.DungeonRoomDone)
+                table.clear(Features.DungeonRoomSeen)
             end
         end)
     end
