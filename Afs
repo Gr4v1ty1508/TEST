@@ -397,6 +397,14 @@ function Learn.Record(name, args)
         while #entry.hist > 8 do table.remove(entry.hist) end
     end
     Learn.data[name] = entry
+    -- the dungeon window's "Friends Only" / "Public" button was clicked just before: remember
+    -- what the game sent for it (first value), so later summons send exactly the same
+    local tag = Learn.DungeonBtn
+    if name == "SummonDungeon" and tag and os.clock() - tag.at < 5 and type(args[1]) == "boolean" then
+        Learn.data.DungeonFlags = type(Learn.data.DungeonFlags) == "table" and Learn.data.DungeonFlags or {}
+        Learn.data.DungeonFlags[tag.name] = args[1]
+        Learn.DungeonBtn = nil
+    end
     pcall(function()
         if not writefile then return end
         local cur = ""
@@ -5169,8 +5177,11 @@ function DungeonGui.SummonDirect()
     local prevArt
     pcall(function() prevArt = Data.StoreData().CurrentArtefact end)
     if On("DungeonArtifact") then Features.EquipOpenArtifact() end
-    -- first value: Yuto Hub sends true; "Friend Only" off sends true too, on sends false
-    local flag = not On("DungeonFriends")
+    -- first value: what the game sent when its "Public" / "Friends Only" button was clicked
+    -- (learned); Public not learned yet -> true, like Yuto Hub
+    local known = Learn.Load().DungeonFlags or {}
+    local flag = On("DungeonFriends") and known.Friends or known.Public
+    if flag == nil then flag = true end
     if CFG.DungeonSummonFlag ~= nil then flag = CFG.DungeonSummonFlag end
     Net.Call("SummonDungeon", flag, sizeIndex, world)
     Features.LastSummon = { source = "direct (Yuto Hub args)", artifact = "-", at = os.clock() }
@@ -5206,7 +5217,11 @@ function Features.OpenDungeon()
         return
     end
     -- 1. direct summon (every 1.5 s, like Yuto Hub) for up to 6 tries
+    -- Friend Only: only once we know what the game sends for its "Friends Only" button
+    -- (click it by hand once); until then the window is used and the button pressed
     DungeonGui.directTries = DungeonGui.directTries or 0
+    local friendsUnknown = On("DungeonFriends") and (Learn.Load().DungeonFlags or {}).Friends == nil
+    if friendsUnknown then DungeonGui.directTries = 6 end
     if DungeonGui.directTries < 6 then
         if not Util.Every("dungeon-direct", 1.5) then return end
         if DungeonGui.SummonDirect() then
@@ -5223,8 +5238,10 @@ function Features.OpenDungeon()
     end
     DungeonGui.directTries = 0
     -- 2. the game's window through the door
-    if DungeonGui.failed and DungeonGui.failed >= 3 then DungeonGui.failed = 0 return baseOpenDungeon() end
+    if DungeonGui.failed and DungeonGui.failed >= 3 and not friendsUnknown then DungeonGui.failed = 0 return baseOpenDungeon() end
 
+    local prevArt
+    pcall(function() prevArt = Data.StoreData().CurrentArtefact end)
     if On("DungeonArtifact") then Features.EquipOpenArtifact() end
     if not DungeonGui.GoToDoor() then DungeonGui.failed = (DungeonGui.failed or 0) + 1 return end
     local prompt = DungeonGui.Prompt()
@@ -5246,9 +5263,30 @@ function Features.OpenDungeon()
     Features.LastSummon = { source = "game window", artifact = "-", at = os.clock() }
     DungeonGui.waitUntil = os.clock() + 30
     task.wait(1)
+    if On("DungeonArtifact") and type(prevArt) == "string" and prevArt ~= "" and prevArt ~= "Dungeon" then
+        Net.Call("EquipArtifact", prevArt, "CurrentArtefact")      -- your own artefact back on
+    end
     local dt = mainChild("DungeonTravel")
     if DungeonGui.WaitShown(dt, 4) then Extras.Press(dt:FindFirstChild("Yes", true)) end
 end
+
+-- which of the window's buttons was clicked (see Learn.Record: DungeonFlags)
+task.spawn(function()
+    local hooked = setmetatable({}, { __mode = "k" })
+    while not Features.Unloaded do
+        pcall(function()
+            local win = DungeonGui.Window()
+            for _, n in ipairs({ "Friends", "Public" }) do
+                local b = win and win:FindFirstChild(n, true)
+                if b and b:IsA("GuiButton") and not hooked[b] then
+                    hooked[b] = true
+                    b.Activated:Connect(function() Learn.DungeonBtn = { name = n, at = os.clock() } end)
+                end
+            end
+        end)
+        task.wait(5)
+    end
+end)
 
 -- WORLD GATE --------------------------------------------------------------------------------------
 -- buy the gate of a world the same way walking into it does (Bindable.AttemptOpenGate)
@@ -6514,6 +6552,7 @@ function Features.StopAll()
     end)
     pcall(function() Features.HideOthers(false) end)
     Combat.InFarm = false
+    Features.Unloaded = true
     running = false
     pcall(function() Window:Destroy() end)
     Util.Notify("Gravity Hub unloaded - everything stopped")
