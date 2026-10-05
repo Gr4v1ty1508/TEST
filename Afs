@@ -3318,14 +3318,11 @@ function Features.FarmDungeon()
     end or nil
     if mode ~= "Nearest" and Combat.Step(worldName, wanted, nil, mode, 300, noChest) then Features.DungeonIdleSince = nil return true end
     if Combat.Step(worldName, wanted, nil, "Nearest", nil, noChest) then Features.DungeonIdleSince = nil return true end
-    -- the boss can die before every room is open (its key can drop early; the number of rooms
-    -- changes every run, there's one boss room). Boss dead = the run is done: only the doors
-    -- (the treasure room behind the boss) and the chests are still taken.
-    local bossDone = Features.DungeonBossAt ~= nil
     -- no enemies: open the next room (stand on its altar ~1 s, fire "Activate"; its enemies spawn)
     -- keep opening the nearest room, one after another, until mobs show up - then stop and
-    -- fight them first (the next tick comes back here once they're dead)
-    if not bossDone then
+    -- fight them first (the next tick comes back here once they're dead). Also after the boss is
+    -- dead (its key can drop early): like Yuto, the rest of the rooms are still cleared.
+    do
         local opened = 0
         while On("AutoFarmDungeon") and Features.DungeonActivate() do
             opened = opened + 1
@@ -3354,24 +3351,15 @@ function Features.FarmDungeon()
             return true
         end
     end
-    -- boss down and nothing left (a few seconds for the treasure chests to show up): run finished
-    if Features.DungeonBossAt and os.clock() - Features.DungeonBossAt > 8 then return false end
-    if Features.DungeonBossAt then task.wait(0.5) return true end
-    -- nothing loaded near us: visit the rooms one by one so their enemies load in (Yuto does this
-    -- too). Safety net if the boss message was missed: a whole lap over every room and 60 s with
-    -- nothing to fight / press / open -> the run is finished (instead of walking until time is up)
-    if not Features.DungeonIdleSince then Features.DungeonIdleSince, Features.DungeonIdleLap = os.clock(), 0 end
+    -- nothing to fight / press / open: walk the rooms one by one (like Yuto, also after the boss)
+    -- so far mobs load in and rooms not cleared yet are found - until the game ends the run
     local rooms = Features.DungeonRooms()
     if #rooms > 0 then
         roomIndex = roomIndex % #rooms + 1
-        Features.DungeonIdleLap = Features.DungeonIdleLap + 1
         local cf = rooms[roomIndex]:GetPivot()
         pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
         Util.MoveTo(cf + Vector3.new(0, 5, 0))
         task.wait(0.6)
-    end
-    if os.clock() - Features.DungeonIdleSince > 60 and Features.DungeonIdleLap >= math.max(#rooms, 1) then
-        return false
     end
     return true
 end
