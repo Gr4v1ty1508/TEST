@@ -3405,9 +3405,6 @@ function Features.Dungeon()
         local cd = Features.DungeonCooldown()
         if cd > 0 then
             dungeonStep = "cooldown"
-            if Util.Every("dungeon-cd-note", 120) then
-                Util.Notify(string.format("Dungeon: next one in %d:%02d", cd // 60, cd % 60))
-            end
             return false
         end
         Features.OpenDungeon()
@@ -5644,6 +5641,7 @@ do
     d:Toggle({ Title = "Use Dungeon Artifact To Open", Flag = "DungeonArtifact" })
     d:Toggle({ Title = "Friend Only", Flag = "DungeonFriends" })
     d:Toggle({ Title = "Auto Open Dungeon", Flag = "AutoOpenDungeon" })
+    Features.DungeonTimer = d:Paragraph({ Body = "Next Dungeon : -" })
     d:Toggle({ Title = "Auto Farm Dungeon", Flag = "AutoFarmDungeon" })
     Refreshers[#Refreshers + 1] = function() Data.RefreshWorldDrop(dw, Data.FarmWorldLabels()) end
 
@@ -6259,6 +6257,14 @@ end)
 -- Lunar vs Solar card: live countdown to the next quests
 task.spawn(function()
     while running do
+        -- Dungeon card: when the next one can be opened (cooldown with the Dungeon artefact)
+        if Features.DungeonTimer and Features.DungeonCooldown then
+            local cd = Features.DungeonCooldown()
+            pcall(function()
+                Features.DungeonTimer:Set(cd > 0 and string.format("Next Dungeon In : <font color='#f87171'>%d:%02d:%02d</font>", cd // 3600, (cd % 3600) // 60, cd % 60)
+                    or "Next Dungeon In : <font color='#4ade80'>ready</font>")
+            end)
+        end
         if Features.EQTimer and Features.EventQuestCooldown then
             local cd = Features.EventQuestCooldown()
             pcall(function()
