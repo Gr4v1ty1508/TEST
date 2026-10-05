@@ -1457,6 +1457,46 @@ function Elements:Input(opt)
     return register(opt.Flag, obj)
 end
 
+-- Keybind: press the button, then press any key. The value is the KeyCode name ("RightControl").
+-- Esc cancels, Backspace puts the default back.
+Library.Listening = false
+function Elements:Keybind(opt)
+    local r = row(self, 36)
+    text({ Text = opt.Title, TextColor3 = Theme.Sub, Size = UDim2.new(0.45, 0, 1, 0), Parent = r })
+    local btn = make("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0),
+        Size = UDim2.new(0.55, -8, 0, 28), BackgroundColor3 = Theme.Window, Text = "", AutoButtonColor = false,
+        Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = Theme.Text, Parent = r }, { corner(6), stroke() })
+    local obj = { Type = "Keybind" }
+    local value = opt.Default or "RightControl"
+    local function show() btn.Text = value btn.TextColor3 = Theme.Text end
+    function obj:Set(v, silent)
+        local ok, key = pcall(function() return Enum.KeyCode[tostring(v)] end)
+        if not (ok and key) then return end
+        value = key.Name
+        show()
+        if not silent and opt.Callback then pcall(opt.Callback, key) end
+    end
+    function obj:Get() return value end
+    btn.MouseButton1Click:Connect(function()
+        if Library.Listening then return end
+        Library.Listening = true
+        btn.Text = "Press a key..."
+        btn.TextColor3 = Theme.Sub
+        local conn
+        conn = UIS.InputBegan:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+            conn:Disconnect()
+            local k = input.KeyCode
+            if k == Enum.KeyCode.Escape then show()
+            elseif k == Enum.KeyCode.Backspace then obj:Set(opt.Default or "RightControl")
+            else obj:Set(k.Name) end
+            task.defer(function() Library.Listening = false end)
+        end)
+    end)
+    obj:Set(value, true)
+    return register(opt.Flag, obj)
+end
+
 -- Dropdown: searchable, single or multi. Items are strings.
 function Elements:Dropdown(opt)
     self._order = self._order + 1
@@ -1715,7 +1755,7 @@ function Library:Window(opt)
     end)
     W.ToggleKey = opt.ToggleKey or Enum.KeyCode.RightControl
     track(UIS.InputBegan:Connect(function(input, gp)
-        if not gp and input.KeyCode == W.ToggleKey then W:Toggle() end
+        if not gp and not Library.Listening and input.KeyCode == W.ToggleKey then W:Toggle() end
     end))
 
     -- floating icon -------------------------------------------------------------
@@ -5796,9 +5836,9 @@ end
 -- UI SETTINGS --------------------------------------------------------------------------------------
 do
     local u = TUI:Card("Interface", "Left")
-    u:Input({ Title = "Toggle Key", Default = CFG.ToggleKey.Name, Flag = "ToggleKeyName", Callback = function(v)
-        local ok, key = pcall(function() return Enum.KeyCode[v] end)
-        if ok and key then Window.ToggleKey = key end
+    -- click, then press the key that opens / closes the hub (default Right Ctrl)
+    u:Keybind({ Title = "Toggle Key", Default = "RightControl", Flag = "ToggleKeyBind", Callback = function(key)
+        Window.ToggleKey = key
     end })
     u:Slider({ Title = "UI Scale [%]", Min = 60, Max = 120, Default = 100, Flag = "UIScale", Callback = function(v) Window:SetScale(v / 100) end })
     u:Toggle({ Title = "Show Floating Icon", Default = true, Flag = "ShowIcon", Callback = function(v) Window.Icon.Visible = v end })
