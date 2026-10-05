@@ -90,7 +90,8 @@ local CFG = {
     DungeonSizeArg = { Small = "Small", Medium = "Medium", Large = "Large", Insane = "Insane", Hellish = "Hellish" },
     -- force which SummonDungeon argument is the "use artifact" switch (nil = find it by itself)
     DungeonArtifactSlot = nil,
-    GateRanks    = { "E", "D", "C", "B", "A", "S", "X", "Z", "Anniversary" },
+    -- easiest -> hardest, like the game's list (Z comes before X)
+    GateRanks    = { "E", "D", "C", "B", "A", "S", "Z", "X", "Anniversary" },
     PassiveMachines = { "Normal", "Requiem", "Summer", "Christmas", "Valentine", "Patrick", "Easter" },
     RerollMethods   = { "Token", "Shard" },
     PetRarities     = { "Common", "Rare", "Epic", "Legendary", "Mythical", "Secret", "Divine" },
@@ -5788,8 +5789,21 @@ local function joinGate()
     Net.Raw("JoinGatesMode", { Gate.id, n = 1 })
     Net.Raw("AttemptTravel", { "GatesMode", true, Gate.id, n = 3 })
 end
--- one step; true = busy with a gate, false = couldn't summon one
-function Features.GateRun(rank, amount, wanted)
+-- ranks to try, hardest first (bottom of the game's list): the picked ones, or every rank when
+-- none is picked. A rank that made no gate (none left) is passed over for 10 min.
+Gate.empty = {}
+function Features.GateRankOrder()
+    local picked = F("GateRanks") or {}
+    local anyPicked = next(picked) ~= nil
+    local out = {}
+    for i = #CFG.GateRanks, 1, -1 do
+        local r = CFG.GateRanks[i]
+        if (not anyPicked or picked[r]) and not (Gate.empty[r] and os.clock() < Gate.empty[r]) then out[#out + 1] = r end
+    end
+    return out
+end
+-- one step; true = busy with a gate, false = no gate could be summoned
+function Features.GateRun(amount, wanted)
     if Util.World() == "GatesMode" then
         if not Gate.started and Util.Every("gate-skip", 0.5) then Net.Raw("SkipGateWait", {}) end
         -- only our own gate (other players' gates are in GatesMode too)
@@ -5805,26 +5819,32 @@ function Features.GateRun(rank, amount, wanted)
         if Util.Every("gate-join", 3) then joinGate() end
         return true
     end
-    if not Util.Every("gate-summon", 2) then return true end
-    if Util.World() ~= "TimeChamber" then Travel.To("TimeChamber", true) end
-    Gate.id = nil
-    Net.Raw("SummonGate", { rank, amount or 1, n = 2 })
-    local t0 = os.clock()
-    while not Gate.id and os.clock() - t0 < 3 do task.wait(0.1) end
-    if not Gate.id then
-        if Util.Every("gate-none-" .. tostring(rank), 60) then Util.Notify("Gate " .. tostring(rank) .. ": nothing was created (no gate of that rank?)") end
+    local ranks = Features.GateRankOrder()
+    if #ranks == 0 then
+        if Util.Every("gate-allempty", 120) then Util.Notify("Gate: no gates left to open (checking again in a few minutes)") end
         return false
     end
-    task.wait(0.3)
-    joinGate()
-    return true
+    if not Util.Every("gate-summon", 2) then return true end
+    if Util.World() ~= "TimeChamber" then Travel.To("TimeChamber", true) end
+    -- hardest rank that still makes a gate
+    for _, rank in ipairs(ranks) do
+        Gate.id = nil
+        Net.Raw("SummonGate", { rank, amount or 1, n = 2 })
+        local t0 = os.clock()
+        while not Gate.id and os.clock() - t0 < 3 do task.wait(0.1) end
+        if Gate.id then
+            Gate.rank = rank
+            task.wait(0.3)
+            joinGate()
+            return true
+        end
+        Gate.empty[rank] = os.clock() + 600
+    end
+    return false
 end
--- Auto Gate on the same flow (ranks picked in Dungeon / Gate / Time take turns)
+-- Auto Gate on the same flow
 function Features.Gates()
-    local ranks = Util.SetToList(F("GateRanks"))
-    if Util.World() ~= "GatesMode" and not Gate.id and #ranks == 0 then return false end
-    local rank = ranks[(Gate.count % math.max(#ranks, 1)) + 1] or "A"
-    return Features.GateRun(rank, F("GateAmount") or 1, function() return On("AutoGate") end)
+    return Features.GateRun(F("GateAmount") or 1, function() return On("AutoGate") end)
 end
 
 -- each kind: true = it has the character now, false = nothing it can do right now (next quest)
@@ -5833,11 +5853,10 @@ BP.Run = {
         force("AutoOpenDungeon", "AutoFarmDungeon")
         return Features.Dungeon() == true
     end,
-    -- a "Portal" is a Gate: rank = the first one picked in Auto Gate, else "A" (what Yuto uses)
+    -- a "Portal" is a Gate: the hardest rank you still have (only the picked ones if any are picked)
     ["Complete Portal"] = function()
         force()
-        local rank = Util.SetToList(F("GateRanks"))[1] or "A"
-        return Features.GateRun(rank, 1, function() return On("AutoBattlePass") end)
+        return Features.GateRun(1, function() return On("AutoBattlePass") end)
     end,
     ["Open Star"] = function() force() return BP.Hatch() end,
     ["Open Divine"] = function() force() return BP.Hatch() end,
@@ -6125,7 +6144,8 @@ Features.Tasks = {
         if On("AutoOpenDungeon") or (On("AutoFarmDungeon") and Features.InDungeon()) then return Features.Dungeon() end
     end },
     { id = "Gate", name = "Gate", run = function()
-        if On("AutoGate") then Features.Gates() return true end
+        -- false = no gates left: the next feature in the Priority list runs
+        if On("AutoGate") then return Features.Gates() end
     end },
     { id = "Trial", name = "Time Trial", run = function() return On("AutoTrial") and Features.TimeTrial() end },
     { id = "Raid", name = "Raid", run = function() return On("AutoRaid") and Features.Raid() end },
@@ -6244,7 +6264,7 @@ do
     local c = TMain:Card("Auto Battle Pass", "Left")
     c:Paragraph({ Body = "Does the battle pass quests you pick until their repeats (5 a day) are used, then goes back to the rest. "
         .. "New quests come with the daily reset and start by themselves.\n"
-        .. "Dungeon uses Auto Dungeon's settings. Portal = a Gate run (the first level picked in Auto Gate, else A). Its place in the order: Priority / Team." })
+        .. "Dungeon uses Auto Dungeon's settings. Portal = a Gate run, hardest gate you have first (Auto Gate's levels if picked). Its place in the order: Priority / Team." })
     local all = {}
     for _, k in ipairs(BP.KindNames()) do all[k] = true end
     c:Dropdown({ Title = "Select Quests", Items = BP.KindNames(), Multi = true, Default = all, Flag = "BPQuests" })
@@ -6369,6 +6389,7 @@ do
 
     local g = TDungeon:Card("Auto Gate !", "Right")
     local gateRuns = g:Label("Runs : 0")
+    g:Paragraph({ Body = "Opens the hardest gate you still have first (bottom of the list = hardest). Pick levels to only use those; pick none to use all." })
     g:Dropdown({ Title = "Select Gate Level", Items = CFG.GateRanks, Multi = true, Flag = "GateRanks" })
     g:Slider({ Title = "Amount", Min = 1, Max = 10, Default = 1, Flag = "GateAmount" })
     g:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "GateTarget" })
