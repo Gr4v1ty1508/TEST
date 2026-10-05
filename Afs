@@ -5572,12 +5572,28 @@ function BP.FetchData()
                 for _, q in ipairs(questsIn(t)) do found[#found + 1] = q end
             end
         end)
+        -- GetBPdata (watched): { QuestData = { Dungeon = { Repeat = 2, Value = 0 }, Open = { Repeat = 1,
+        --   Value = 291 }, Portal = { Repeat = 1, Value = 1 }, PassiveRoll = {...} }, QuestResetAt = <server
+        --   time>, Exp = 375, CurrentSeason = 7, ClaimedRewards = {...} }. Repeat = times done today,
+        --   Value = progress of the current repeat. This is the exact state, so it wins over the window.
         local ok, reply = pcall(Net.Raw, "GetBPdata", {})
-        if ok and reply ~= nil then
+        if ok and type(reply) == "table" then
             BP.raw = reply
-            if type(reply) == "table" then for _, q in ipairs(questsIn(reply)) do found[#found + 1] = q end end
+            if type(reply.QuestData) == "table" then
+                local exact = {}
+                for name, v in pairs(reply.QuestData) do
+                    if type(v) == "table" then
+                        exact[#exact + 1] = { name = pretty(name), prog = tonumber(v.Value), reps = tonumber(v.Repeat), source = "server", exact = true }
+                    end
+                end
+                found = exact
+            else
+                for _, q in ipairs(questsIn(reply)) do found[#found + 1] = q end
+            end
+            local resetAt = tonumber(reply.QuestResetAt)
+            if resetAt then BP.serverReset = resetAt end
         end
-        BP.data, BP.saveKeys, BP.fetching = found, keys, false
+        BP.data, BP.saveKeys, BP.fetching, BP.dataAt = found, keys, false, os.clock()
     end)
 end
 
@@ -5629,6 +5645,8 @@ function BP.Read(force)
     -- the day reset: forget the counts / skips, read everything again
     if BP.resetAt and os.clock() > BP.resetAt + 3 then
         BP.resetAt, BP.counts, BP.prev, BP.moved, BP.skipUntil, BP.opened, BP.allDone = nil, {}, {}, {}, {}, 0, false
+        BP.serverReset, BP.data = nil, nil
+        BP.FetchData()
         Util.Notify("Battle Pass: new day - new quests")
     end
     local list, reset = BP.ReadGui()
@@ -5636,23 +5654,38 @@ function BP.Read(force)
         BP.opened = BP.opened + 1
         list, reset = BP.OpenOnce()
     end
-    if force or Util.Every("bp-data", 30) then BP.FetchData() end
-    -- fill gaps from the save / remote (and use them alone when the window can't be read)
+    if force or Util.Every("bp-data", On("AutoBattlePass") and 10 or 30) then BP.FetchData() end
+    -- the window gives names / goals / max repeats; the server data (GetBPdata) the exact progress.
+    -- They're matched by kind ("Dungeon" = "Complete Dungeon", "Open" = "Open Star", ...)
     local data = BP.data or {}
-    if #list == 0 then
-        for _, q in ipairs(data) do list[#list + 1] = q end
-    else
-        for _, q in ipairs(list) do
-            for _, d in ipairs(data) do
-                if key(d.name) == key(q.name) then
-                    q.reps = q.reps or d.reps
-                    q.prog = q.prog or d.prog
-                    q.goal = q.goal or d.goal
-                end
-            end
+    local byKind = {}
+    for _, q in ipairs(list) do byKind[BP.KindOf(q.name) or key(q.name)] = q end
+    for _, d in ipairs(data) do
+        local kind = BP.KindOf(d.name)
+        local q = kind and byKind[kind]
+        if q then
+            if d.exact or q.reps == nil then q.reps = d.reps or q.reps end
+            if d.exact or q.prog == nil then q.prog = d.prog or q.prog end
+            q.goal = q.goal or d.goal
+        elseif kind then
+            -- not in the window (it wasn't read): the server's entry under the hub's name
+            d.name = kind
+            list[#list + 1] = d
+            byKind[kind] = d
         end
     end
-    if reset then BP.resetAt = os.clock() + reset end
+    -- the battle pass always has its 4 quests; one the server hasn't counted yet is at 0
+    if #list > 0 then
+        for _, k in ipairs(BP.Kinds) do
+            if not byKind[k[1]] then list[#list + 1] = { name = k[1], prog = 0, reps = 0, source = "default" } end
+        end
+    end
+    if BP.serverReset then
+        local left = BP.serverReset - serverNow()
+        if left > 0 then BP.resetAt = os.clock() + left end
+    elseif reset then
+        BP.resetAt = os.clock() + reset
+    end
     for _, q in ipairs(list) do
         q.name = pretty(q.name)
         q.kind = BP.KindOf(q.name)
@@ -5730,20 +5763,81 @@ function BP.Hatch()
     return true
 end
 
+-- GATES (= the battle pass "Portal"), the way Yuto Hub does it (recorded):
+--   AttemptTravel("TimeChamber") -> SummonGate("A", 1) -> IN GateCreated("<uuid>")
+--   -> JoinGatesMode("<uuid>") + AttemptTravel("GatesMode", true, "<uuid>")
+--   -> SkipGateWait() until IN GateStarted() -> clear the waves in Worlds.GatesMode.<uuid>.Enemies
+--      (each wave ~150 studs further) -> IN GatesModeLost(nil, true) = over, the game sends you back
+--   -> summon the next one. Every gate done = +1 on the battle pass Portal quest.
+local Gate = { id = nil, createdAt = 0, started = false, overAt = 0, count = 0 }
+Features.GateState = Gate
+Net.Listen("GateCreated", function(id)
+    Gate.id, Gate.createdAt, Gate.started = tostring(id), os.clock(), false
+    Gate.count = Gate.count + 1
+end)
+Net.Listen("GateStarted", function() Gate.started = true end)
+Net.Listen("GatesModeLost", function()
+    Gate.id, Gate.started, Gate.overAt = nil, false, os.clock()
+    if BP.data then BP.FetchData() end   -- the Portal quest just moved
+end)
+function Features.GateFolder()
+    local gm = Worlds:FindFirstChild("GatesMode")
+    return gm and Gate.id and gm:FindFirstChild(Gate.id) or nil
+end
+local function joinGate()
+    Net.Raw("JoinGatesMode", { Gate.id, n = 1 })
+    Net.Raw("AttemptTravel", { "GatesMode", true, Gate.id, n = 3 })
+end
+-- one step; true = busy with a gate, false = couldn't summon one
+function Features.GateRun(rank, amount, wanted)
+    if Util.World() == "GatesMode" then
+        if not Gate.started and Util.Every("gate-skip", 0.5) then Net.Raw("SkipGateWait", {}) end
+        -- only our own gate (other players' gates are in GatesMode too)
+        local folder = Features.GateFolder()
+        local skip = folder and function(e) return not e:IsDescendantOf(folder) end or nil
+        Combat.Step("GatesMode", wanted, nil, F("GateTarget") or "Nearest", (not folder) and 600 or nil, skip)
+        return true
+    end
+    -- just over: the game is sending us back
+    if os.clock() - Gate.overAt < 1.5 then return true end
+    -- ours was made but we're not in yet
+    if Gate.id and os.clock() - Gate.createdAt < 30 then
+        if Util.Every("gate-join", 3) then joinGate() end
+        return true
+    end
+    if not Util.Every("gate-summon", 2) then return true end
+    if Util.World() ~= "TimeChamber" then Travel.To("TimeChamber", true) end
+    Gate.id = nil
+    Net.Raw("SummonGate", { rank, amount or 1, n = 2 })
+    local t0 = os.clock()
+    while not Gate.id and os.clock() - t0 < 3 do task.wait(0.1) end
+    if not Gate.id then
+        if Util.Every("gate-none-" .. tostring(rank), 60) then Util.Notify("Gate " .. tostring(rank) .. ": nothing was created (no gate of that rank?)") end
+        return false
+    end
+    task.wait(0.3)
+    joinGate()
+    return true
+end
+-- Auto Gate on the same flow (ranks picked in Dungeon / Gate / Time take turns)
+function Features.Gates()
+    local ranks = Util.SetToList(F("GateRanks"))
+    if Util.World() ~= "GatesMode" and not Gate.id and #ranks == 0 then return false end
+    local rank = ranks[(Gate.count % math.max(#ranks, 1)) + 1] or "A"
+    return Features.GateRun(rank, F("GateAmount") or 1, function() return On("AutoGate") end)
+end
+
 -- each kind: true = it has the character now, false = nothing it can do right now (next quest)
 BP.Run = {
     ["Complete Dungeon"] = function()
         force("AutoOpenDungeon", "AutoFarmDungeon")
         return Features.Dungeon() == true
     end,
-    -- a "Portal" is a Gate: summon / join / clear it with the Auto Gate settings
+    -- a "Portal" is a Gate: rank = the first one picked in Auto Gate, else "A" (what Yuto uses)
     ["Complete Portal"] = function()
-        force("AutoGate")
-        if Util.World() ~= "GatesMode" and #Util.SetToList(F("GateRanks")) == 0 then
-            note("gate", "pick a gate level in Dungeon / Gate / Time (Portal = Gate)") return false
-        end
-        Features.Gates()
-        return true
+        force()
+        local rank = Util.SetToList(F("GateRanks"))[1] or "A"
+        return Features.GateRun(rank, 1, function() return On("AutoBattlePass") end)
     end,
     ["Open Star"] = function() force() return BP.Hatch() end,
     ["Open Divine"] = function() force() return BP.Hatch() end,
@@ -5753,7 +5847,7 @@ BP.Run = {
 function BP.Inside(kind)
     local w = Util.World()
     if kind == "Complete Dungeon" then return Features.InDungeon() end
-    if kind == "Complete Portal" then return w == "GatesMode" end
+    if kind == "Complete Portal" then return w == "GatesMode" or (Gate.id ~= nil and os.clock() - Gate.createdAt < 30) end
     return false
 end
 
@@ -6150,7 +6244,7 @@ do
     local c = TMain:Card("Auto Battle Pass", "Left")
     c:Paragraph({ Body = "Does the battle pass quests you pick until their repeats (5 a day) are used, then goes back to the rest. "
         .. "New quests come with the daily reset and start by themselves.\n"
-        .. "Dungeon uses Auto Dungeon's settings, Portal = Gate (Auto Gate's level / amount). Its place in the order: Priority / Team." })
+        .. "Dungeon uses Auto Dungeon's settings. Portal = a Gate run (the first level picked in Auto Gate, else A). Its place in the order: Priority / Team." })
     local all = {}
     for _, k in ipairs(BP.KindNames()) do all[k] = true end
     c:Dropdown({ Title = "Select Quests", Items = BP.KindNames(), Multi = true, Default = all, Flag = "BPQuests" })
