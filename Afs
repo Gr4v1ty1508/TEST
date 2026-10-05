@@ -3334,8 +3334,19 @@ function Features.DungeonRoomOf(inst)
     return nil
 end
 function Features.RoomRevealed(room)
+    if not room then return true end
+    -- the game's own minimap first (MainGui.DungeonMinimap.MapFrame["x, y"].Visible): always
+    -- right, also in a dungeon someone else opened (we may never get UpdateMap there, or keep
+    -- the grid of the previous run)
+    local mg = Data.MainGui()
+    local mm = mg and mg:FindFirstChild("DungeonMinimap")
+    local frame = mm and mm:FindFirstChild("MapFrame")
+    if frame and mm.Visible then
+        local cell = frame:FindFirstChild(room.Name)
+        if cell and cell:IsA("GuiObject") then return cell.Visible end
+    end
     local grid = Features.DungeonMap
-    if not (grid and room) then return true end                 -- no map yet: don't block
+    if not grid then return true end                            -- no map yet: don't block
     local x, y = string.match(room.Name, "^(%d+), (%d+)$")
     local col = grid[tonumber(x)] or grid[tostring(x)]
     if type(col) ~= "table" then return false end
@@ -6198,6 +6209,20 @@ end)
 Net.Listen("JoinDungeon", function() Features.DungeonBossAt = nil Features.DungeonIdleSince = nil Features.DungeonMap = nil end)
 -- UpdateMap(grid): grid[x][y] = true for every room the minimap shows (= reachable now).
 -- Rooms open one by one from the start room; a hidden one can't be activated or walked to.
+-- entering any dungeon (ours or a public one someone else opened): forget the last run
+task.spawn(pcall, function()
+    local wv = LP:WaitForChild("World", 10)
+    if wv then
+        wv.Changed:Connect(function()
+            if wv.Value == "Dungeon" then
+                Features.DungeonBossAt, Features.DungeonIdleSince, Features.DungeonMap = nil, nil, nil
+                Features.DungeonHiddenSince, Features.DungeonHiddenPause = nil, nil
+                table.clear(Features.DungeonActivated)
+                table.clear(Features.DungeonDoorTried)
+            end
+        end)
+    end
+end)
 Net.Listen("UpdateMap", function(grid) if type(grid) == "table" then Features.DungeonMap = grid end end)
 Net.Listen("SetTowerFloor", function(floor)
     if type(floor) == "number" then
