@@ -1037,7 +1037,7 @@ function Combat.PetsToMe()
 end
 function Combat.Attack(e, wanted)
     local t0 = os.clock()
-    local movedAt, sentAt = nil, nil
+    local movedAt, sentAt, ultAt = nil, nil, 0
     local streamedAt = 0
     local hp0, hpAt = Combat.HP(e), nil
     do
@@ -1067,6 +1067,13 @@ function Combat.Attack(e, wanted)
         end
         local root = Util.Root()
         local pos, part = Combat.Pos(e)
+        -- Yuto Hub in a dungeon fight (watched, 30 s): it doesn't send pets at enemies at all -
+        -- it stands there and fires PetAttack + PetAbility for every pet ~2-3x a second.
+        -- Done here too while fighting (the "Attack While Ult" loop already does it when on).
+        if not On("AttackUlt") and os.clock() - ultAt > 0.31 then
+            ultAt = os.clock()
+            task.spawn(pcall, Features.Ult)
+        end
         -- pets left behind: pulled once, right after we arrived at the enemy
         if movedAt and os.clock() - movedAt > 0.05 then
             movedAt = nil
