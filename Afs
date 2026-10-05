@@ -5605,7 +5605,7 @@ do
         return out
     end
     function Features.SavePetPicks(flag, set)
-        if not KEEP_PICKS[flag] or not Features.PicksReady then return end
+        if not KEEP_PICKS[flag] or not Features.PicksReady or not Features.ConfigLoaded then return end
         local pets, sigs = savedPets(), {}
         for label, on in pairs(set or {}) do
             local sig = on and Data.PetSig(pets[Data.PetId(label)])
@@ -5638,13 +5638,15 @@ do
         for _, d in ipairs(Features.PetDrops) do
             pcall(d.Refresh, d, list)
             local flag = Features.PetDropFlags and Features.PetDropFlags[d]
-            if not Features.PicksReady and loaded and flag and KEEP_PICKS[flag] then
+            if not Features.PicksReady and loaded and Features.ConfigLoaded and flag and KEEP_PICKS[flag] then
                 pcall(restorePicks, d, flag, list)
             else
                 pcall(Features.RemapPetPicks, d, list)
             end
         end
-        if loaded and not Features.PicksReady then
+        -- only after the config is loaded: before that the fingerprints aren't there yet, and
+        -- loading the config afterwards would put last game's labels back over the restored picks
+        if loaded and Features.ConfigLoaded and not Features.PicksReady then
             Features.PicksReady = true
             -- keep the old fingerprints if nothing matched (e.g. the save was half loaded):
             -- they're only replaced when you pick pets yourself
@@ -6131,6 +6133,9 @@ for _, flag in ipairs({ "PassivePets" }) do
     local el = Flags[flag]
     if el then pcall(el.Set, el, {}, true) end
 end
+Features.ConfigLoaded = true
+-- now the remembered Lunar pets can be matched to today's UIDs
+task.defer(function() pcall(Features.RefreshPetLists, true) end)
 for _, fn in ipairs(Refreshers) do pcall(fn) end
 
 -- auto update: every 30 s compare the world list with what the dropdowns show;
