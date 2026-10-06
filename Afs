@@ -180,7 +180,7 @@ local CFG = {
         JoinGlobalBoss  = { "JoinGlobalBossArena",      function() return {} end },
 
         DungeonLobby    = { "AttemptTravel",            function() return { "Dungeon" } end },
-        -- seen from Yuto Hub: SummonDungeon(true, { Size = 2, Theme = "DBZ" })  (Size = 1..5, Theme = world)
+        -- seen from Yuto Hub: SummonDungeon(true, { Size = 2, Theme = "DBZ" })  (Size = 0..4: Small..Hellish, Theme = world)
         SummonDungeon   = { "SummonDungeon",            function(flag, size, world) return { flag, { Size = size, Theme = world } } end },
         JoinDungeon     = { "JoinDungeon",              function() return {} end },
         OpenDungeonDoor = { "OpenDungeonDoor",          function(door) return { door } end },
@@ -3274,7 +3274,9 @@ local function fillSummon(v, key, ctx)
 end
 -- returns args, source ("learned" / "guess"), artifact slot text
 local function summonArgs(size, world, artifact)
-    local sizeIndex = table.find(CFG.DungeonSizes, size) or 1
+    -- the game numbers sizes from 0 (MainGui.DungeonSummon.Config.Sizes has "0".."4":
+    -- Small 0, Medium 1, Large 2, Insane 3, Hellish 4) - sending 3 for Large opened Insane
+    local sizeIndex = (table.find(CFG.DungeonSizes, size) or 1) - 1
     local tpl, n = Learn.Get("SummonDungeon")
     if not tpl then
         local a = { CFG.DungeonSizeArg[size] or size, world, artifact }
@@ -3299,7 +3301,7 @@ local function summonArgs(size, world, artifact)
     if not ctx.sizeHit then
         for i = 1, n do
             local v = tpl[i]
-            if type(v) == "number" and v >= 1 and v <= #CFG.DungeonSizes and v % 1 == 0 then tpl[i] = sizeIndex break end
+            if type(v) == "number" and v >= 0 and v < #CFG.DungeonSizes and v % 1 == 0 then tpl[i] = sizeIndex break end
         end
     end
     tpl.n = n
@@ -3372,7 +3374,7 @@ function Features.OpenDungeon()
         -- the game's client then sends the real SummonDungeon call itself
         local b = Bindables:FindFirstChild("SummonDungeon")
         local bargs = Learn.Get("Bindable.SummonDungeon")
-        local ctx = { size = size, sizeIndex = table.find(CFG.DungeonSizes, size) or 1, world = world, artifact = artifact }
+        local ctx = { size = size, sizeIndex = (table.find(CFG.DungeonSizes, size) or 1) - 1, world = world, artifact = artifact }
         for i, v in pairs(bargs) do bargs[i] = fillSummon(v, nil, ctx) end
         if b and b:IsA("BindableEvent") then pcall(b.Fire, b, table.unpack(bargs, 1, #bargs)) end
         source = "game button"
@@ -5616,7 +5618,8 @@ function DungeonGui.SummonDirect()
         if Util.Every("dungeon-world-pick", 60) then Util.Notify("Dungeon: pick a world first") end
         return false
     end
-    local sizeIndex = table.find(CFG.DungeonSizes, F("DungeonSize") or "Small") or 1
+    -- game sizes start at 0: Small 0, Medium 1, Large 2, Insane 3, Hellish 4
+    local sizeIndex = (table.find(CFG.DungeonSizes, F("DungeonSize") or "Small") or 1) - 1
     -- Yuto Hub (watched): EquipArtefact("Dungeon") -> SummonDungeon(true, {Size, Theme})
     --   -> ~1 s -> EquipArtefact(<the one you had>) -> AttemptTravel("Dungeon") = you're in
     local prevArt
