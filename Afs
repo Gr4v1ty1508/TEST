@@ -6235,10 +6235,12 @@ function BP.Read(force)
         q.max = q.max or BP.Repeats
         if q.gone then q.reps = q.max end
         if q.reps == nil then q.reps = countRepeat(q) end
-        -- done = vanished from the window, or its Repeats count is full. "Repeats" counts the
-        -- FINISHED repeats (seen: Open Star went 0/5 -> 4/5 the same day), so a quest can still
-        -- show in the window at 5/5 for a while (Portal did) and is finished anyway.
-        q.done = q.gone or q.reps >= q.max
+        -- "Repeats: 5/5" is NOT finished: there's still one more x/y to fill (Dungeon at
+        -- Repeats 5/5, 0/5 needed 5 more runs before it vanished - checked in game). So:
+        -- still in the window = still to do, vanished = done. Without the window: full repeats
+        -- AND that last x/y full.
+        if q.source == "window" then q.done = false
+        else q.done = q.gone or (q.reps >= q.max and q.prog ~= nil and q.goal ~= nil and q.prog >= q.goal) end
     end
     BP.quests = list
     return list
