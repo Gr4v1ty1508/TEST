@@ -951,7 +951,7 @@ function Combat.Log(key, msg)
     local now = os.clock()
     if Combat.LogLast[key] == msg then return end
     Combat.LogLast[key] = msg
-    Combat.Status = msg
+    if key ~= "brain" then Combat.Status = msg end
     if not appendfile then return end
     pcall(function()
         if isfolder and makefolder and not isfolder(CFG.ConfigFolder) then
@@ -6814,6 +6814,7 @@ end
 local Window = Library:Window({ Title = CFG.Game, SubTitle = CFG.Name, ToggleKey = CFG.ToggleKey })
 
 local TMain     = Window:Tab("Main")
+Features.TStatus = Window:Tab("Status")
 local TTeleport = Window:Tab("Teleport")
 local TTrial    = Window:Tab("Time Trial / Tower")
 local TRaid     = Window:Tab("Raid / Defense / Meteor")
@@ -6870,6 +6871,65 @@ do
     f:Paragraph({ Title = "Re equip Pets", Body = "For smooth farming set this correctly. Use 3 minutes for general farming and 1-2 minutes for the Infinity Tower." })
     f:Toggle({ Title = "Auto Re Equip Pets", Flag = "AutoReEquip" })
     f:Slider({ Title = "Delayed [minutes]", Min = 1, Max = 10, Default = 2, Flag = "ReEquipDelay" })
+end
+
+-- STATUS TAB: what the hub is doing right now -------------------------------------------------
+function Features.StatusText()
+    local L = {}
+    local names, order = {}, {}
+    for _, t in ipairs(Features.Tasks or {}) do names[t.id] = t.name end
+    local owner = Features.BrainOwner
+    L[#L + 1] = "Running now : " .. (owner and (names[owner] or owner) or "nothing to do right now")
+    L[#L + 1] = "World : " .. tostring(Data.WorldDisplay(Util.World()))
+    L[#L + 1] = "Last step : " .. tostring(Combat.Status or "-")
+    L[#L + 1] = ""
+    -- per feature
+    pcall(function()
+        if On("AutoFarmDungeon") or On("AutoOpenDungeon") then
+            local cd = Features.DungeonCooldown and Features.DungeonCooldown() or 0
+            L[#L + 1] = "Dungeon : " .. (Features.InDungeon() and "inside a run"
+                or (cd > 0 and string.format("next one in %d:%02d:%02d", cd // 3600, (cd % 3600) // 60, cd % 60) or "ready to open"))
+        end
+    end)
+    pcall(function()
+        if On("AutoTrial") then
+            local best, bestName
+            for _, name in ipairs(Util.SetToList(F("Trials"))) do
+                local id = CFG.TimeTrialIds[name]
+                local secs = id and Features.DoorCountdown(id)
+                if secs and (not best or secs < best) then best, bestName = secs, name end
+            end
+            local left = Extras.TrialTimeLeft()
+            L[#L + 1] = "Time Trial : " .. (left and ("in a run, " .. left .. " left")
+                or (best and string.format("%s in %d:%02d", bestName, math.floor(best / 60), math.floor(best % 60)) or "waiting for the door times"))
+        end
+    end)
+    pcall(function()
+        if On("AutoEventQuests") then
+            local cd = Features.EventQuestCooldown()
+            L[#L + 1] = "Auto Lunar : " .. (cd > 0 and string.format("new quests in %d:%02d", cd // 3600, (cd % 3600) // 60)
+                or ("last roll : " .. tostring(Features.EQLast or "-")))
+        end
+    end)
+    pcall(function()
+        if On("AutoBattlePass") then
+            L[#L + 1] = "Battle Pass : " .. tostring(Features.BattlePass.task or "nothing picked left / waiting")
+        end
+    end)
+    pcall(function()
+        if On("AutoGate") then L[#L + 1] = "Gate : " .. (Util.World() == "GatesMode" and "in a gate" or "waiting / summoning") end
+    end)
+    L[#L + 1] = ""
+    -- the Priority list, the running one marked
+    L[#L + 1] = "Priority order :"
+    for i, t in ipairs(Features.TaskOrder()) do
+        L[#L + 1] = string.format("%s %d. %s", t.id == owner and ">>" or "   ", i, t.name)
+    end
+    return table.concat(L, "\n")
+end
+do
+    local c = Features.TStatus:Card("Status", "Left")
+    Features.StatusLabel = c:Paragraph({ Body = "Running now : -" })
 end
 
 -- BATTLE PASS -------------------------------------------------------------------------------
@@ -7735,6 +7795,9 @@ local function loop(interval, fn)
 end
 
 loop(0.1, Brain)
+loop(1, function()
+    if Features.StatusLabel then Features.StatusLabel:Set(Features.StatusText()) end
+end)
 track(game:GetService("RunService").Heartbeat:Connect(function()
     if running and On("AutoClick") then Net.Call("Click") end
 end))
