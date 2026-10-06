@@ -962,8 +962,22 @@ function Combat.Log(key, msg)
             end
         end
         local root = Util.Root()
-        appendfile(CFG.ConfigFolder .. "/combat_log.txt", os.date("%H:%M:%S") .. string.format(" %.1f  ", now % 1000) .. msg
-            .. (root and string.format("   me @ (%.0f, %.0f, %.0f)", root.Position.X, root.Position.Y, root.Position.Z) or "   (no character)") .. "\n")
+        local path = CFG.ConfigFolder .. "/combat_log.txt"
+        -- keep the file small (chat uploads cut big files and the NEWEST lines got lost):
+        -- over ~200 KB the old lines move to combat_log_old.txt and a new file starts
+        if Combat.LogBytes == nil then
+            Combat.LogBytes = 0
+            if isfile and readfile and isfile(path) then Combat.LogBytes = #readfile(path) end
+        end
+        if Combat.LogBytes > 200000 and readfile and writefile then
+            writefile(CFG.ConfigFolder .. "/combat_log_old.txt", readfile(path))
+            writefile(path, "")
+            Combat.LogBytes = 0
+        end
+        local line = os.date("%H:%M:%S") .. string.format(" %.1f  ", now % 1000) .. msg
+            .. (root and string.format("   me @ (%.0f, %.0f, %.0f)", root.Position.X, root.Position.Y, root.Position.Z) or "   (no character)") .. "\n"
+        Combat.LogBytes = Combat.LogBytes + #line
+        appendfile(path, line)
     end)
 end
 function Combat.Name(e)
@@ -2652,24 +2666,70 @@ function Features.PressNextRoom()
             local pos = far:IsA("BasePart") and far.Position or far:GetPivot().Position
             Features.TrialLog(string.format("RestRoom button %.0f studs away - too far, not pressed", (pos - root.Position).Magnitude))
         end
-        return false
+        return Features.RestRoomFallback()
     end
+    -- pressed a moment ago and the prompt is still up: give the server a few seconds,
+    -- then press again, switching between fireproximityprompt and a held E key
+    local tries = Features.PromptTries[prompt] or 0
     local last = Features.PressedPrompts[prompt]
-    if last and os.clock() - last < 15 then return false end   -- pressed already, the room is coming
+    if last and os.clock() - last < 6 then return false end
+    tries = tries + 1
+    Features.PromptTries[prompt] = tries
     local cf = part:IsA("BasePart") and part.CFrame or part:GetPivot()
-    Features.TrialLog("RestRoom: pressing \"" .. tostring(prompt.ActionText) .. "\"")
+    local useKey = tries % 2 == 0 or not fireproximityprompt
+    Features.TrialLog(string.format("RestRoom: pressing \"%s\" (try %d, %s, hold %.1f s)", tostring(prompt.ActionText), tries,
+        useKey and "E key" or "fireproximityprompt", prompt.HoldDuration))
     Util.MoveTo(cf + Vector3.new(0, 3, 0))
     task.wait(0.4)
-    if fireproximityprompt then
+    if not useKey then
+        pcall(function() prompt.HoldDuration = 0 end)
         pcall(fireproximityprompt, prompt)
     else
         pcall(function()
             VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-            task.wait(math.max(prompt.HoldDuration, 0.05))
+            task.wait(math.max(prompt.HoldDuration, 0.1) + 0.2)
             VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
         end)
     end
     Features.PressedPrompts[prompt] = os.clock()
+    return true
+end
+Features.PromptTries = setmetatable({}, { __mode = "k" })
+
+-- Rest Room (every 5th room) and no button found near us: after 8 s, go into the newest
+-- RestRoom close to us (so its button streams in) and write what's there to the log
+function Features.RestRoomFallback()
+    local room = Features.CurrentRoom()
+    if not room or room % 5 ~= 0 then Features.RestWait = nil return false end
+    local w = Features.RestWait
+    if not w or w.room ~= room then Features.RestWait = { room = room, at = os.clock() } return false end
+    if os.clock() - w.at < 8 or not Util.Every("restroom-fallback", 6) then return false end
+    local root = Util.Root()
+    if not root then return false end
+    local best, bestBorn, bestDist
+    for _, m in ipairs(Features.TrialRooms({ RestRoom = true })) do
+        local ok, pv = pcall(m.GetPivot, m)
+        if ok and pv then
+            local d = (pv.Position - root.Position).Magnitude
+            local born = Features.RoomBornAt(m)
+            if d < 3000 and (not best or (born or 0) > (bestBorn or 0) or ((born or 0) == (bestBorn or 0) and d < bestDist)) then
+                best, bestBorn, bestDist = m, born, d
+            end
+        end
+    end
+    if not best then
+        Features.TrialLog("room " .. room .. " (rest room): no RestRoom model within 3000 studs")
+        return false
+    end
+    local cp = best:FindFirstChild("ConfirmPart", true)
+    local pr = cp and cp:FindFirstChildWhichIsA("ProximityPrompt", true)
+    Features.TrialLog(string.format("room %d (rest room): no button near - RestRoom %.0f studs away, ConfirmPart %s, prompt %s",
+        room, bestDist, cp and "yes" or "no", pr and (pr.Enabled and "enabled" or "disabled") or "none"))
+    local target = cp and (cp:IsA("BasePart") and cp.Position or cp:GetPivot().Position) or best:GetPivot().Position
+    task.spawn(pcall, function() LP:RequestStreamAroundAsync(target) end)
+    Util.MoveTo(CFrame.new(target + Vector3.new(0, 4, 0)))
+    if cp then confirmParts[cp] = true end
+    task.wait(0.5)
     return true
 end
 
@@ -2684,6 +2744,7 @@ local roomBoxes = setmetatable({}, { __mode = "k" })
 local visitedRooms = setmetatable({}, { __mode = "k" })
 local roomBorn = setmetatable({}, { __mode = "k" })
 local roomWatch = nil
+function Features.RoomBornAt(m) return roomBorn[m] end
 local function watchRooms(map)
     if not map then return end
     if roomWatch and Features.RoomWatchMap == map then return end
