@@ -6414,7 +6414,13 @@ function Features.GateRun(amount, wanted)
             -- it took no damage (pets aren't here): bring the pets over and stay on it
             if Combat.Skip[best] then
                 Combat.Skip[best] = nil
-                if Util.Every("gate-pets", 5) then
+                -- pets still in the old world: take them off and put them back on = new pet
+                -- models spawn right next to the character, in the gate (every 20 s at most);
+                -- in between: the game's own "Teleported" + RequestPetTeleport
+                if Util.Every("gate-reequip", 20) then
+                    Combat.Log("gate", "first enemy takes no damage - re-equipping the pets so they spawn in the gate")
+                    pcall(Features.ReEquipPets)
+                elseif Util.Every("gate-pets", 5) then
                     Combat.Log("gate", "first enemy takes no damage - bringing the pets to the gate")
                     Features.PetsFollow()
                     pcall(Extras.PullPets)
