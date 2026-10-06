@@ -15,7 +15,7 @@
       Open UI           open any in-game menu
       Hatch             summon stars
       Passive           multi pet / slot / passive / rarity / machine reroll
-      Settings          auto sell, webhook, anti AFK, ultra performance, walk speed, spy
+      Settings          auto sell, webhook, ultra performance, walk speed, spy (anti AFK always on)
       UI Settings       key, scale, accent (settings auto-save per account
                         to GravityHub/AFS/CONFIG/<player>.json)
 
@@ -7265,7 +7265,6 @@ end
 -- SETTINGS -----------------------------------------------------------------------------------------
 do
     local g = TSettings:Card("Game", "Left")
-    g:Toggle({ Title = "Anti AFK", Default = true, Flag = "AntiAFK" })
     g:Slider({ Title = "Walk Speed", Min = 16, Max = 200, Default = 16, Flag = "WalkSpeed" })
 
     -- PRIORITY: 1 = done first. The first feature in the list that has something to do gets the
@@ -7583,11 +7582,13 @@ Net.Listen("GateStarted", function()
 end)
 Net.Listen("GatesModeLost", function() Util.Reset("gates-join") end)
 
+-- Anti AFK: always on from the moment the script runs (no toggle). Roblox fires Idled after
+-- ~20 min without input; a virtual right click resets that timer so you aren't kicked (267).
 track(LP.Idled:Connect(function()
-    if On("AntiAFK") then
+    pcall(function()
         VirtualUser:CaptureController()
         VirtualUser:ClickButton2(Vector2.new())
-    end
+    end)
 end))
 
 -- Remote Spy (outgoing calls + return values, kept in SpyLog and GravityHub/AFS/spy_log.txt)
