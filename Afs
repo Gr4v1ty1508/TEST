@@ -6268,7 +6268,7 @@ end
 local Gate = { id = nil, createdAt = 0, started = false, overAt = 0, count = 0 }
 Features.GateState = Gate
 Net.Listen("GateCreated", function(id)
-    Gate.id, Gate.createdAt, Gate.started = tostring(id), os.clock(), false
+    Gate.id, Gate.createdAt, Gate.started, Gate.joinPos = tostring(id), os.clock(), false, nil
     Gate.count = Gate.count + 1
 end)
 Net.Listen("GateStarted", function()
@@ -6304,8 +6304,15 @@ function Features.PetsFollow()
 end
 local function joinGate()
     Net.Raw("JoinGatesMode", { Gate.id, n = 1 })
-    Net.Raw("AttemptTravel", { "GatesMode", true, Gate.id, n = 3 })
-    task.delay(1, Features.PetsFollow)
+    -- AttemptTravel answers with WHERE to go (a Vector3, seen in the logs); the game's own client
+    -- then moves you there. Ignoring the answer left the character in the Time Chamber while the
+    -- world already said GatesMode - the gate started (timer running) with nobody inside.
+    local res = Net.Raw("AttemptTravel", { "GatesMode", true, Gate.id, n = 3 })
+    if typeof(res) == "Vector3" then
+        Util.MoveTo(CFrame.new(res + Vector3.new(0, 4, 0)))
+        Gate.joinPos = res
+    end
+    task.delay(0.5, Features.PetsFollow)
 end
 -- how many gates of a rank you have: save Items "<Rank>RankGate" (the drops are named
 -- "CRankGate", "BRankGate" ...). nil = can't tell (then it's just tried)
@@ -6365,6 +6372,21 @@ function Features.GateRun(amount, wanted)
         return true
     end
     if Util.World() == "GatesMode" then
+        -- the world says GatesMode but the character is still far from our gate (the move
+        -- didn't happen): go in first - don't start it / hit from outside
+        do
+            local folder0 = Features.GateFolder()
+            local root0 = Util.Root()
+            local sp = folder0 and folder0:FindFirstChild("Spawns")
+            sp = sp and (sp:FindFirstChild("Spawn") or sp:FindFirstChildWhichIsA("BasePart"))
+            local target = (sp and sp:IsA("BasePart") and sp.Position) or Gate.joinPos
+            if root0 and target and (root0.Position - target).Magnitude > 2500 then
+                Combat.Log("gate", "world is GatesMode but the character isn't in the gate - moving in")
+                if Gate.id and Util.Every("gate-rejoin", 4) then joinGate() else Util.MoveTo(CFrame.new(target + Vector3.new(0, 4, 0))) end
+                task.wait(0.5)
+                return true
+            end
+        end
         Gate.inAt = Gate.inAt or os.clock()
         -- the gate only takes damage after it started: hitting it before that made every enemy
         -- "no damage for 8 s -> skipped 30 s" and the character just stood there.
