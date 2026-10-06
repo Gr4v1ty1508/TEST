@@ -6235,7 +6235,11 @@ function BP.Read(force)
         q.max = q.max or BP.Repeats
         if q.gone then q.reps = q.max end
         if q.reps == nil then q.reps = countRepeat(q) end
-        q.done = q.gone or q.reps >= q.max
+        -- a quest still in the window is NOT done, whatever "Repeats" says (Portal showed
+        -- "Repeats: 5/5" with 0/5 and still had runs to do); only one that vanished from the
+        -- window is finished. Without the window, the server's count decides.
+        if q.source == "window" then q.done = false
+        else q.done = q.gone or q.reps >= q.max end
     end
     BP.quests = list
     return list
