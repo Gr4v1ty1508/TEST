@@ -3710,7 +3710,9 @@ function Features.DungeonOpenDoor(important)
                 elseif kind == 3 and Features.DungeonHasKey then prio = 2
                 elseif kind == 4 and Features.DungeonBossAt then prio = 3 end
             end
-            if not important or prio < 9 then
+            -- important: everything but a door into the boss room while we have no key
+            -- (Yuto opens the chest-room doors as soon as it sees them, the boss door after the key)
+            if not important or not (kind == 3 and not Features.DungeonHasKey) then
                 local d = me and (part.Position - me.Position).Magnitude or 0
                 if not bestD or prio < bestP or (prio == bestP and d < bestD) then best, bestD, bestP = door, d, prio end
             end
@@ -3767,11 +3769,14 @@ function Features.FarmDungeon()
     -- keep opening the nearest room, one after another, until mobs show up - then stop and
     -- fight them first (the next tick comes back here once they're dead). Also after the boss is
     -- dead (its key can drop early): like Yuto, the rest of the rooms are still cleared.
-    -- a door into a chest room (or the boss room with the key) that can be opened: that first
+    -- Yuto (full Large run watched): a door that can be opened comes before the next altar -
+    -- chest rooms right away, the boss room once the key dropped
     if Features.DungeonOpenDoor(true) then return true end
+    -- then two altars in a row (Yuto: altar, 2 s, next altar, then back to fight both rooms);
+    -- the second one only while the first room's mobs haven't shown up yet
     do
         local opened = 0
-        while On("AutoFarmDungeon") and Features.DungeonActivate() do
+        while opened < 2 and On("AutoFarmDungeon") and Features.DungeonActivate() do
             opened = opened + 1
             if #Combat.List(worldName) > 0 then break end
         end
