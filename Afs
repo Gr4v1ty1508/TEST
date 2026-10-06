@@ -6066,6 +6066,9 @@ function BP.Read(force)
         list, reset = BP.OpenOnce()
     end
     if force or Util.Every("bp-data", On("AutoBattlePass") and 10 or 30) then BP.FetchData() end
+    -- a quest whose repeats are all done DISAPPEARS from the window until the reset (seen in
+    -- game) - so when the window could be read, a quest that isn't in it = done for today
+    local fromGui = #list > 0
     -- the window gives names / goals / max repeats; the server data (GetBPdata) the exact progress.
     -- They're matched by kind ("Dungeon" = "Complete Dungeon", "Open" = "Open Star", ...)
     local data = BP.data or {}
@@ -6079,17 +6082,19 @@ function BP.Read(force)
             if d.exact or q.prog == nil then q.prog = d.prog or q.prog end
             q.goal = q.goal or d.goal
         elseif kind then
-            -- not in the window (it wasn't read): the server's entry under the hub's name
+            -- not in the window: if the window was read, it's done for today (it vanished);
+            -- else the server's entry under the hub's name
             d.name = kind
+            if fromGui then d.gone = true end
             list[#list + 1] = d
             byKind[kind] = d
         end
     end
     -- the battle pass always has its 4 quests; one the server hasn't counted yet is at 0
-    if #list > 0 then
+    -- the other kinds aren't in today's window: done (or not in today's set) - nothing to do
+    if fromGui then
         for _, k in ipairs(BP.Kinds) do
-            -- "Roll Passive" isn't in every day's set: only when the window / server shows it
-            if not byKind[k[1]] and not k.optional then list[#list + 1] = { name = k[1], prog = 0, reps = 0, source = "default" } end
+            if not byKind[k[1]] and not k.optional then list[#list + 1] = { name = k[1], gone = true, source = "gone" } end
         end
     end
     if BP.serverReset then
@@ -6102,8 +6107,9 @@ function BP.Read(force)
         q.name = pretty(q.name)
         q.kind = BP.KindOf(q.name)
         q.max = q.max or BP.Repeats
+        if q.gone then q.reps = q.max end
         if q.reps == nil then q.reps = countRepeat(q) end
-        q.done = q.reps >= q.max
+        q.done = q.gone or q.reps >= q.max
     end
     BP.quests = list
     return list
@@ -6526,7 +6532,7 @@ function BP.StatusText()
     for _, q in ipairs(BP.quests) do
         local mark = q.done and "[done]" or (q.kind and pick[q.kind]) and (skipped(q) and "[skip]" or "[ on ]") or "[ -- ]"
         lines[#lines + 1] = string.format("%s %s  %s/%s  Repeats %d/%d%s", mark, q.name, short(q.prog), short(q.goal),
-            q.reps or 0, q.max or BP.Repeats, q.kind and "" or "  (not supported)")
+            q.reps or 0, q.max or BP.Repeats, q.gone and "  (finished - back at the reset)" or (q.kind and "" or "  (not supported)"))
     end
     return table.concat(lines, "\n")
 end
