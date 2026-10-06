@@ -4052,6 +4052,12 @@ end
 function Features.Hatch()
     local pick = F("HatchStar")
     if not pick then return end
+    -- in a Time Trial / dungeon / gate ...: no opening and no travelling until it's over
+    -- (opening went on and pulled at the character while a Time Trial had started)
+    if Features.InActiveRun and Features.InActiveRun() then
+        Features.HatchWantAt, Features.HatchTarget = nil, nil
+        return
+    end
     local starName, worldName = string.match(pick, "^(.-) | (.+)$")
     if not starName then return end
     local modes = F("HatchModes") or {}
@@ -6969,6 +6975,7 @@ Features.Tasks = {
     { id = "Meteor", name = "Meteor", run = function() return On("AutoMeteor") and Features.Meteor() end },
     { id = "Hatch", name = "Hatch Egg", run = function()
         return On("AutoHatch") and Features.HatchWantAt ~= nil and os.clock() - Features.HatchWantAt < 3
+            and not Features.InActiveRun()
     end },
     { id = "Farm", name = "Farm / Quest", run = function()
         if On("AutoQuest") then Features.Quest() end
