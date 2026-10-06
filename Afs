@@ -4484,9 +4484,10 @@ local EQ_MOVES = {
     RequiemTokens        = function(m, sh) return m == "Requiem" and not sh end,
 }
 -- order = which one wins when two move the same number of quests:
--- Requiem token -> Event token (the picked Event Machine) -> Normal token -> Event shard -> Normal shard
+-- Event token (the picked Event Machine) -> Requiem token -> Normal token -> Event shard -> Normal shard
+-- (asked for: the Divine passive quest goes Event > Requiem > Normal)
 local EQ_CHOICES = {
-    { "Requiem", false }, { "Event", false }, { "Normal", false }, { "Event", true }, { "Normal", true },
+    { "Event", false }, { "Requiem", false }, { "Normal", false }, { "Event", true }, { "Normal", true },
 }
 -- the item a reroll pays with (Items in the save): RequiemToken, <Category>PassiveToken /
 -- <Category>Shard (PassiveCategories), PassiveToken for Normal. nil = unknown (not checked)
@@ -7429,7 +7430,7 @@ do
     local q = TPassive:Card("Auto Lunar vs Solar Quests", "Right")
     q:Paragraph({ Body = "[-] Progress is read from your save - no need to open the board.\n"
         .. "[-] The pets / slot picked here are rerolled every round - use pets whose passive you don't need.\n"
-        .. "[-] Uses Normal / Event / Requiem token rerolls; shards only for the Spend ... Shards quests.\n"
+        .. "[-] Uses Event / Requiem / Normal token rerolls (in that order when they help as many quests); shards only for the Spend ... Shards quests.\n"
         .. "[-] Points come by themselves; when all quests are done it waits for the new ones and goes on." })
     local labels, keys = {}, {}
     local info = Data.Module("TeamEventInfo")
