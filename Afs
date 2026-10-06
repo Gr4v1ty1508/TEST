@@ -6302,14 +6302,24 @@ function BP.Hatch()
     -- about once a second; the server answers (IN AttemptMultiOpen) every ~2 s and each answer
     -- moved the Open quest by ~5900. The game's own button also fires Bindable SetTargetEgg(star).
     -- No answer for 10 s (no Max Open) -> single opens (OpenEgg) for 5 min.
+    -- coming back to Open Star after doing something else (another quest, a dungeon, ...):
+    -- start the 10 s answer wait fresh and pick the star again. (The old wait kept running
+    -- through the break, so every comeback fell to one-by-one opens for 5 min.)
+    if not BP.multiCalledAt or os.clock() - BP.multiCalledAt > 5 then
+        BP.multiSince, BP.multiTarget = nil, nil
+        if BP.noMulti and os.clock() < BP.noMulti and os.clock() - (BP.noMultiSetAt or 0) > 60 then BP.noMulti = nil end
+    end
+    BP.multiCalledAt = os.clock()
     if not (BP.noMulti and os.clock() < BP.noMulti) then
         BP.multiSince = BP.multiSince or os.clock()
         if os.clock() - math.max(BP.multiAnswerAt or 0, BP.multiSince) > 10 then
-            BP.noMulti, BP.multiSince = os.clock() + 300, nil
+            BP.noMulti, BP.multiSince, BP.noMultiSetAt = os.clock() + 300, nil, os.clock()
             note("multi", "no answer to Max Open - opening one by one for 5 min")
+            Combat.Log("bp-open", "Open Star: no answer to Max Open (AttemptMultiOpen " .. starName .. ") for 10 s - one by one for 5 min")
         elseif os.clock() - (BP.multiSentAt or 0) >= 1 then
             BP.multiSentAt = os.clock()
             if BP.multiTarget ~= starName then
+                Combat.Log("bp-open", "Open Star: Max Open on " .. starName .. " (" .. worldName .. ")")
                 BP.multiTarget = starName
                 local ste = Bindables:FindFirstChild("SetTargetEgg")
                 if ste and ste:IsA("BindableEvent") then pcall(ste.Fire, ste, starName) end
