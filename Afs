@@ -15,7 +15,7 @@
       Open UI           open any in-game menu
       Hatch             summon stars
       Passive           multi pet / slot / passive / rarity / machine reroll
-      Settings          auto sell, webhook, ultra performance, walk speed, spy (anti AFK always on)
+      Settings          auto sell, webhook, ultra performance, spy (anti AFK always on)
       UI Settings       key, scale, accent (settings auto-save per account
                         to GravityHub/AFS/CONFIG/<player>.json)
 
@@ -7264,8 +7264,6 @@ end
 
 -- SETTINGS -----------------------------------------------------------------------------------------
 do
-    local g = TSettings:Card("Game", "Left")
-    g:Slider({ Title = "Walk Speed", Min = 16, Max = 200, Default = 16, Flag = "WalkSpeed" })
 
     -- PRIORITY: 1 = done first. The first feature in the list that has something to do gets the
     -- character; the ones under it wait until it's idle (trial closed, cooldown, nothing to hatch...)
@@ -7778,8 +7776,6 @@ loop(1, function()
         Features.Webhook("Anime Fighters Simulator - Status")
     end
 
-    local hum, speed = Util.Humanoid(), F("WalkSpeed") or 16
-    if hum and speed > 16 and hum.WalkSpeed ~= speed then hum.WalkSpeed = speed end
 
     pcall(function()
         -- soonest selected trial door
