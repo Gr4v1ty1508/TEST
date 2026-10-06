@@ -1345,7 +1345,7 @@ function Travel.To(world, force)
         -- the game said no (old event islands): still move there by position, like other hubs do
         local cf = Travel.SpawnCFrame(world)
         if cf then
-            pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
+            task.spawn(pcall, function() LP:RequestStreamAroundAsync(cf.Position) end)
             Util.MoveTo(cf + Vector3.new(0, 4, 0))
             moved = true
         end
@@ -2570,7 +2570,7 @@ function Features.TrialStep()
     end
     if best then
         Features.TrialLog("from " .. cur.room.Name .. " to next " .. best.room.Name .. " (" .. math.floor(best.dist) .. " studs)")
-        pcall(function() LP:RequestStreamAroundAsync(best.pos) end)
+        task.spawn(pcall, function() LP:RequestStreamAroundAsync(best.pos) end)
         -- walk in over its back connector (the way a player enters), then to its floor
         local back = best.room:FindFirstChild("StageConnectorBack")
         if back and back:IsA("BasePart") then touchPart(back) task.wait(0.2) end
@@ -2733,7 +2733,7 @@ function Features.AdvanceRoom()
     local target = best or near
     if target then
         local c = roomBox(target).cf.Position
-        pcall(function() LP:RequestStreamAroundAsync(c) end)
+        task.spawn(pcall, function() LP:RequestStreamAroundAsync(c) end)
         Util.MoveTo(CFrame.new(c + Vector3.new(0, 5, 0)))
     end
 end
@@ -3024,7 +3024,7 @@ function Features.JoinTrial(name, id)
     end
     if cf then
         if not doorPos[id] then doorPos[id] = cf.Position saveDoors() end
-        pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
+        task.spawn(pcall, function() LP:RequestStreamAroundAsync(cf.Position) end)
         Util.MoveTo(cf + Vector3.new(0, 4, 0))
         trialJoinedAt = os.clock()
         Util.Notify("Waiting for " .. name .. " Time Trial")
@@ -3166,6 +3166,8 @@ end
 -- DUNGEON / GATE / TIME CHAMBER ------------------------------------------------------------
 -- inside a dungeon run? world value, or the game's dungeon timer / minimap being shown
 function Features.InDungeon()
+    -- DungeonFinish came (and no new JoinDungeon since): not in a run, whatever the GUI still shows
+    if Features.DungeonFinishedAt and os.clock() - Features.DungeonFinishedAt < 90 then return false end
     if Util.World() == "Dungeon" then
         local mg = Data.MainGui()
         local timer = mg and (mg:FindFirstChild("DungeonTimer") or mg:FindFirstChild("DungeonMinimap"))
@@ -3440,7 +3442,7 @@ function Features.DungeonFindHidden(worldName, skip)
     Features.DungeonLoadIdx = (Features.DungeonLoadIdx or 0) % #list + 1
     local cp = list[Features.DungeonLoadIdx].cp
     Combat.Log("dng", hidden .. " mobs alive but not loaded: back to an opened room to load them")
-    pcall(function() LP:RequestStreamAroundAsync(cp.Position) end)
+    task.spawn(pcall, function() LP:RequestStreamAroundAsync(cp.Position) end)
     Util.MoveTo(cp.CFrame * CFrame.new(0, 4, 0))
     task.wait(0.8)
     -- what was loaded can be attacked again right away
@@ -3670,7 +3672,7 @@ function Features.DungeonActivate()
     local room = Features.DungeonRoomOf(best.cp)
     Combat.Log("dng", "activate altar of room " .. (room and room.Name or "?")
         .. (goalName and bestC < math.huge and (" (" .. bestC .. " rooms from the " .. goalName .. ")") or ""))
-    pcall(function() LP:RequestStreamAroundAsync(best.cp.Position) end)
+    task.spawn(pcall, function() LP:RequestStreamAroundAsync(best.cp.Position) end)
     Util.MoveTo(best.cp.CFrame * CFrame.new(0, 5, 0))
     task.wait(1)
     if fireproximityprompt then pcall(fireproximityprompt, best.pp) else Prompt.Use(best.pp) end
@@ -3731,7 +3733,7 @@ function Features.DungeonOpenDoor(important)
     Combat.Log("dng", "open door " .. (room and room.Name or "?") .. "/" .. (part.Parent and part.Parent.Name or "?")
         .. " -> " .. tostring(target) .. " (" .. (({ "normal", "chest room", "boss room", "last treasure", "start" })[kind or 0] or "?")
         .. ", try " .. (t.n + 1) .. ")")
-    pcall(function() LP:RequestStreamAroundAsync(part.Position) end)
+    task.spawn(pcall, function() LP:RequestStreamAroundAsync(part.Position) end)
     Util.MoveTo(part.CFrame + Vector3.new(0, 5, 0))
     task.wait(1)
     if fireproximityprompt then pcall(fireproximityprompt, best) else Prompt.Use(best) end
@@ -3743,10 +3745,12 @@ function Features.DungeonOpenDoor(important)
 end
 
 function Features.FarmDungeon()
+    if not Features.InDungeon() then return false end
     if not Features.DungeonLayout then Features.LoadDungeonLayout() end
     dungeonStep = "inside"
     nextSummon = 0
-    local wanted = function() return On("AutoFarmDungeon") end
+    -- a fight ends as soon as the run is over (time up -> the game moves you to the Tower)
+    local wanted = function() return On("AutoFarmDungeon") and Features.InDungeon() end
     local worldName = Features.DungeonRoot() and Features.DungeonRoot().Name or Util.World()
     -- Weakest / Strongest only choose among the mobs of the room we're in (~300 studs):
     -- the strongest mob of the whole dungeon is the boss in the last, still-closed room.
@@ -3829,7 +3833,7 @@ function Features.FarmDungeon()
         end
         Combat.Log("dng", "nothing to do here: checking room " .. pick.Name .. " (" .. left .. " of " .. #rooms .. " not cleared yet)")
         local cf = pick:GetPivot()
-        pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
+        task.spawn(pcall, function() LP:RequestStreamAroundAsync(cf.Position) end)
         Util.MoveTo(cf + Vector3.new(0, 5, 0))
         task.wait(1)                                            -- Yuto: one room a second
         seen[pick] = os.clock()
@@ -5317,7 +5321,7 @@ function Features.Defense()
     end
     local part = spot:FindFirstChild("Trigger") or spot:FindFirstChildWhichIsA("BasePart", true)
     if part then
-        pcall(function() LP:RequestStreamAroundAsync(part.Position) end)
+        task.spawn(pcall, function() LP:RequestStreamAroundAsync(part.Position) end)
         Util.MoveTo(part.CFrame * CFrame.new(0, 3, 6))
         task.wait(0.4)
     end
@@ -7550,6 +7554,7 @@ Net.Listen("SendSubtleMessage", function(msg)
     end
 end)
 Net.Listen("JoinDungeon", function(data)
+    Features.DungeonFinishedAt = nil
     Features.DungeonBossAt = nil Features.DungeonIdleSince = nil Features.DungeonMap = nil
     Features.DungeonHasKey = false
     Features.DungeonOpened = {}
@@ -7659,6 +7664,9 @@ Net.Listen("InfinityTowerLose", function()
     Util.Reset("inf-join")
 end)
 Net.Listen("DungeonFinish", function()
+    -- the run is over: the game sends you to the Tower (Challenge Hub) - stop farming the old map
+    Features.DungeonFinishedAt = os.clock()
+    Combat.Log("dng", "dungeon finished (time up / done) - back in the lobby")
     Stats.DungeonRuns = Stats.DungeonRuns + 1
     if Features.DungeonLabel then Features.DungeonLabel:Set("Runs : " .. Stats.DungeonRuns) end
     Util.Reset("dungeon-join")
