@@ -7778,17 +7778,30 @@ loop(1, function()
 
 
     pcall(function()
-        -- soonest selected trial door
-        local best, bestName
+        -- every selected trial: when it opens (countdown + clock time), soonest first
+        local rows = {}
         for _, name in ipairs(Util.SetToList(F("Trials"))) do
             local id = CFG.TimeTrialIds[name]
             local secs = id and Features.DoorCountdown(id)
-            if secs and (not best or secs < best) then best, bestName = secs, name end
+            rows[#rows + 1] = { name = name, secs = secs }
         end
-        local txt = best and string.format("%s %d:%02d", bestName, math.floor(best / 60), math.floor(best % 60)) or "?"
+        table.sort(rows, function(a, b) return (a.secs or math.huge) < (b.secs or math.huge) end)
+        local lines = {}
+        for _, r in ipairs(rows) do
+            if r.secs and r.secs <= 0 then
+                lines[#lines + 1] = r.name .. "  :  OPEN now"
+            elseif r.secs then
+                lines[#lines + 1] = string.format("%s  :  in %d:%02d  (at %s)", r.name,
+                    math.floor(r.secs / 60), math.floor(r.secs % 60), os.date("%H:%M", os.time() + math.floor(r.secs)))
+            else
+                lines[#lines + 1] = r.name .. "  :  ? (door not loaded)"
+            end
+        end
+        local head = "Trial time" .. (#lines == 0 and " : pick trials first" or "")
         local left = Extras.TrialTimeLeft()
-        if left then txt = "in run, " .. left .. " left" end
-        Features.TrialTimer:Set("Trial time : " .. txt .. "   Floor : " .. Stats.TrialFloor
+        if left then head = "Trial time : in run, " .. left .. " left" end
+        Features.TrialTimer:Set(head .. "   Floor : " .. Stats.TrialFloor
+            .. (#lines > 0 and ("\n" .. table.concat(lines, "\n")) or "")
             .. (Features.TrialStatus and ("\n" .. Features.TrialStatus) or ""))
     end)
 end)
