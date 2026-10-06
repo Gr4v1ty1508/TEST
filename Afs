@@ -2494,6 +2494,7 @@ function Features.TrialLog(msg)
     local root = Util.Root()
     local line = os.date("%H:%M:%S") .. "  " .. msg .. (root and string.format("   @ (%.0f, %.0f, %.0f)", root.Position.X, root.Position.Y, root.Position.Z) or "")
     Features.TrialStatus = msg
+    pcall(Combat.Log, "trial", msg)      -- in combat_log.txt too (one file to send)
     if appendfile then
         pcall(function()
             if isfolder and makefolder and not isfolder(CFG.ConfigFolder) then
@@ -2593,21 +2594,30 @@ end
 -- is gone.) Parts are collected once and then kept up to date with DescendantAdded,
 -- so the huge map isn't searched every tick.
 local confirmParts, confirmWatch = {}, nil
-local function watchConfirmParts()
-    if confirmWatch then return end
+local function watchConfirmParts(rescan)
     local tower = Worlds:FindFirstChild("Tower")
     local map = tower and tower:FindFirstChild("Map")
     if not map then return end
+    -- the Tower's Map can be a NEW object after you've been in other worlds (dungeon, Time
+    -- Chamber ...): a watcher still on the old one never sees the new rooms' buttons and the
+    -- Rest Room was never pressed - so watch whatever Map is there now
+    if confirmWatch and Features.ConfirmMap == map and not rescan then return end
+    if Features.ConfirmMap ~= map then
+        if confirmWatch then pcall(function() confirmWatch:Disconnect() end) confirmWatch = nil end
+        table.clear(confirmParts)
+        Features.ConfirmMap = map
+    end
     for _, d in ipairs(map:GetDescendants()) do
         if d.Name == "ConfirmPart" then confirmParts[d] = true end
     end
+    if confirmWatch then return end
     confirmWatch = track(map.DescendantAdded:Connect(function(d)
         if d.Name == "ConfirmPart" then confirmParts[d] = true
         elseif d:IsA("ProximityPrompt") and d.Parent and d.Parent.Name == "ConfirmPart" then confirmParts[d.Parent] = true end
     end))
 end
 -- nearest ConfirmPart that has its prompt (= our cleared room)
-function Features.NextRoomButton(maxDist)
+function Features.NextRoomButton(maxDist, noRescan)
     watchConfirmParts()
     local root = Util.Root()
     if not root then return nil end
@@ -2624,12 +2634,26 @@ function Features.NextRoomButton(maxDist)
             end
         end
     end
+    -- nothing found: look through the map again now and then (a part the watcher missed)
+    if not best and not noRescan and Util.Every("confirm-rescan", 15) then
+        watchConfirmParts(true)
+        return Features.NextRoomButton(maxDist, true)
+    end
     return best, bestPrompt
 end
 Features.PressedPrompts = setmetatable({}, { __mode = "k" })   -- (a table field: the main chunk is near Luau's 200-local limit)
 function Features.PressNextRoom()
     local part, prompt = Features.NextRoomButton(350)
-    if not part then return false end
+    if not part then
+        -- say so when a Rest Room button is up but farther than 350 studs (wasn't pressed)
+        local far = Features.NextRoomButton(1500, true)
+        local root = Util.Root()
+        if far and root and Util.Every("restroom-far", 10) then
+            local pos = far:IsA("BasePart") and far.Position or far:GetPivot().Position
+            Features.TrialLog(string.format("RestRoom button %.0f studs away - too far, not pressed", (pos - root.Position).Magnitude))
+        end
+        return false
+    end
     local last = Features.PressedPrompts[prompt]
     if last and os.clock() - last < 15 then return false end   -- pressed already, the room is coming
     local cf = part:IsA("BasePart") and part.CFrame or part:GetPivot()
@@ -2661,7 +2685,10 @@ local visitedRooms = setmetatable({}, { __mode = "k" })
 local roomBorn = setmetatable({}, { __mode = "k" })
 local roomWatch = nil
 local function watchRooms(map)
-    if roomWatch or not map then return end
+    if not map then return end
+    if roomWatch and Features.RoomWatchMap == map then return end
+    if roomWatch then pcall(function() roomWatch:Disconnect() end) end
+    Features.RoomWatchMap = map
     roomWatch = track(map.ChildAdded:Connect(function(m)
         if m.Name == "BattleRoom" or m.Name == "RestRoom" then roomBorn[m] = os.clock() end
     end))
