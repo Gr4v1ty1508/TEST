@@ -4957,6 +4957,8 @@ function Features.PassiveReady(machine, who)
     if not On("PassiveGoMachine") then return true end
     -- can't get to that machine right now: don't ask for the character (others keep running)
     if not Features.MachineReachable(machine) then return false end
+    -- in a Time Trial / dungeon / gate ...: wait until it's over (don't pull the character out)
+    if Features.InActiveRun() then return false end
     Features.PassiveWants[who or "passive"] = { machine = machine, at = os.clock() }
     return Features.AtPassiveMachine(machine)
 end
@@ -6671,6 +6673,15 @@ function BP.Step()
         local ok, busy = pcall(BP.Run[cur])
         if ok and busy then return true end
     end
+    -- in a Time Trial / dungeon / gate that isn't this quest's: let that run finish first
+    -- (Open Star used to pull the character back to its star in the middle of a Time Trial)
+    local run = Features.InActiveRun()
+    if run then
+        if BP.task then Combat.Log("bp-wait", "Battle Pass waits: in a " .. run) end
+        BP.task = nil
+        table.clear(Forced)
+        return false
+    end
     local pending = BP.Pending()
     for _, q in ipairs(pending) do
         local run = BP.Run[q.kind]
@@ -6907,8 +6918,19 @@ end
 -- PRIORITY: every feature that moves the character is a task; the Brain runs them in the order
 -- set in Settings > Priority (1 = first). The first task that wants the character this tick gets
 -- it; a task that has nothing to do right now (trial not open, cooldown, ...) lets the next one go.
+-- in a run that must not be left halfway (Time Trial, dungeon, gate, raid, Infinity Tower):
+-- the features that only need to walk somewhere (passive machine, potion master, a star for
+-- the battle pass) wait until it's over instead of pulling the character out of it
+function Features.InActiveRun()
+    local w = Util.World()
+    if Extras.InTrialRun() then return "Time Trial" end
+    if Features.InDungeon() then return "dungeon" end
+    if w == "GatesMode" or w == "Raid" or w == "InfinityTower" then return w end
+    return nil
+end
 local function wantedRecently(who, secs)
     local w = Features.PassiveWants and Features.PassiveWants[who]
+    if w and Features.InActiveRun() then return nil end
     return w and os.clock() - w.at < (secs or 3) and On("PassiveGoMachine") and w or nil
 end
 Features.Tasks = {
@@ -6921,7 +6943,8 @@ Features.Tasks = {
         if w then Features.GoPassiveMachine(w.machine) return true end
     end },
     { id = "Mega", name = "Mega Boost Craft", run = function()
-        if Features.MegaWantAt and os.clock() - Features.MegaWantAt < 4 and On("AutoMegaCraft") and On("MegaGoMaster") then
+        if Features.MegaWantAt and os.clock() - Features.MegaWantAt < 4 and On("AutoMegaCraft") and On("MegaGoMaster")
+            and not Features.InActiveRun() then
             Features.GoPotionMaster() return true
         end
     end },
