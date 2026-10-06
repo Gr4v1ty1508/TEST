@@ -5081,9 +5081,23 @@ function Extras.TeamNames()
     return out
 end
 function Extras.EquipTeam(name)
-    if not name or name == "" or name == currentTeam then return end
+    if not name or name == "" then return end
+    if name == currentTeam then
+        -- pressed before - but a press while the game is moving you (summon / travel into a
+        -- dungeon) can be lost, so check every 5 s that the team's pets really are on and press
+        -- again if not (3 times at most, then leave it until the team to use changes)
+        if Extras.TeamCheck or not Util.Every("team-verify", 5) then return end
+        local on = Extras.TeamOn(name)
+        if on ~= false then Extras.TeamRepress = 0 return end
+        Extras.TeamRepress = (Extras.TeamRepress or 0) + 1
+        if Extras.TeamRepress > 3 then return end
+        Combat.Log("team", "team " .. name .. " isn't on (world " .. Util.World() .. ") - pressing it again")
+    else
+        Extras.TeamRepress = 0
+    end
     local btn = Extras.TeamButtons()[name]
     if btn and pressOnce(btn) then
+        if name ~= currentTeam then Combat.Log("team", "team -> " .. name .. " (world " .. Util.World() .. ")") end
         currentTeam = name
         -- checked once the pets stop changing (Extras.CheckTeam)
         Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = #Data.EquippedPets() }
@@ -5112,6 +5126,17 @@ function Extras.TeamUIDs(name)
         end
     end
     return nil, 0
+end
+-- is the team on right now? true / false, nil = can't tell (team not in the save)
+function Extras.TeamOn(name)
+    local set, teamN = Extras.TeamUIDs(name)
+    if not set then return nil end
+    local pets, wrong = Data.EquippedPets(), 0
+    for _, m in ipairs(pets) do
+        local uid = Data.PetUID(m)
+        if uid and not set[uid] then wrong = wrong + 1 end
+    end
+    return wrong == 0 and #pets >= teamN
 end
 -- did the team really go on? every equipped pet belongs to the team, and every pet of the team
 -- is on. A team is saved with its own Title, and "Mystical Oracle" gives +1 pet slot
