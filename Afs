@@ -6294,9 +6294,18 @@ function Features.GateStart(folder)
     if not Gate.inPos then local r = Util.Root() Gate.inPos = r and r.Position or Vector3.zero end
     return Gate.inPos
 end
+-- the pets come along with a travel only when the game's client is told about it: it fires
+-- Bindable "Teleported" after AttemptTravel (seen in the logs) - without it the pets stayed in
+-- the Time Chamber, never reached the gate's first enemy (pets on it 0/23, "no damage")
+function Features.PetsFollow()
+    local tp = Bindables:FindFirstChild("Teleported")
+    if tp and tp:IsA("BindableEvent") then pcall(tp.Fire, tp) end
+    for _, pet in ipairs(Data.EquippedPets()) do task.spawn(Net.Call, "PetTeleport", pet) end
+end
 local function joinGate()
     Net.Raw("JoinGatesMode", { Gate.id, n = 1 })
     Net.Raw("AttemptTravel", { "GatesMode", true, Gate.id, n = 3 })
+    task.delay(1, Features.PetsFollow)
 end
 -- how many gates of a rank you have: save Items "<Rank>RankGate" (the drops are named
 -- "CRankGate", "BRankGate" ...). nil = can't tell (then it's just tried)
@@ -6379,6 +6388,13 @@ function Features.GateRun(amount, wanted)
         local folder = Features.GateFolder()
         local start = Features.GateStart(folder)
         local root = Util.Root()
+        -- the first enemy MUST die before the next one can be hit: never skip it for "no damage"
+        -- (that sent us to enemy 2, 3, ... which can't be hit either)
+        for e in pairs(Combat.Skip) do
+            if e.Parent and (not folder or e:IsDescendantOf(folder)) and e:IsDescendantOf(Worlds:FindFirstChild("GatesMode") or workspace) then
+                Combat.Skip[e] = nil
+            end
+        end
         local best, bestD
         for _, e in ipairs(Combat.List("GatesMode")) do
             if not folder or e:IsDescendantOf(folder) then
@@ -6395,6 +6411,15 @@ function Features.GateRun(amount, wanted)
         if best then
             Combat.Log("gate", string.format("gate %s: room enemy %s, %.0f studs from the start", tostring(Gate.id), Combat.Name(best), bestD))
             Combat.Attack(best, wanted)
+            -- it took no damage (pets aren't here): bring the pets over and stay on it
+            if Combat.Skip[best] then
+                Combat.Skip[best] = nil
+                if Util.Every("gate-pets", 5) then
+                    Combat.Log("gate", "first enemy takes no damage - bringing the pets to the gate")
+                    Features.PetsFollow()
+                    pcall(Extras.PullPets)
+                end
+            end
         else
             Combat.Log("gate", "gate " .. tostring(Gate.id) .. (folder and "" or " (folder not found)") .. ": no enemy left to hit")
             -- anything skipped earlier ("no damage") gets another go
