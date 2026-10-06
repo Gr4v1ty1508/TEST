@@ -7100,6 +7100,13 @@ function Features.StatusText()
     pcall(function()
         if On("AutoGate") then L[#L + 1] = "Gate : " .. (Util.World() == "GatesMode" and "in a gate" or "waiting / summoning") end
     end)
+    pcall(function()
+        if On("AutoRejoin") and Features.RejoinLeft then
+            local left, busy = Features.RejoinLeft(), Features.RejoinBusy()
+            L[#L + 1] = "Rejoin : " .. (left > 0 and string.format("in %d:%02d", left // 3600, (left % 3600) // 60)
+                or ("due" .. (busy and (" - waiting, " .. busy) or "")))
+        end
+    end)
     L[#L + 1] = ""
     -- the Priority list, the running one marked
     L[#L + 1] = "Priority order :"
@@ -7586,6 +7593,46 @@ do
         if setclipboard then setclipboard(text) Util.Notify("Report copied") end
     end })
 
+    -- AUTO REJOIN: a fresh server every X hours (long-running servers / clients get laggy).
+    -- Waits until nothing that would be lost is running (dungeon, Time Trial, gate, raid ...),
+    -- then teleports to the same game (Roblox picks the server). With "Run the hub again"
+    -- the executor loads this hub from GitHub right after the rejoin (queue_on_teleport).
+    Features.HubUrl = "https://raw.githubusercontent.com/Gr4v1ty1508/TEST/main/Afs"
+    function Features.RejoinBusy()
+        local w, owner = Util.World(), Features.BrainOwner
+        if Features.InDungeon() then return "in a dungeon" end
+        if Extras.InTrialRun() then return "in a Time Trial" end
+        if w == "Dungeon" or w == "GatesMode" or w == "Raid" or w == "InfinityTower" then return "in " .. w end
+        for _, id in ipairs({ "Trial", "Dungeon", "Gate", "Infinity", "Raid", "Defense" }) do
+            if owner == id then return id .. " is running" end
+        end
+        return nil
+    end
+    function Features.RejoinNow(reason)
+        Combat.Log("rejoin", "rejoining (" .. tostring(reason) .. ") after " .. math.floor(time() / 60) .. " min in this server")
+        Util.Notify("Rejoining - " .. tostring(reason))
+        if On("RejoinReload") ~= false then
+            local q = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
+            if q then
+                pcall(q, 'repeat task.wait() until game:IsLoaded() task.wait(5) loadstring(game:HttpGet("' .. Features.HubUrl .. '"))()')
+            end
+        end
+        Features.RejoinTriedAt = os.clock()
+        pcall(function() game:GetService("TeleportService"):Teleport(game.PlaceId, LP) end)
+    end
+    function Features.RejoinLeft()
+        return math.max(0, math.floor((tonumber(F("RejoinHours")) or 6) * 3600 - time()))
+    end
+    local rj = TSettings:Card("Auto Rejoin", "Right")
+    rj:Paragraph({ Body = "Joins a new server every X hours (a server / game that runs for long gets laggy). "
+        .. "Waits until no dungeon, Time Trial, gate, raid or defense is running, so no run is lost. "
+        .. "The settings are saved per account, so everything goes on after the rejoin." })
+    rj:Toggle({ Title = "Auto Rejoin", Flag = "AutoRejoin" })
+    rj:Slider({ Title = "Every [hours]", Min = 1, Max = 24, Default = 6, Flag = "RejoinHours" })
+    rj:Toggle({ Title = "Run the hub again after rejoin", Default = true, Flag = "RejoinReload" })
+    Features.RejoinLabel = rj:Paragraph({ Body = "Next rejoin : -" })
+    rj:Button({ Title = "Rejoin Now", Callback = function() Features.RejoinNow("Rejoin Now pressed") end })
+
     local w = TSettings:Card("Webhook", "Right")
     w:Input({ Title = "Webhook URL", Placeholder = "https://discord.com/api/webhooks/...", Flag = "WebhookUrl" })
     w:Slider({ Title = "Send Every [minutes]", Min = 1, Max = 60, Default = 10, Flag = "WebhookEvery" })
@@ -8031,6 +8078,22 @@ loop(2, function()
     if On("BoostPetSpeed") and Util.Every("petspeed", 10) then Extras.BoostPetSpeed() end
     if Util.Every("maxhatch", 5) then pcall(Extras.MaxHatch) end
     if Extras.StatsLabel then Extras.StatsLabel:Set(Extras.StatsText()) end
+end)
+
+-- auto rejoin: every X hours, once nothing would be lost (see Features.RejoinBusy)
+loop(5, function()
+    if not Features.RejoinLeft then return end
+    local left = Features.RejoinLeft()
+    local busy = Features.RejoinBusy()
+    if Features.RejoinLabel then
+        Features.RejoinLabel:Set(not On("AutoRejoin") and "Auto Rejoin is off  (in this server " .. math.floor(time() / 60) .. " min)"
+            or left > 0 and string.format("Next rejoin in %d:%02d:%02d", left // 3600, (left % 3600) // 60, left % 60)
+            or ("Rejoin due" .. (busy and (" - waiting: " .. busy) or " - rejoining")))
+    end
+    if not On("AutoRejoin") or left > 0 or busy then return end
+    -- a teleport that didn't happen (Teleport Failed): try again after a minute
+    if Features.RejoinTriedAt and os.clock() - Features.RejoinTriedAt < 60 then return end
+    Features.RejoinNow("every " .. tostring(F("RejoinHours") or 6) .. " h")
 end)
 
 local lastWebhook = os.clock()
