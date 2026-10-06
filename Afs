@@ -5148,9 +5148,13 @@ function Extras.TeamFor(target)
     local world = Util.World()
     local slot = "TeamFarm"
     if world == "Raid" then slot = "TeamRaid"
-    elseif world == "Dungeon" or world == "InfinityTower" or world == "Tower" or world == "GatesMode" then slot = "TeamDungeon"
+    elseif world == "Dungeon" or Features.InDungeon() then slot = "TeamDungeon"
+    elseif world == "Tower" or world == "InfinityTower" then slot = "TeamTrial"
+    elseif world == "GatesMode" then slot = "TeamGate"
     elseif world == "TimeChamber" then slot = "TeamChamber" end
     local name = F(slot)
+    -- Time Trial / Gate used to share the Dungeon slot: empty = the Dungeon team, as before
+    if (name == nil or name == "") and (slot == "TeamTrial" or slot == "TeamGate") then name = F("TeamDungeon") end
     if target and string.find(string.lower(target.Name), "chest", 1, true) and F("TeamChest") then name = F("TeamChest") end
     Extras.EquipTeam(name)
 end
@@ -7524,13 +7528,16 @@ end
 do
     -- Main: teams per activity
     local t = TPrio:Card("Auto Equip Teams", "Right")
-    t:Paragraph({ Body = "Uses the teams you saved in the game's Pets menu. Leave a slot empty to not switch for it." })
+    t:Paragraph({ Body = "Uses the teams you saved in the game's Pets menu (a team also puts on its saved artifacts). "
+        .. "Leave a slot empty to not switch for it - Time Trial and Gate left empty use the Dungeon team." })
     local names = Extras.TeamNames()
     local drops = {
         t:Dropdown({ Title = "Farm Team", Items = names, Flag = "TeamFarm" }),
         t:Dropdown({ Title = "Chest Team", Items = names, Flag = "TeamChest" }),
         t:Dropdown({ Title = "Raid Team", Items = names, Flag = "TeamRaid" }),
-        t:Dropdown({ Title = "Dungeon / Tower / Gate Team", Items = names, Flag = "TeamDungeon" }),
+        t:Dropdown({ Title = "Dungeon Team", Items = names, Flag = "TeamDungeon" }),
+        t:Dropdown({ Title = "Time Trial / Infinity Tower Team", Items = names, Flag = "TeamTrial" }),
+        t:Dropdown({ Title = "Gate Team", Items = names, Flag = "TeamGate" }),
         t:Dropdown({ Title = "Time Chamber Team", Items = names, Flag = "TeamChamber" }),
     }
     local function refreshTeams()
