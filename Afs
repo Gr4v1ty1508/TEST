@@ -6587,9 +6587,11 @@ function BP.StatusText()
     end
     local pick = F("BPQuests") or {}
     for _, q in ipairs(BP.quests) do
-        local mark = q.done and "[done]" or (q.kind and pick[q.kind]) and (skipped(q) and "[skip]" or "[ on ]") or "[ -- ]"
+        local picked = q.kind and pick[q.kind]
+        local mark = q.done and "[done]" or picked and (skipped(q) and "[skip]" or "[ on ]") or "[off]"
         lines[#lines + 1] = string.format("%s %s  %s/%s  Repeats %d/%d%s", mark, q.name, short(q.prog), short(q.goal),
-            q.reps or 0, q.max or BP.Repeats, q.gone and "  (finished - back at the reset)" or (q.kind and "" or "  (not supported)"))
+            q.reps or 0, q.max or BP.Repeats, q.gone and "  (finished - back at the reset)"
+                or not q.kind and "  (not supported)" or (not q.done and not picked) and "  (not ticked in Select Quests)" or "")
     end
     return table.concat(lines, "\n")
 end
