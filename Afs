@@ -4527,7 +4527,7 @@ function Features.EventQuests()
         return
     end
     -- the machine + currency that moves the most unfinished quests
-    local best, bestN
+    local best, bestN, unreachable
     for _, c in ipairs(EQ_CHOICES) do
         -- shards are only spent while their own "Spend ... Shards" quest is still open
         local shardQuest = c[1] == "Normal" and "WorldShards" or "EventShards"
@@ -4537,13 +4537,19 @@ function Features.EventQuests()
         local cur = Features.EQCurrency(c[1], c[2])
         local have = cur and Features.EQHave(cur)
         if have and have < #pets then n = -1 end
+        -- its machine can't be reached right now (see GoPassiveMachine): use another choice
+        local mach = c[1] == "Event" and (F("EQEventMachine") or "Frieren2026") or c[1]
+        if On("PassiveGoMachine") and not Features.MachineReachable(mach) then n = -1 unreachable = mach end
         if n == 0 then
             for key in pairs(open) do if EQ_MOVES[key] and EQ_MOVES[key](c[1], c[2]) then n = n + 1 end end
         end
         if n > 0 and (not bestN or n > bestN) then best, bestN = c, n end
     end
     if not best then
-        if Util.Every("eq-broke", 60) then Util.Notify("Lunar vs Solar: not enough tokens / shards for the open quests") end
+        if Util.Every("eq-broke", 60) then
+            Util.Notify(unreachable and ("Lunar vs Solar: the " .. tostring(unreachable) .. " machine can't be reached right now - doing other things, trying again in a few minutes")
+                or "Lunar vs Solar: not enough tokens / shards for the open quests")
+        end
         task.wait(3)
         return
     end
@@ -4805,10 +4811,33 @@ function Features.AtPassiveMachine(machine)
     return cf ~= nil and root ~= nil and (root.Position - cf.Position).Magnitude < 25
 end
 -- called by the Brain (it owns the character): travel to the machine's world, then stand at it
+-- a machine whose world can't be reached (travel refused 3 times in a row - event world closed,
+-- locked, or the game won't let you leave where you are): skipped for 10 min. Before, Lunar
+-- (priority 1) kept trying every 6 s forever and held the character - nothing else ran for hours.
+Features.MachineFail = {}
+function Features.MachineReachable(machine)
+    local f = Features.MachineFail[Features.PassiveMachineWorld(machine)]
+    return not (f and f.untilT and os.clock() < f.untilT)
+end
 function Features.GoPassiveMachine(machine)
     local world = Features.PassiveMachineWorld(machine)
     if Util.World() ~= world then
-        if Util.Every("passive-travel", 6) then Travel.To(world) task.wait(1.5) end
+        if Util.Every("passive-travel", 6) then
+            Travel.To(world)
+            task.wait(1.5)
+            if Util.World() ~= world then
+                local f = Features.MachineFail[world] or { n = 0 }
+                f.n = f.n + 1
+                if f.n >= 3 then
+                    f.n, f.untilT = 0, os.clock() + 600
+                    Util.Notify("Passive machine in " .. Data.WorldDisplay(world) .. ": can't get there (teleport failed 3x) - skipped for 10 min")
+                    Combat.Log("passive", "machine world " .. world .. " unreachable (travel failed 3x) - skipped for 10 min")
+                end
+                Features.MachineFail[world] = f
+            else
+                Features.MachineFail[world] = nil
+            end
+        end
         return
     end
     local cf, root = Features.PassiveMachineCFrame(world), Util.Root()
@@ -4823,6 +4852,8 @@ end
 Features.PassiveWants = {}
 function Features.PassiveReady(machine, who)
     if not On("PassiveGoMachine") then return true end
+    -- can't get to that machine right now: don't ask for the character (others keep running)
+    if not Features.MachineReachable(machine) then return false end
     Features.PassiveWants[who or "passive"] = { machine = machine, at = os.clock() }
     return Features.AtPassiveMachine(machine)
 end
