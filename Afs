@@ -5259,16 +5259,20 @@ function Extras.CheckTeam()
 end
 -- which saved team fits what we're doing right now
 function Extras.TeamFor(target)
-    local world = Util.World()
+    local world, owner = Util.World(), Features.BrainOwner
     local slot = "TeamFarm"
     if world == "Raid" then slot = "TeamRaid"
-    elseif world == "Dungeon" or Features.InDungeon() then slot = "TeamDungeon"
-    elseif world == "Tower" or world == "InfinityTower" then slot = "TeamTrial"
+    elseif world == "Dungeon" then slot = "TeamDungeon"
+    elseif world == "InfinityTower" then slot = "TeamTrial"
+    elseif world == "Tower" then
+        -- the Tower is ALSO the lobby (Challenge Hub) of the dungeon: the world alone can't
+        -- tell a Time Trial from "just came back from a dungeon" - so look at what's going on
+        if Extras.InTrialRun() or owner == "Trial" or owner == "Infinity" then slot = "TeamTrial"
+        elseif owner == "Dungeon" or Features.InDungeon() then slot = "TeamDungeon" end
     elseif world == "GatesMode" then slot = "TeamGate"
-    elseif world == "TimeChamber" then slot = "TeamChamber" end
+    elseif world == "TimeChamber" then slot = "TeamChamber"
+    elseif Features.InDungeon() then slot = "TeamDungeon" end   -- dungeon under another world name
     local name = F(slot)
-    -- Time Trial / Gate used to share the Dungeon slot: empty = the Dungeon team, as before
-    if (name == nil or name == "") and (slot == "TeamTrial" or slot == "TeamGate") then name = F("TeamDungeon") end
     if target and string.find(string.lower(target.Name), "chest", 1, true) and F("TeamChest") then name = F("TeamChest") end
     Extras.EquipTeam(name)
 end
@@ -7637,7 +7641,7 @@ do
     -- Main: teams per activity
     local t = TPrio:Card("Auto Equip Teams", "Right")
     t:Paragraph({ Body = "Uses the teams you saved in the game's Pets menu (a team also puts on its saved artifacts). "
-        .. "Leave a slot empty to not switch for it - Time Trial and Gate left empty use the Dungeon team." })
+        .. "Leave a slot empty to not switch for it. Dungeon, Time Trial / Infinity Tower and Gate each use their own slot." })
     local names = Extras.TeamNames()
     local drops = {
         t:Dropdown({ Title = "Farm Team", Items = names, Flag = "TeamFarm" }),
