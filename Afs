@@ -6397,7 +6397,7 @@ end
 local Gate = { id = nil, createdAt = 0, started = false, overAt = 0, count = 0 }
 Features.GateState = Gate
 Net.Listen("GateCreated", function(id)
-    Gate.id, Gate.createdAt, Gate.started, Gate.joinPos = tostring(id), os.clock(), false, nil
+    Gate.id, Gate.createdAt, Gate.started, Gate.joinPos, Gate.outSince = tostring(id), os.clock(), false, nil, nil
     Gate.count = Gate.count + 1
 end)
 Net.Listen("GateStarted", function()
@@ -6501,20 +6501,35 @@ function Features.GateRun(amount, wanted)
         return true
     end
     if Util.World() == "GatesMode" then
-        -- the world says GatesMode but the character is still far from our gate (the move
-        -- didn't happen): go in first - don't start it / hit from outside
+        -- the world says GatesMode but the character may still be in the Time Chamber (the
+        -- move didn't happen - e.g. the next gate was joined while the game was still sending
+        -- us back from the last one). Only once we're really IN (our gate's folder is there and
+        -- we're near its start) is the gate started (SkipGateWait) and fought.
         do
             local folder0 = Features.GateFolder()
             local root0 = Util.Root()
             local sp = folder0 and folder0:FindFirstChild("Spawns")
             sp = sp and (sp:FindFirstChild("Spawn") or sp:FindFirstChildWhichIsA("BasePart"))
-            local target = (sp and sp:IsA("BasePart") and sp.Position) or Gate.joinPos
-            if root0 and target and (root0.Position - target).Magnitude > 2500 then
-                Combat.Log("gate", "world is GatesMode but the character isn't in the gate - moving in")
-                if Gate.id and Util.Every("gate-rejoin", 4) then joinGate() else Util.MoveTo(CFrame.new(target + Vector3.new(0, 4, 0))) end
-                task.wait(0.5)
-                return true
+            if sp and sp:IsA("BasePart") then Features.GateLastSpawn = sp.Position end
+            local target = (sp and sp:IsA("BasePart") and sp.Position) or Gate.joinPos or Features.GateLastSpawn
+            local dist = root0 and target and (root0.Position - target).Magnitude
+            local inside = folder0 ~= nil and dist ~= nil and dist <= 2500
+            if not inside then
+                Gate.outSince = Gate.outSince or os.clock()
+                -- (after 25 s near the gate without its folder: carry on as before, never stuck)
+                local giveUp = os.clock() - Gate.outSince > 25 and dist ~= nil and dist <= 2500
+                if not giveUp then
+                    Combat.Log("gate", string.format("world is GatesMode but the character isn't in gate %s yet (%s, %s) - going in, not starting it",
+                        tostring(Gate.id), folder0 and "gate found" or "gate not loaded", dist and string.format("%.0f studs away", dist) or "position unknown"))
+                    Gate.inAt = nil
+                    if target then task.spawn(pcall, function() LP:RequestStreamAroundAsync(target) end) end
+                    if Gate.id and Util.Every("gate-rejoin", 4) then joinGate()
+                    elseif target and root0 and dist > 2500 then Util.MoveTo(CFrame.new(target + Vector3.new(0, 4, 0))) end
+                    task.wait(0.5)
+                    return true
+                end
             end
+            Gate.outSince = nil
         end
         Gate.inAt = Gate.inAt or os.clock()
         -- the gate only takes damage after it started: hitting it before that made every enemy
@@ -6585,8 +6600,8 @@ function Features.GateRun(amount, wanted)
         return true
     end
     Gate.inAt, Gate.cleared, Gate.inPos = nil, nil, nil
-    -- just over: the game is sending us back
-    if os.clock() - Gate.overAt < 1.5 then return true end
+    -- just over: the game is sending us back - let it finish before the next gate
+    if os.clock() - Gate.overAt < 5 then return true end
     -- ours was made but we're not in yet
     if Gate.id and os.clock() - Gate.createdAt < 30 then
         if Util.Every("gate-join", 3) then joinGate() end
@@ -6602,7 +6617,8 @@ function Features.GateRun(amount, wanted)
         return false
     end
     if not Util.Every("gate-summon", 2) then return true end
-    if Util.World() ~= "TimeChamber" then Travel.To("TimeChamber", true) end
+    -- summon from the Time Chamber only (as Yuto Hub does), once we're really there
+    if Util.World() ~= "TimeChamber" then Travel.To("TimeChamber", true) return true end
     -- hardest rank that still makes a gate
     for _, rank in ipairs(ranks) do
         Gate.id = nil
