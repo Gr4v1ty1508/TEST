@@ -5820,6 +5820,7 @@ BP.Kinds = {
     { "Complete Dungeon", { "dungeon" } },
     { "Complete Portal",  { "portal", "gate" } },
     { "Open Divine",      { "divine" } },
+    { "Roll Passive",     { "passive", "reroll" }, optional = true },
     { "Open Star",        { "star", "egg", "open" } },
 }
 function BP.KindNames()
@@ -6087,7 +6088,8 @@ function BP.Read(force)
     -- the battle pass always has its 4 quests; one the server hasn't counted yet is at 0
     if #list > 0 then
         for _, k in ipairs(BP.Kinds) do
-            if not byKind[k[1]] then list[#list + 1] = { name = k[1], prog = 0, reps = 0, source = "default" } end
+            -- "Roll Passive" isn't in every day's set: only when the window / server shows it
+            if not byKind[k[1]] and not k.optional then list[#list + 1] = { name = k[1], prog = 0, reps = 0, source = "default" } end
         end
     end
     if BP.serverReset then
@@ -6443,6 +6445,26 @@ BP.Run = {
     end,
     ["Open Star"] = function() force() return BP.Hatch() end,
     ["Open Divine"] = function() force() return BP.Hatch() end,
+    -- rerolls with the pets picked in Auto Lunar (same slot / delay), Normal machine + Passive
+    -- Tokens (each pet = 1 roll); stands at the machine first when "go to the machine" is on
+    ["Roll Passive"] = function()
+        force()
+        if not Features.PicksReady then return true end      -- Lunar's picks are being matched
+        local pets = Util.SetToList(F("EQPets"))
+        if #pets == 0 and type(F("EQPet")) == "string" and F("EQPet") ~= "" then pets = { F("EQPet") } end
+        if #pets == 0 then note("rollpets", "Roll Passive uses Auto Lunar's pets - pick them there first") return false end
+        local have = Features.EQHave and Features.EQHave("PassiveToken")
+        if have and have < #pets then note("rolltok", "not enough Passive Tokens for Roll Passive") return false end
+        if On("PassiveGoMachine") and not Features.AtPassiveMachine("Normal") then
+            if not Features.MachineReachable("Normal") then return false end
+            Features.GoPassiveMachine("Normal")
+            return true
+        end
+        local slot = tonumber(F("EQSlot") or "1") or 1
+        for _, label in ipairs(pets) do Net.Call("RollPassive", Data.PetId(label), "Normal", slot, false) end
+        task.wait(F("EQDelay") or 0.5)
+        return true
+    end,
 }
 
 -- in the middle of a run of this kind: finish it before switching quests
@@ -6856,7 +6878,8 @@ do
     local c = TMain:Card("Auto Battle Pass", "Left")
     c:Paragraph({ Body = "Does the battle pass quests you pick until their repeats (5 a day) are used, then goes back to the rest. "
         .. "New quests come with the daily reset and start by themselves.\n"
-        .. "Dungeon uses Auto Dungeon's settings. Portal = a Gate run with Auto Gate's picked levels, hardest first. Its place in the order: Priority / Team." })
+        .. "Dungeon uses Auto Dungeon's settings. Portal = a Gate run with Auto Gate's picked levels, hardest first. "
+        .. "Roll Passive rerolls the pets picked in Auto Lunar (Normal machine, Passive Tokens). Its place in the order: Priority / Team." })
     local all = {}
     for _, k in ipairs(BP.KindNames()) do all[k] = true end
     c:Dropdown({ Title = "Select Quests", Items = BP.KindNames(), Multi = true, Default = all, Flag = "BPQuests" })
