@@ -1352,6 +1352,9 @@ function Travel.To(world, force)
         if Travel.LoadEnemies then task.wait(0.6) end
     end
     if not arrived and not moved then Util.Notify("Travel to " .. Data.WorldDisplay(world) .. " failed (locked?)") end
+    if not arrived then
+        pcall(function() Combat.Log("travel", "travel to " .. world .. " refused (from " .. tostring(Util.World()) .. ")") end)
+    end
     return arrived or moved
 end
 
@@ -7502,6 +7505,16 @@ Net.Listen("SendSubtleMessage", function(msg)
     end
 end)
 
+-- Roblox's own "Teleport Failed" (a teleport to another server / place didn't work): written to
+-- combat_log.txt with the reason, so we can see what the game tried to do
+pcall(function()
+    local TS = game:GetService("TeleportService")
+    track(TS.TeleportInitFailed:Connect(function(player, result, msg, placeId)
+        if player ~= LP then return end
+        Combat.Log("teleport", string.format("Roblox teleport FAILED: %s - %s (place %s, world %s)",
+            tostring(result), tostring(msg), tostring(placeId), tostring(Util.World())))
+    end))
+end)
 -- "<you> just summoned a private / public Dungeon!" -> check it's what Friend Only asked for
 Net.Listen("SendSubtleMessage", function(msg)
     local sent = Features.DungeonSent
