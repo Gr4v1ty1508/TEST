@@ -6301,47 +6301,31 @@ function BP.Hatch()
     -- Max Open, as Yuto Hub does it (recorded): in the star's world, AttemptMultiOpen("<StarName>")
     -- about once a second; the server answers (IN AttemptMultiOpen) every ~2 s and each answer
     -- moved the Open quest by ~5900. The game's own button also fires Bindable SetTargetEgg(star).
-    -- No answer for 10 s (no Max Open) -> single opens (OpenEgg) for 5 min.
-    -- coming back to Open Star after doing something else (another quest, a dungeon, ...):
-    -- start the 10 s answer wait fresh and pick the star again. (The old wait kept running
-    -- through the break, so every comeback fell to one-by-one opens for 5 min.)
+    -- Max Open ONLY (asked for): AttemptMultiOpen("<StarName>") about once a second, never
+    -- one-by-one opens. No answer for 10 s -> pick the star again (SetTargetEgg) and go on.
     if not BP.multiCalledAt or os.clock() - BP.multiCalledAt > 5 then
-        BP.multiSince, BP.multiTarget = nil, nil
-        if BP.noMulti and os.clock() < BP.noMulti and os.clock() - (BP.noMultiSetAt or 0) > 60 then BP.noMulti = nil end
+        BP.multiSince, BP.multiTarget = os.clock(), nil
     end
     BP.multiCalledAt = os.clock()
-    if not (BP.noMulti and os.clock() < BP.noMulti) then
-        BP.multiSince = BP.multiSince or os.clock()
-        if os.clock() - math.max(BP.multiAnswerAt or 0, BP.multiSince) > 10 then
-            BP.noMulti, BP.multiSince, BP.noMultiSetAt = os.clock() + 300, nil, os.clock()
-            note("multi", "no answer to Max Open - opening one by one for 5 min")
-            Combat.Log("bp-open", "Open Star: no answer to Max Open (AttemptMultiOpen " .. starName .. ") for 10 s - one by one for 5 min")
-        elseif os.clock() - (BP.multiSentAt or 0) >= 1 then
-            BP.multiSentAt = os.clock()
-            if BP.multiTarget ~= starName then
-                Combat.Log("bp-open", "Open Star: Max Open on " .. starName .. " (" .. worldName .. ")")
-                BP.multiTarget = starName
-                local ste = Bindables:FindFirstChild("SetTargetEgg")
-                if ste and ste:IsA("BindableEvent") then pcall(ste.Fire, ste, starName) end
-            end
-            Net.Raw("AttemptMultiOpen", { starName, n = 1 })
-        end
-        return true
+    BP.multiSince = BP.multiSince or os.clock()
+    if os.clock() - math.max(BP.multiAnswerAt or 0, BP.multiSince) > 10 then
+        BP.multiSince, BP.multiTarget = os.clock(), nil
+        note("multi", "no answer to Max Open for 10 s - picking the star again (check yen / Max Open unlocked)")
+        Combat.Log("bp-open", "Open Star: no answer to Max Open (AttemptMultiOpen " .. starName .. ") for 10 s - trying again")
     end
-    BP.multiSince = nil
-    if Util.Every("bp-hatch", F("HatchDelay") or 1) then
-        local amount = BP.MaxOpen()
-        if amount <= 0 then
-            local _, used, size = BP.BagSpace()
-            note("bag", string.format("pet bag full (%s/%s) - Open Star / Divine waits for room", tostring(used), tostring(size)))
-            BP.bagFullAt = os.clock()
-            return false
+    if os.clock() - (BP.multiSentAt or 0) >= 1 then
+        BP.multiSentAt = os.clock()
+        if BP.multiTarget ~= starName then
+            Combat.Log("bp-open", "Open Star: Max Open on " .. starName .. " (" .. worldName .. ")")
+            BP.multiTarget = starName
+            local ste = Bindables:FindFirstChild("SetTargetEgg")
+            if ste and ste:IsA("BindableEvent") then pcall(ste.Fire, ste, starName) end
         end
-        Net.Call("OpenEgg", star or starName, amount)
+        Net.Raw("AttemptMultiOpen", { starName, n = 1 })
     end
     return true
 end
--- (fallback single opens) as many as still fit in your pet bag. Free space is read from:
+-- (no longer used by Open Star - Max Open only) as many as still fit in your pet bag. Free space is read from:
 --   1. the game's Pets window "123/500" (pets / bag size)
 --   2. the save: pets in it vs. a bag-size number (a key named like Storage / MaxPets / Slots)
 -- If neither can be read: the number on the game's Open button, else the most you opened by
