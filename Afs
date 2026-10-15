@@ -1290,9 +1290,8 @@ function Combat.Attack(e, wanted, opts)
     -- did): its pet script is broken - restart it (see Features.RestartPetHandler)
     if stats.direct and stats.direct > 0 and stats.maxOn > 0 then
         Combat.PetStreak = (Combat.PetStreak or 0) + 1
-        if Combat.PetStreak >= 3 and Combat.RestartPetHandler and not (Combat.TeamBusy and Combat.TeamBusy()) then
-            task.spawn(Combat.RestartPetHandler, "the game's send-pets did nothing for 3 enemies in a row")
-        end
+        -- (no automatic restart of the game's pet script any more: it made things worse, see
+        -- Features.RestartPetHandler. The streak only makes the hub send the pets at once.)
     elseif stats.sends > 0 and stats.maxOn > 0 then
         Combat.PetStreak, Combat.PetRestarts = 0, 0
     end
@@ -2756,17 +2755,20 @@ function Features.PressNextRoom()
     local tries = rp.tries
     local cf = part:IsA("BasePart") and part.CFrame or part:GetPivot()
     local useKey = tries % 2 == 0 or not fireproximityprompt
+    -- the prompt's HoldDuration is NOT changed any more: setting it to 0 on our side (done since
+    -- 7 Oct) made the server ignore the press - the rest room then took ~3 min (the game's own
+    -- time-out) instead of ~10 s. The E key is held for the full hold time.
+    local hold = tonumber(prompt.HoldDuration) or 0
     Features.TrialLog(string.format("RestRoom: pressing \"%s\" (try %d, %s, hold %.1f s)", tostring(prompt.ActionText), tries,
-        useKey and "E key" or "fireproximityprompt", prompt.HoldDuration))
+        useKey and "E key" or "fireproximityprompt", hold))
     Util.MoveTo(cf + Vector3.new(0, 3, 0))
     task.wait(0.4)
     if not useKey then
-        pcall(function() prompt.HoldDuration = 0 end)
         pcall(fireproximityprompt, prompt)
     else
         pcall(function()
             VIM:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-            task.wait(math.max(prompt.HoldDuration, 0.1) + 0.2)
+            task.wait(hold + 0.4)
             VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
         end)
     end
@@ -5310,6 +5312,7 @@ function Extras.EquipTeam(name)
     end
 end
 function Extras.ResetTeam() currentTeam = nil Extras.TeamCheck = nil end
+function Extras.CurrentTeam() return currentTeam end
 -- the team's UIDs from the save (GameData.PetTeams[i] = { Name, UIDs = { ... } })
 -- (only pets you still own count: a fused / deleted pet can't go on)
 function Extras.TeamUIDs(name)
@@ -5369,6 +5372,7 @@ function Extras.CheckTeam()
         return false
     end
     if Features.WorldChangedAt and os.clock() - Features.WorldChangedAt < 4 then return false end
+    if Util.World() == "TimeChamber" then Extras.TeamCheck = nil return false end   -- never press in there
     c.tries, c.at = c.tries + 1, os.clock()
     local btn = Extras.TeamButtons()[c.name]
     if btn then pressOnce(btn) Extras.TeamPressedAt = os.clock() end
@@ -5387,7 +5391,12 @@ function Extras.TeamFor(target)
         if Extras.InTrialRun() or owner == "Trial" or owner == "Infinity" then slot = "TeamTrial"
         elseif owner == "Dungeon" or Features.InDungeon() then slot = "TeamDungeon" end
     elseif world == "GatesMode" then slot = "TeamGate"
-    elseif world == "TimeChamber" then slot = "TeamChamber"
+    elseif world == "TimeChamber" then
+        -- never press a team INSIDE the Time Chamber: the game takes the pets in there, and a
+        -- swap at the same time broke its pet script every time (log: "Data is not a valid
+        -- member of Model" the same second as "team -> Passive (world TimeChamber)"). The Time
+        -- Chamber team goes on just before the hub travels there (see Travel.To below).
+        return
     elseif Features.InDungeon() then slot = "TeamDungeon" end   -- dungeon under another world name
     local name = F(slot)
     if target and string.find(string.lower(target.Name), "chest", 1, true) and F("TeamChest") then name = F("TeamChest") end
@@ -6020,6 +6029,14 @@ end
 -- tell the game's client we teleported (it reloads the area / stops rubber banding)
 local baseTravel = Travel.To
 function Travel.To(world, force)
+    -- going to the Time Chamber: put its team on HERE, before leaving (see Extras.TeamFor)
+    if world == "TimeChamber" and Util.World() ~= "TimeChamber" and On("AutoTeams") then
+        local name = F("TeamChamber")
+        if type(name) == "string" and name ~= "" and Extras.CurrentTeam() ~= name then
+            Extras.EquipTeam(name)
+            if Extras.CurrentTeam() == name then task.wait(1.5) end   -- let the pets settle first
+        end
+    end
     local r = baseTravel(world, force)
     local tp = Bindables:FindFirstChild("Teleported")
     if tp and tp:IsA("BindableEvent") then pcall(tp.Fire, tp) end
@@ -6625,8 +6642,10 @@ pcall(function()
     track(game:GetService("ScriptContext").Error:Connect(function(msg, trace, scr)
         local name = (typeof(scr) == "Instance" and scr.Name) or ""
         if name == "LocalPetHandler" or string.find(tostring(trace or ""), "LocalPetHandler", 1, true) then
+            -- (logged only: restarting it while pets were changing made it error more -
+            -- "TargetPart is not a valid member", "AnimationController already has a wrapper";
+            -- the hub sends the pets itself when the game's send doesn't work)
             Combat.Log("pets", "the game's pet script errored: " .. tostring(msg))
-            task.delay(3, function() pcall(Features.RestartPetHandler, "it errored") end)
         end
     end))
 end)
