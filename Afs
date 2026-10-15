@@ -1156,7 +1156,20 @@ function Combat.Attack(e, wanted, opts)
             end
             if os.clock() - hpAt > 8 then
                 local on, total = Combat.PetsOn(e, pets)
-                Combat.Log("atk", "no damage on " .. e.Name .. " for 8 s (pets on it " .. on .. "/" .. total .. ") -> skipped 30 s")
+                -- what the pets are doing instead (busy with another enemy? idle? far away?)
+                local busy, idle, far, other = 0, 0, 0, nil
+                local myPos = Combat.Pos(e)
+                for _, p in ipairs(pets) do
+                    local d = p:FindFirstChild("Data")
+                    local a = d and d:FindFirstChild("Attacking")
+                    local av = a and a.Value
+                    if av and not (av == e or av:IsDescendantOf(e)) then busy, other = busy + 1, av
+                    elseif not av then idle = idle + 1 end
+                    local ok, dist = pcall(function() return (p:GetPivot().Position - myPos).Magnitude end)
+                    if ok and dist > 150 then far = far + 1 end
+                end
+                Combat.Log("atk", string.format("no damage on %s for 8 s (pets on it %d/%d | on another enemy %d%s | idle %d | far %d | direct sends %d | world %s) -> skipped 30 s",
+                    e.Name, on, total, busy, other and (" (" .. other.Name .. ")") or "", idle, far, stats.direct or 0, Util.World()))
                 Combat.Skip[e] = os.clock() + 30
                 break
             end
@@ -1207,6 +1220,16 @@ function Combat.Attack(e, wanted, opts)
                 sentAt = os.clock()
                 stats.sends = stats.sends + 1
                 pcall(SendPet.Fire, SendPet, e, true, true)
+                -- the game's click didn't get any pet onto it (seen: pets idle next to us, 0/23,
+                -- in every mode): send each pet ourselves the way the game's client does it -
+                -- Remote SendPet:FireServer(pet, enemy, 1..n) (recorded with the remote spy)
+                if on == 0 and stats.sends >= 3 and os.clock() - (stats.directAt or 0) > 1 then
+                    stats.directAt = os.clock()
+                    stats.direct = (stats.direct or 0) + 1
+                    for i, p in ipairs(pets) do
+                        if p.Parent then Net.Raw("SendPet", { p, e, i, n = 3 }) end
+                    end
+                end
             end
             -- pets still far away a moment after we arrived: bring them over (every 2 s at most)
             if on < total and os.clock() - pulledAt > 2 and (not movedAt or os.clock() - movedAt > 0.4) then
@@ -1225,10 +1248,10 @@ function Combat.Attack(e, wanted, opts)
     end
     -- one line per enemy in combat_log.txt: where the time went
     pcall(function()
-        Combat.Log("done", string.format("%s [%s] %s in %.1f s | first hit %s | pets on it max %d/%d | sends %d | pulls %d | tps %d | hp %.3g -> %.3g",
+        Combat.Log("done", string.format("%s [%s] %s in %.1f s | first hit %s | pets on it max %d/%d | sends %d | direct %d | pulls %d | tps %d | hp %.3g -> %.3g",
             e.Name, Combat.Name(e), Combat.Alive(e) and (tag and "visited (pets on it)" or "LEFT") or "killed", os.clock() - t0,
             stats.firstHit and string.format("%.1f s", stats.firstHit) or "never", stats.maxOn, #pets,
-            stats.sends, stats.pulls, stats.tps, hpStart, Combat.HP(e)))
+            stats.sends, stats.direct or 0, stats.pulls, stats.tps, hpStart, Combat.HP(e)))
     end)
 end
 
@@ -5207,7 +5230,8 @@ function Extras.EquipTeam(name)
         -- pressed before - but a press while the game is moving you (summon / travel into a
         -- dungeon) can be lost, so check every 5 s that the team's pets really are on and press
         -- again if not (3 times at most, then leave it until the team to use changes)
-        if Extras.TeamCheck or not Util.Every("team-verify", 5) then return end
+        -- (never in the middle of a fight: a re-press takes every pet off and on again)
+        if Extras.Fighting or Extras.TeamCheck or not Util.Every("team-verify", 5) then return end
         local on = Extras.TeamOn(name)
         if on ~= false then Extras.TeamRepress = 0 return end
         Extras.TeamRepress = (Extras.TeamRepress or 0) + 1
