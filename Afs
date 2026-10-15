@@ -1097,6 +1097,21 @@ function Combat.PetsOn(e, pets)
     end
     return on, #pets
 end
+-- how many of our pets can actually be seen here (have parts loaded) and how far they are
+function Combat.PetsSeen(pets)
+    local root = Util.Root()
+    local seen, far, maxD = 0, 0, 0
+    for _, p in ipairs(pets) do
+        local part = p:FindFirstChildWhichIsA("BasePart", true)
+        if part then
+            seen = seen + 1
+            local d = root and (part.Position - root.Position).Magnitude or 0
+            if d > 150 then far = far + 1 end
+            if d > maxD then maxD = d end
+        end
+    end
+    return string.format("seen %d/%d, %d far, farthest %.0f studs", seen, #pets, far, maxD)
+end
 -- pets that are far from the enemy and not fighting it: put them next to us (what other open
 -- hubs do after every teleport: the pet model's TargetPart + HumanoidRootPart moved onto you)
 function Combat.PullFarPets(e, pets, pos)
@@ -1168,8 +1183,8 @@ function Combat.Attack(e, wanted, opts)
                     local ok, dist = pcall(function() return (p:GetPivot().Position - myPos).Magnitude end)
                     if ok and dist > 150 then far = far + 1 end
                 end
-                Combat.Log("atk", string.format("no damage on %s for 8 s (pets on it %d/%d | on another enemy %d%s | idle %d | far %d | direct sends %d | world %s) -> skipped 30 s",
-                    e.Name, on, total, busy, other and (" (" .. other.Name .. ")") or "", idle, far, stats.direct or 0, Util.World()))
+                Combat.Log("atk", string.format("no damage on %s for 8 s (pets on it %d/%d | on another enemy %d%s | idle %d | far %d | %s | direct sends %d | world %s) -> skipped 30 s",
+                    e.Name, on, total, busy, other and (" (" .. other.Name .. ")") or "", idle, far, Combat.PetsSeen(pets), stats.direct or 0, Util.World()))
                 Combat.Skip[e] = os.clock() + 30
                 break
             end
@@ -1228,6 +1243,23 @@ function Combat.Attack(e, wanted, opts)
                     stats.direct = (stats.direct or 0) + 1
                     for i, p in ipairs(pets) do
                         if p.Parent then Net.Raw("SendPet", { p, e, i, n = 3 }) end
+                    end
+                end
+                -- still nobody on it after ~3 s: the pets are probably left behind somewhere else
+                -- (you can't see them: far away = not loaded on your screen). Call them over the
+                -- way the game does after a travel ("Teleported" + RequestPetTeleport); still
+                -- nothing ~3 s later -> take them off and put them back on (they spawn next to you)
+                if on == 0 and os.clock() - t0 > 3 and Combat.PetsFollow then
+                    if not stats.followAt and Util.Every("pets-follow", 5) then
+                        stats.followAt = os.clock()
+                        Combat.Log("pets", "pets don't come (" .. Combat.PetsSeen(pets) .. ") - calling them over")
+                        pcall(Combat.PetsFollow)
+                    elseif stats.followAt and os.clock() - stats.followAt > 3 and not stats.reequipped
+                        and Combat.ReEquipPets and Util.Every("pets-reequip", 30) then
+                        stats.reequipped = true
+                        Combat.Log("pets", "pets still don't come (" .. Combat.PetsSeen(pets) .. ") - re-equipping them")
+                        pcall(Combat.ReEquipPets)
+                        pets, petsAt = Data.EquippedPets(), os.clock()
                     end
                 end
             end
@@ -6515,6 +6547,9 @@ function Features.PetsFollow()
     if tp and tp:IsA("BindableEvent") then pcall(tp.Fire, tp) end
     for _, pet in ipairs(Data.EquippedPets()) do task.spawn(Net.Call, "PetTeleport", pet) end
 end
+-- Combat.Attack is defined before Features exists: hand it these two here
+Combat.PetsFollow = Features.PetsFollow
+Combat.ReEquipPets = Features.ReEquipPets
 local function joinGate()
     Net.Raw("JoinGatesMode", { Gate.id, n = 1 })
     -- AttemptTravel answers with WHERE to go (a Vector3, seen in the logs); the game's own client
