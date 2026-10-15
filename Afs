@@ -6424,13 +6424,46 @@ Net.Listen("GateCreated", function(id)
     Gate.id, Gate.createdAt, Gate.started, Gate.joinPos, Gate.outSince = tostring(id), os.clock(), false, nil, nil
     -- a new gate starts from scratch (these stayed from the last gate when the next one was
     -- joined without going back to the Time Chamber first: it was treated as started at once)
-    Gate.inAt, Gate.cleared, Gate.inPos, Gate.stuck = nil, nil, nil, nil
+    Gate.inAt, Gate.cleared, Gate.inPos, Gate.stuck, Gate.snapped, Gate.lastTimer = nil, nil, nil, nil, nil, nil
     Gate.count = Gate.count + 1
 end)
 Net.Listen("GateStarted", function()
     Gate.started = true
     for e in pairs(Combat.Skip) do Combat.Skip[e] = nil end   -- hittable now
 end)
+-- the game's gate timer (wave countdowns?) - written to combat_log when it changes, to see
+-- what the game is waiting for when a room doesn't open
+Net.Listen("GatesModeTimer", function(...)
+    local parts = {}
+    for i, v in ipairs({ ... }) do parts[i] = tostring(v) end
+    local msg = table.concat(parts, ", ")
+    if Gate.id and Gate.lastTimer ~= msg and Util.Every("gate-timer-log", 2) then
+        Gate.lastTimer = msg
+        Combat.Log("gate-timer", "gate timer from the game: " .. msg)
+    end
+end)
+-- one picture of our gate when a room enemy takes no damage: what's in the gate folder, every
+-- enemy (HP, distance from the start, folder) and any prompt - to see why the room is locked
+function Features.GateSnapshot(folder, start)
+    if not folder then return end
+    local n, kids = 0, {}
+    for _, c in ipairs(folder:GetChildren()) do
+        kids[#kids + 1] = c.Name .. "<" .. c.ClassName .. ">(" .. #c:GetChildren() .. ")"
+    end
+    Combat.Log("gate-snap0", "gate " .. tostring(Gate.id) .. " folder: " .. table.concat(kids, ", "))
+    for _, d in ipairs(folder:GetDescendants()) do
+        local isEnemy = d:IsA("Model") and d:FindFirstChild("Health")
+        if isEnemy or d:IsA("ProximityPrompt") then
+            n = n + 1
+            if n > 25 then break end
+            local pos = isEnemy and Combat.Pos(d) or (d.Parent and d.Parent:IsA("BasePart") and d.Parent.Position)
+            local hp = isEnemy and d:FindFirstChild("Health")
+            Combat.Log("gate-snap" .. n, string.format("  %s %s in %s  hp %s  %s", isEnemy and "enemy" or "prompt", d.Name,
+                d.Parent and d.Parent.Name or "?", hp and tostring(hp.Value) or "-",
+                pos and string.format("%.0f studs from the start", (pos - start).Magnitude) or "no position"))
+        end
+    end
+end
 Net.Listen("GatesModeLost", function()
     Gate.id, Gate.started, Gate.overAt = nil, false, os.clock()
     if BP.data then BP.FetchData() end   -- the Portal quest just moved
@@ -6565,7 +6598,7 @@ function Features.GateRun(amount, wanted)
         if not Gate.started then
             if Util.Every("gate-skip", 0.5) then Net.Raw("SkipGateWait", {}) end
             if os.clock() - Gate.inAt < 6 then
-                Combat.Log("gate", "in gate " .. tostring(Gate.id) .. ", waiting for it to start")
+                Combat.Log("gate", "in gate " .. tostring(Gate.id) .. " (rank " .. tostring(Gate.rank) .. "), waiting for it to start")
                 return true
             end
             Gate.started = true
@@ -6601,6 +6634,23 @@ function Features.GateRun(amount, wanted)
                 end
             end
         end
+        -- a room enemy took no damage once already: also look at enemies of our gate that aren't
+        -- in an "Enemies" folder (Combat.List only reads those) - one left in an earlier room
+        -- would keep the next room locked
+        if Gate.snapped and folder then
+            for _, d in ipairs(folder:GetDescendants()) do
+                local hp = d:IsA("Model") and d:FindFirstChild("Health")
+                if hp and hp.Value > 0 and d ~= best then
+                    local pos = Combat.Pos(d)
+                    local dd = pos and (pos - start).Magnitude
+                    if dd and (not bestD or dd < bestD - 50) then
+                        Combat.Log("gate-extra", string.format("gate %s: enemy %s outside the Enemies folder (in %s), %.0f studs from the start - hitting it first",
+                            tostring(Gate.id), Combat.Name(d), d.Parent and d.Parent.Name or "?", dd))
+                        best, bestD = d, dd
+                    end
+                end
+            end
+        end
         if best then
             Combat.Log("gate", string.format("gate %s: room enemy %s, %.0f studs from the start", tostring(Gate.id), Combat.Name(best), bestD))
             -- same enemy, same HP for 60 s (pets never get on it, even after re-equipping): this
@@ -6620,6 +6670,10 @@ function Features.GateRun(amount, wanted)
             -- it took no damage (pets aren't here): bring the pets over and stay on it
             if Combat.Skip[best] then
                 Combat.Skip[best] = nil
+                -- the room may be waiting for the game's "wait" between waves: skip it, and
+                -- write down once what the gate looks like right now
+                Net.Raw("SkipGateWait", {})
+                if not Gate.snapped then Gate.snapped = true pcall(Features.GateSnapshot, folder, start) end
                 -- pets still in the old world: take them off and put them back on = new pet
                 -- models spawn right next to the character, in the gate (every 20 s at most);
                 -- in between: the game's own "Teleported" + RequestPetTeleport
