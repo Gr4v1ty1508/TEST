@@ -6398,6 +6398,9 @@ local Gate = { id = nil, createdAt = 0, started = false, overAt = 0, count = 0 }
 Features.GateState = Gate
 Net.Listen("GateCreated", function(id)
     Gate.id, Gate.createdAt, Gate.started, Gate.joinPos, Gate.outSince = tostring(id), os.clock(), false, nil, nil
+    -- a new gate starts from scratch (these stayed from the last gate when the next one was
+    -- joined without going back to the Time Chamber first: it was treated as started at once)
+    Gate.inAt, Gate.cleared, Gate.inPos, Gate.stuck = nil, nil, nil, nil
     Gate.count = Gate.count + 1
 end)
 Net.Listen("GateStarted", function()
@@ -6576,6 +6579,19 @@ function Features.GateRun(amount, wanted)
         end
         if best then
             Combat.Log("gate", string.format("gate %s: room enemy %s, %.0f studs from the start", tostring(Gate.id), Combat.Name(best), bestD))
+            -- same enemy, same HP for 60 s (pets never get on it, even after re-equipping): this
+            -- gate is broken for us - leave it and make a new one instead of standing there until
+            -- its timer runs out (seen: a gate joined straight from the last one, enemy 2 never hit)
+            local hp = Combat.HP(best)
+            local st = Gate.stuck
+            if not st or st.e ~= best or st.hp ~= hp then
+                Gate.stuck = { e = best, hp = hp, at = os.clock() }
+            elseif os.clock() - st.at > 60 then
+                Combat.Log("gate", "gate " .. tostring(Gate.id) .. ": " .. Combat.Name(best) .. " took no damage for 60 s - leaving this gate, making a new one")
+                Gate.stuck, Gate.id, Gate.started, Gate.overAt = nil, nil, false, os.clock()
+                Travel.To("TimeChamber", true)
+                return true
+            end
             Combat.Attack(best, wanted)
             -- it took no damage (pets aren't here): bring the pets over and stay on it
             if Combat.Skip[best] then
