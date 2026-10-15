@@ -4550,6 +4550,30 @@ local EQ_MOVES = {
     WorldShards          = function(m, sh) return m == "Normal" and sh end,
     RequiemTokens        = function(m, sh) return m == "Requiem" and not sh end,
 }
+-- a quest the game added later (e.g. "Roll 5 Normal Secret Passives" = NormalSecretPassives)
+-- isn't in the table above: work it out from its key / label instead of ignoring it
+--   Spend ... Shards / Tokens -> that currency (World = the Normal machine's shards)
+--   Roll ... <Normal|Event|Requiem> ... Passives -> that machine; no machine named -> any
+local function eqMoves(key)
+    local f = EQ_MOVES[key]
+    if f then return f end
+    local info = Data.Module("TeamEventInfo") or {}
+    local text = string.lower(key .. " " .. tostring((info.QuestLabels or {})[key] or ""))
+    local mach = string.find(text, "requiem", 1, true) and "Requiem"
+        or string.find(text, "event", 1, true) and "Event"
+        or (string.find(text, "normal", 1, true) or string.find(text, "world", 1, true)) and "Normal" or nil
+    if string.find(text, "spend", 1, true) or string.find(text, "shard", 1, true) or string.find(text, "token", 1, true) then
+        local shards = string.find(text, "shard", 1, true) ~= nil
+        f = function(m, sh) return (mach == nil or m == mach) and (sh and true or false) == shards end
+    else
+        f = function(m) return mach == nil or m == mach end
+    end
+    EQ_MOVES[key] = f
+    return f
+end
+-- the quests there were before the game added new ones (used once, to spot new quests)
+Features.EQOldQuests = { "NormalPassives", "NormalDivinePassives", "EventPassives", "EventDivinePassives",
+    "DivinePassives", "EventShards", "EventTokens", "WorldShards", "RequiemTokens" }
 -- order = which one wins when two move the same number of quests:
 -- Event token (the picked Event Machine) -> Requiem token -> Normal token -> Event shard -> Normal shard
 -- (asked for: the Divine passive quest goes Event > Requiem > Normal)
@@ -4650,7 +4674,7 @@ function Features.EventQuests()
         local mach = c[1] == "Event" and (F("EQEventMachine") or "Frieren2026") or c[1]
         if On("PassiveGoMachine") and not Features.MachineReachable(mach) then n = -1 unreachable = mach end
         if n == 0 then
-            for key in pairs(open) do if EQ_MOVES[key] and EQ_MOVES[key](c[1], c[2]) then n = n + 1 end end
+            for key in pairs(open) do if eqMoves(key)(c[1], c[2]) then n = n + 1 end end
         end
         if n > 0 and (not bestN or n > bestN) then best, bestN = c, n end
     end
@@ -7580,7 +7604,10 @@ do
     q:Dropdown({ Title = "Event Machine", Items = events, Default = events[#events] or "Frieren2026", Required = true, Flag = "EQEventMachine" })
     local def = {}
     for _, k in ipairs(keys) do def[k] = true end
-    q:Dropdown({ Title = "Quests To Do", Items = keys, Multi = true, Default = def, Flag = "EQQuests" })
+    Features.EQQuestDrop = q:Dropdown({ Title = "Quests To Do", Items = keys, Multi = true, Default = def, Flag = "EQQuests" })
+    -- quests the hub has already shown in "Quests To Do" (saved with the config): a quest the game
+    -- adds later is ticked by itself once (see Features.EQAddNewQuests)
+    Flags.EQKnownQuests = { value = nil, Get = function(self) return self.value end, Set = function(self, v) self.value = v end }
     q:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 2, Default = 0.5, Decimals = 1, Flag = "EQDelay" })
     Features.EQTimer = q:Paragraph({ Body = "New Quests In : -" })
     Features.EQStatus = q:Paragraph({ Body = "Status : -" })
@@ -8220,6 +8247,33 @@ for _, flag in ipairs({ "PassivePets" }) do
     if el then pcall(el.Set, el, {}, true) end
 end
 Features.ConfigLoaded = true
+-- Lunar vs Solar: a quest the game added since the config was saved gets ticked in "Quests To Do"
+function Features.EQAddNewQuests()
+    local info = Data.Module("TeamEventInfo")
+    local drop, knownEl = Features.EQQuestDrop, Flags.EQKnownQuests
+    if not (info and info.QuestOrder and drop and knownEl) then return end
+    local known = knownEl:Get()
+    if type(known) ~= "table" then
+        known = {}
+        for _, k in ipairs(Features.EQOldQuests or {}) do known[k] = true end
+    end
+    local picked, added = {}, {}
+    for k, v in pairs(F("EQQuests") or {}) do if v then picked[k] = true end end
+    for _, key in ipairs(info.QuestOrder) do
+        if not known[key] then
+            known[key] = true
+            picked[key] = true
+            added[#added + 1] = key
+        end
+    end
+    knownEl:Set(known)
+    if #added > 0 then
+        pcall(drop.Set, drop, picked)
+        Util.Notify("Lunar vs Solar: new quest(s) ticked - " .. table.concat(added, ", "))
+        Combat.Log("eq-new", "Lunar vs Solar: new quest(s) added to Quests To Do: " .. table.concat(added, ", "))
+    end
+end
+pcall(Features.EQAddNewQuests)
 -- now the remembered Lunar pets can be matched to today's UIDs
 task.defer(function() pcall(Features.RefreshPetLists, true) end)
 for _, fn in ipairs(Refreshers) do pcall(fn) end
