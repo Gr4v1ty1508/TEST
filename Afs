@@ -8387,6 +8387,34 @@ end)
 -- extras
 loop(0.3, function() if On("AutoFreeGifts") then Extras.FreeGifts() end end)
 loop(2, function()
+    -- a pet model of ours left WITHOUT its Data folder after a team swap (log: the game's pet
+    -- script errors "Data is not a valid member of Model DBZ2026BlackFrieza" - always the same
+    -- pet - every time it takes the pets in for a teleport, so the pets never followed again).
+    -- Such a model is removed on our side once it has had no Data for 4 s (only pet kinds we
+    -- use, never one that is equipped); the game re-creates real pets by itself.
+    pcall(function()
+        local folder = workspace:FindFirstChild("Pets")
+        if not folder then return end
+        Features.MyPetKinds = Features.MyPetKinds or {}
+        local mine = {}
+        for _, m in ipairs(Data.EquippedPets()) do mine[m] = true Features.MyPetKinds[m.Name] = true end
+        Features.NoDataSince = Features.NoDataSince or {}
+        local seen = {}
+        for _, m in ipairs(folder:GetChildren()) do
+            if m:IsA("Model") and not mine[m] and Features.MyPetKinds[m.Name] and not m:FindFirstChild("Data") then
+                seen[m] = true
+                local t = Features.NoDataSince[m]
+                if not t then
+                    Features.NoDataSince[m] = os.clock()
+                elseif os.clock() - t > 4 then
+                    Features.NoDataSince[m] = nil
+                    Combat.Log("pets", "removed a broken pet model with no Data (" .. m.Name .. ") - it made the game's pet script fail")
+                    pcall(function() m:Destroy() end)
+                end
+            end
+        end
+        for m in pairs(Features.NoDataSince) do if not seen[m] then Features.NoDataSince[m] = nil end end
+    end)
     -- drop skips that ran out / enemies that are gone (Combat.Skip is a normal table)
     for e, t in pairs(Combat.Skip) do
         if type(t) ~= "number" or os.clock() > t or not e.Parent then Combat.Skip[e] = nil end
