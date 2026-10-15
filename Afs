@@ -1238,11 +1238,14 @@ function Combat.Attack(e, wanted, opts)
                 sentAt = os.clock()
                 stats.sends = stats.sends + 1
                 pcall(SendPet.Fire, SendPet, e, true, true)
+                stats.firstSendAt = stats.firstSendAt or os.clock()
                 -- the game's click didn't get any pet onto it (seen: pets idle next to us, 0/23,
                 -- in every mode): send each pet ourselves the way the game's client does it -
-                -- Remote SendPet:FireServer(pet, enemy, 1..n) (recorded with the remote spy)
-                -- (right away: the game's own click hasn't got a pet onto anything lately)
-                if on == 0 and os.clock() - (stats.directAt or 0) > 1 then
+                -- Remote SendPet:FireServer(pet, enemy, 1..n) (recorded with the remote spy).
+                -- The click gets 0.8 s first (a working game script has them on it by then);
+                -- right away when the click hasn't worked on the last enemies either
+                local wait = (Combat.PetStreak or 0) > 0 and 0 or 0.8
+                if on == 0 and os.clock() - stats.firstSendAt >= wait and os.clock() - (stats.directAt or 0) > 1 then
                     stats.directAt = os.clock()
                     stats.direct = (stats.direct or 0) + 1
                     for i, p in ipairs(pets) do
@@ -1253,7 +1256,8 @@ function Combat.Attack(e, wanted, opts)
                 -- (you can't see them: far away = not loaded on your screen). Call them over the
                 -- way the game does after a travel ("Teleported" + RequestPetTeleport); still
                 -- nothing ~3 s later -> take them off and put them back on (they spawn next to you)
-                if on == 0 and os.clock() - t0 > 3 and Combat.PetsFollow then
+                if on == 0 and os.clock() - t0 > 3 and Combat.PetsFollow
+                   and not (Combat.TeamBusy and Combat.TeamBusy()) then
                     if not stats.followAt and Util.Every("pets-follow", 5) then
                         stats.followAt = os.clock()
                         Combat.Log("pets", "pets don't come (" .. Combat.PetsSeen(pets) .. ") - calling them over")
@@ -1281,6 +1285,16 @@ function Combat.Attack(e, wanted, opts)
             if (on > 0 and movedAt and os.clock() - movedAt > 0.4) or os.clock() - t0 > 1.5 then break end
         end
         task.wait()
+    end
+    -- the game's own "send pets" got no pet onto 3 enemies in a row (only our direct sends
+    -- did): its pet script is broken - restart it (see Features.RestartPetHandler)
+    if stats.direct and stats.direct > 0 and stats.maxOn > 0 then
+        Combat.PetStreak = (Combat.PetStreak or 0) + 1
+        if Combat.PetStreak >= 3 and Combat.RestartPetHandler and not (Combat.TeamBusy and Combat.TeamBusy()) then
+            task.spawn(Combat.RestartPetHandler, "the game's send-pets did nothing for 3 enemies in a row")
+        end
+    elseif stats.sends > 0 and stats.maxOn > 0 then
+        Combat.PetStreak, Combat.PetRestarts = 0, 0
     end
     -- one line per enemy in combat_log.txt: where the time went
     pcall(function()
@@ -5266,6 +5280,11 @@ function Extras.TeamNames()
 end
 function Extras.EquipTeam(name)
     if not name or name == "" then return end
+    -- never swap teams while the game is moving you to another world: a swap (every pet off
+    -- and on) during the game's own "withdraw the pets" step broke its pet script (seen:
+    -- LocalPetHandler "Data is not a valid member of Model" in withdraw_all_pets) - after that
+    -- the pets didn't follow you or attack in ANY mode until a rejoin. Wait 4 s after a world change.
+    if Features.WorldChangedAt and os.clock() - Features.WorldChangedAt < 4 then return end
     if name == currentTeam then
         -- pressed before - but a press while the game is moving you (summon / travel into a
         -- dungeon) can be lost, so check every 5 s that the team's pets really are on and press
@@ -5284,6 +5303,7 @@ function Extras.EquipTeam(name)
     if btn and pressOnce(btn) then
         if name ~= currentTeam then Combat.Log("team", "team -> " .. name .. " (world " .. Util.World() .. ")") end
         currentTeam = name
+        Extras.TeamPressedAt = os.clock()
         -- checked once the pets stop changing (Extras.CheckTeam)
         Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = #Data.EquippedPets() }
         task.wait(0.3)
@@ -5348,9 +5368,10 @@ function Extras.CheckTeam()
         Util.Notify(string.format("Team %s: %d/%d pets on (%d not in the team) after 3 tries", c.name, #pets - wrong, want, wrong))
         return false
     end
+    if Features.WorldChangedAt and os.clock() - Features.WorldChangedAt < 4 then return false end
     c.tries, c.at = c.tries + 1, os.clock()
     local btn = Extras.TeamButtons()[c.name]
-    if btn then pressOnce(btn) end
+    if btn then pressOnce(btn) Extras.TeamPressedAt = os.clock() end
     return false
 end
 -- which saved team fits what we're doing right now
@@ -6558,6 +6579,57 @@ end
 -- Combat.Attack is defined before Features exists: hand it these two here
 Combat.PetsFollow = Features.PetsFollow
 Combat.ReEquipPets = Features.ReEquipPets
+Combat.TeamBusy = function()
+    return (Extras.TeamPressedAt and os.clock() - Extras.TeamPressedAt < 5)
+        or (Features.WorldChangedAt and os.clock() - Features.WorldChangedAt < 2)
+end
+-- the game's pet script (PlayerScripts...LocalPetHandler) can break for good when a team swap and
+-- a travel happen together (its withdraw_all_pets errors: "Data is not a valid member of
+-- Model"). Then the pets stop following and the game's own "send pets" does nothing until a
+-- rejoin. Restarting that script (off and on again) brings it back without a rejoin.
+function Features.PetHandler()
+    local ps = LP:FindFirstChild("PlayerScripts")
+    local folder = ps and ps:FindFirstChild("StarterPlayerScriptsFolder")
+    local h = (folder and folder:FindFirstChild("LocalPetHandler")) or (ps and ps:FindFirstChild("LocalPetHandler", true))
+    return h
+end
+function Features.RestartPetHandler(why)
+    if Features.PetRestartAt and os.clock() - Features.PetRestartAt < 30 then return false end
+    -- 3 restarts that didn't help: stop (a rejoin is needed then - Auto Rejoin can do it)
+    if (Combat.PetRestarts or 0) >= 3 then
+        if Util.Every("pet-restart-giveup", 300) then
+            Combat.Log("pets", "restarting the game's pet script didn't help 3 times - a rejoin fixes it (Settings > Auto Rejoin / Rejoin Now)")
+            Util.Notify("Pets are stuck - press Rejoin Now (Settings) to fix them")
+        end
+        return false
+    end
+    Combat.PetRestarts = (Combat.PetRestarts or 0) + 1
+    local h = Features.PetHandler()
+    if not h then
+        Combat.Log("pets", "the game's pet script (LocalPetHandler) wasn't found - can't restart it")
+        return false
+    end
+    Features.PetRestartAt = os.clock()
+    Combat.Log("pets", "restarting the game's pet script (" .. tostring(why) .. ")")
+    pcall(function() h.Disabled = true end)
+    task.wait(0.3)
+    pcall(function() h.Disabled = false end)
+    task.wait(1)
+    pcall(Features.PetsFollow)
+    Combat.PetStreak = 0
+    return true
+end
+Combat.RestartPetHandler = Features.RestartPetHandler
+-- its errors: restart it a moment later (after the team swap / travel that broke it is done)
+pcall(function()
+    track(game:GetService("ScriptContext").Error:Connect(function(msg, trace, scr)
+        local name = (typeof(scr) == "Instance" and scr.Name) or ""
+        if name == "LocalPetHandler" or string.find(tostring(trace or ""), "LocalPetHandler", 1, true) then
+            Combat.Log("pets", "the game's pet script errored: " .. tostring(msg))
+            task.delay(3, function() pcall(Features.RestartPetHandler, "it errored") end)
+        end
+    end))
+end)
 local function joinGate()
     Net.Raw("JoinGatesMode", { Gate.id, n = 1 })
     -- AttemptTravel answers with WHERE to go (a Vector3, seen in the logs); the game's own client
@@ -7979,7 +8051,11 @@ pcall(function()
         -- the pets come along to a new world only when the game's client is told (it fires
         -- "Teleported" after its own travel; when the server moves you - Time Trial start,
         -- dungeon, gate - that didn't always happen and the pets stayed behind, unseen)
-        task.delay(1.5, function() if Combat.PetsFollow then pcall(Combat.PetsFollow) end end)
+        Features.WorldChangedAt = os.clock()
+        task.delay(2, function()
+            if Extras.TeamPressedAt and os.clock() - Extras.TeamPressedAt < 5 then return end
+            if Combat.PetsFollow then pcall(Combat.PetsFollow) end
+        end)
         if Data.IsFarmWorldName(w) then HomeWorld = w end
         task.wait(2)
         queueRefresh()
