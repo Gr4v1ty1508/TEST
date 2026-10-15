@@ -924,7 +924,10 @@ local SendPet = Bindables:FindFirstChild("SendPet")
 -- Enemies far from you are streamed out: the model, its DisplayName / Health values
 -- and its pivot exist, but its parts (HumanoidRootPart) don't until you get close.
 -- So an enemy is alive by its Health value, and found by its pivot position.
-Combat.Skip = setmetatable({}, { __mode = "k" })   -- enemy -> skip until (os.clock)
+-- enemy -> skip until (os.clock). A normal table: as a weak table Roblox could drop an enemy
+-- from it while the enemy still existed, so "skipped 30 s" didn't hold and the same
+-- unhittable enemy was picked again at once. Old entries are cleared every few seconds.
+Combat.Skip = {}
 function Combat.Alive(e)
     if not e or not e.Parent then return false end
     if Combat.Skip[e] and os.clock() < Combat.Skip[e] then return false end
@@ -1238,7 +1241,8 @@ function Combat.Attack(e, wanted, opts)
                 -- the game's click didn't get any pet onto it (seen: pets idle next to us, 0/23,
                 -- in every mode): send each pet ourselves the way the game's client does it -
                 -- Remote SendPet:FireServer(pet, enemy, 1..n) (recorded with the remote spy)
-                if on == 0 and stats.sends >= 3 and os.clock() - (stats.directAt or 0) > 1 then
+                -- (right away: the game's own click hasn't got a pet onto anything lately)
+                if on == 0 and os.clock() - (stats.directAt or 0) > 1 then
                     stats.directAt = os.clock()
                     stats.direct = (stats.direct or 0) + 1
                     for i, p in ipairs(pets) do
@@ -2723,13 +2727,19 @@ function Features.PressNextRoom()
         end
         return Features.RestRoomFallback()
     end
-    -- pressed a moment ago and the prompt is still up: give the server a few seconds,
-    -- then press again, switching between fireproximityprompt and a held E key
-    local tries = Features.PromptTries[prompt] or 0
-    local last = Features.PressedPrompts[prompt]
-    if last and os.clock() - last < 6 then return false end
-    tries = tries + 1
-    Features.PromptTries[prompt] = tries
+    -- press ONCE (Yuto Hub: one press, ~10 s later the server opens the next room) and give the
+    -- server 15 s before pressing again. The old wait was kept in a weak table keyed by the
+    -- prompt - Roblox lets go of those keys, so every check said "never pressed" and it pressed
+    -- about every second ("try 1" over and over in the log) and the rest room took ~3 min.
+    -- Now it's kept by the room number + the button's place (plain strings / numbers).
+    local okPos, bpos = pcall(function() return part:IsA("BasePart") and part.Position or part:GetPivot().Position end)
+    local key = tostring(Features.CurrentRoom() or "?") .. "@" .. (okPos and string.format("%.0f,%.0f", bpos.X, bpos.Z) or part.Name)
+    local rp = Features.RestPress
+    if not rp or rp.key ~= key then rp = { key = key, at = -999, tries = 0 } Features.RestPress = rp end
+    if os.clock() - rp.at < 15 then return false end
+    rp.tries = rp.tries + 1
+    rp.at = os.clock()
+    local tries = rp.tries
     local cf = part:IsA("BasePart") and part.CFrame or part:GetPivot()
     local useKey = tries % 2 == 0 or not fireproximityprompt
     Features.TrialLog(string.format("RestRoom: pressing \"%s\" (try %d, %s, hold %.1f s)", tostring(prompt.ActionText), tries,
@@ -2746,10 +2756,8 @@ function Features.PressNextRoom()
             VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
         end)
     end
-    Features.PressedPrompts[prompt] = os.clock()
     return true
 end
-Features.PromptTries = setmetatable({}, { __mode = "k" })
 
 -- Rest Room (every 5th room) and no button found near us: after 8 s, go into the newest
 -- RestRoom close to us (so its button streams in) and write what's there to the log
@@ -7968,6 +7976,10 @@ pcall(function()
     track(LP:WaitForChild("World", 5).Changed:Connect(function()
         local w = Util.World()
         if w == "Tower" then Stats.TrialFloor = 0 end
+        -- the pets come along to a new world only when the game's client is told (it fires
+        -- "Teleported" after its own travel; when the server moves you - Time Trial start,
+        -- dungeon, gate - that didn't always happen and the pets stayed behind, unseen)
+        task.delay(1.5, function() if Combat.PetsFollow then pcall(Combat.PetsFollow) end end)
         if Data.IsFarmWorldName(w) then HomeWorld = w end
         task.wait(2)
         queueRefresh()
@@ -8280,6 +8292,10 @@ end)
 -- extras
 loop(0.3, function() if On("AutoFreeGifts") then Extras.FreeGifts() end end)
 loop(2, function()
+    -- drop skips that ran out / enemies that are gone (Combat.Skip is a normal table)
+    for e, t in pairs(Combat.Skip) do
+        if type(t) ~= "number" or os.clock() > t or not e.Parent then Combat.Skip[e] = nil end
+    end
     -- team for places where nothing is being attacked (Time Chamber, idle)
     if On("AutoTeams") and not Extras.Fighting then Extras.TeamFor(nil) end
     if On("BoostPetSpeed") and Util.Every("petspeed", 10) then Extras.BoostPetSpeed() end
