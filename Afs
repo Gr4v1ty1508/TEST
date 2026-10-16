@@ -4330,6 +4330,13 @@ end
 -- take every equipped pet off and put it back in the same slot order (what "re equip" means:
 -- fresh pet models = they attack again right away)
 function Features.ReEquipPets()
+    -- taking every pet off and on is the same as a team swap for the game's pet script: same
+    -- rules (not right after a world change, not in the Time Chamber, 10 s after any swap)
+    if Features.WorldChangedAt and os.clock() - Features.WorldChangedAt < 4 then return end
+    if Util.World() == "TimeChamber" then return end
+    if Features.LastPetSwapAt and os.clock() - Features.LastPetSwapAt < 10 then return end
+    Features.LastPetSwapAt = os.clock()
+    Combat.Log("pets", "re-equipping all pets (off and on)")
     local uids = {}
     for _, m in ipairs(Data.EquippedPets()) do
         local uid = Data.PetUID(m)
@@ -5294,13 +5301,15 @@ function Extras.EquipTeam(name, fromTravel)
     -- the hub doesn't know what's on yet (just started / Refresh Teams): if the pets on are
     -- already that team, just note it - don't press
     if currentTeam == nil and Extras.TeamOn(name) == true then currentTeam = name return end
-    -- at least 10 s between two team swaps
+    -- at least 10 s between two team swaps (a re-equip of all pets counts as one too)
     if Extras.TeamPressedAt and os.clock() - Extras.TeamPressedAt < 10 then return end
+    if Features.LastPetSwapAt and os.clock() - Features.LastPetSwapAt < 10 then return end
     local btn = Extras.TeamButtons()[name]
     if btn and pressOnce(btn) then
         Combat.Log("team", "team -> " .. name .. " (world " .. Util.World() .. ")")
         currentTeam = name
         Extras.TeamPressedAt = os.clock()
+        Features.LastPetSwapAt = os.clock()
         -- checked once the pets stop changing (Extras.CheckTeam - it only reports, never presses)
         Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = #Data.EquippedPets() }
         task.wait(0.3)
