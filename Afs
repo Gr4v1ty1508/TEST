@@ -8367,6 +8367,87 @@ loop(2, function()
     BP.Label:Set(BP.StatusText())
 end)
 
+-- PETS LEFT BEHIND / FALLEN ------------------------------------------------------------------
+-- (16 Oct, screenshots + log) all 23 pets missing in the Time Chamber right after the last gate
+-- while the inventory says 23/23, and the pets were seen falling through the map. A gate (like
+-- a Time Trial / dungeon room) is a map of its own that the game deletes when it's over: pets
+-- still standing in it fall, and at the gates / Time Chamber (y = -193) it's only ~300 studs
+-- down to where Roblox deletes falling parts - the pet models get deleted. The game's pet script
+-- keeps them in its list ("Data is not a valid member of Model DBZ2026BlackFrieza", "index nil
+-- with 'HipHeight'") and trips on them at every teleport after that, so no pet follows any more
+-- - until those pets are taken off and on again (what fixed it by hand).
+-- slot -> UID (string) of the equipped pets, from the save (GameData.EquippedPets)
+function Data.SavedEquipped()
+    local st = Data.StoreData()
+    local eq = type(st) == "table" and st.EquippedPets
+    if type(eq) ~= "table" then return nil end
+    local out = {}
+    for k, v in pairs(eq) do
+        local slot = tonumber(k)
+        if slot and v ~= nil and v ~= false then out[slot] = tostring(v) end
+    end
+    return out
+end
+function Data.PetAlive(m)
+    return m ~= nil and m.Parent ~= nil and m:FindFirstChild("Data") ~= nil
+        and m:FindFirstChildWhichIsA("BasePart", true) ~= nil
+end
+function Data.PetPart(m)
+    return m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("TargetPart") or m.PrimaryPart
+        or m:FindFirstChildWhichIsA("BasePart", true)
+end
+-- every 0.25 s: after any big jump of the character (the hub's travel, or the game sending you
+-- back at the end of a gate / trial / dungeon) ask the server to bring every pet over, 3 times;
+-- a pet falling or left far behind is brought over right away, before it falls out of the map
+Features.PetCallAt, Features.PetRescueAt, Features.PetRescueN = {}, {}, {}
+loop(0.25, function()
+    local root = Util.Root()
+    if not root then return end
+    local pos, now = root.Position, os.clock()
+    local last = Features.LastRootPos
+    Features.LastRootPos = pos
+    if last and (pos - last).Magnitude > 300 then
+        Features.PetCallAt = { now + 0.4, now + 1.5, now + 3 }
+    end
+    local callAll = Features.PetCallAt[1] and now >= Features.PetCallAt[1]
+    if callAll then table.remove(Features.PetCallAt, 1) end
+    -- we're falling ourselves (just teleported, map loading): leave the pets alone
+    if root.AssemblyLinearVelocity.Y < -40 then return end
+    local rescued = 0
+    for _, m in ipairs(Data.EquippedPets()) do
+        local part = m.Parent and Data.PetPart(m)
+        if part then
+            local p = part.Position
+            local falling = part.AssemblyLinearVelocity.Y < -60 and p.Y < pos.Y - 20
+            local lost = p.Y < pos.Y - 150 or (p - pos).Magnitude > 400
+            -- (a pet that stays far even so: every 15 s after 5 tries - never fight the game)
+            if not (falling or lost) then Features.PetRescueN[m] = nil end
+            local every = (Features.PetRescueN[m] or 0) < 5 and 1 or 15
+            if callAll or ((falling or lost) and now - (Features.PetRescueAt[m] or -99) > every) then
+                Features.PetRescueAt[m] = now
+                if falling or lost then Features.PetRescueN[m] = (Features.PetRescueN[m] or 0) + 1 end
+                task.spawn(Net.Call, "PetTeleport", m)
+                if falling or lost then
+                    rescued = rescued + 1
+                    for _, n in ipairs({ "HumanoidRootPart", "TargetPart" }) do
+                        local bp = m:FindFirstChild(n)
+                        if bp and bp:IsA("BasePart") then
+                            pcall(function()
+                                bp.AssemblyLinearVelocity = Vector3.zero
+                                bp.CFrame = root.CFrame * CFrame.new(0, 2, 4)
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if rescued > 0 and Util.Every("pet-rescue-log", 10) then
+        Combat.Log("pets", rescued .. " pets falling / left far behind - brought them to you")
+    end
+    for m in pairs(Features.PetRescueAt) do if not m.Parent then Features.PetRescueAt[m] = nil Features.PetRescueN[m] = nil end end
+end)
+
 -- extras
 loop(0.3, function() if On("AutoFreeGifts") then Extras.FreeGifts() end end)
 loop(2, function()
@@ -8425,6 +8506,58 @@ loop(2, function()
         end
         for m in pairs(Features.NoDataSince) do if not seen[m] then Features.NoDataSince[m] = nil end end
     end)
+    -- equipped pets (in the save) whose model is gone (fell out of the map / deleted) for 8 s:
+    -- take just those off and on again = fresh models next to you, and the game's pet script
+    -- drops the dead ones from its list. Not right after a travel or a team swap; every 30 s at
+    -- most, 5 times in a row (then a rejoin is needed). Also in the Time Chamber (it worked there
+    -- by hand).
+    pcall(function()
+        local saved = Data.SavedEquipped()
+        if not saved then return end
+        local alive, aliveN = {}, 0
+        for _, m in ipairs(Data.EquippedPets()) do
+            if Data.PetAlive(m) then
+                local u = Data.PetUID(m)
+                if u then alive[u] = true aliveN = aliveN + 1 end
+            end
+        end
+        local savedSet, n = {}, 0
+        for _, uid in pairs(saved) do savedSet[uid] = true n = n + 1 end
+        -- a pet on that isn't in the save = the save hasn't caught up (team swap): wait
+        for u in pairs(alive) do if not savedSet[u] then Features.LostSince = nil return end end
+        local lost = {}
+        for slot, uid in pairs(saved) do
+            if not alive[uid] then lost[#lost + 1] = { slot = slot, uid = uid } end
+        end
+        local now = os.clock()
+        if #lost == 0 then Features.LostSince = nil Features.LostFixes = 0 return end
+        if (Features.WorldChangedAt and now - Features.WorldChangedAt < 6)
+           or (Features.LastPetSwapAt and now - Features.LastPetSwapAt < 10)
+           or (Extras.TeamPressedAt and now - Extras.TeamPressedAt < 10) then
+            Features.LostSince = nil
+            return
+        end
+        Features.LostSince = Features.LostSince or now
+        if now - Features.LostSince < 8 then return end
+        if Features.LostFixAt and now - Features.LostFixAt < 30 then return end
+        if (Features.LostFixes or 0) >= 5 then
+            if Util.Every("lostpets-giveup", 300) then
+                Combat.Log("pets", #lost .. " pets still gone after putting them on 5 times - a rejoin fixes it (Settings > Rejoin)")
+                Util.Notify(#lost .. " pets are gone - rejoin to fix it")
+            end
+            return
+        end
+        Features.LostFixAt = now
+        Features.LostFixes = (Features.LostFixes or 0) + 1
+        Features.LastPetSwapAt = now
+        Features.LostSince = nil
+        table.sort(lost, function(a, b) return a.slot < b.slot end)
+        Combat.Log("pets", string.format("%d of %d equipped pets are gone (model fell out of the map / was deleted, %d here) - taking those off and on again (%d/5)",
+            #lost, n, aliveN, Features.LostFixes))
+        for _, p in ipairs(lost) do Net.Call("ManagePetUnequip", tonumber(p.uid) or p.uid) end
+        task.wait(0.5)
+        for _, p in ipairs(lost) do Net.Call("ManagePetEquip", tonumber(p.uid) or p.uid, p.slot) end
+    end)
     -- farming, and not one pet of ours is here (none equipped, or none loaded near you) for 15 s:
     -- put the team on again with the game's own team button - the pets spawn next to you.
     -- (Log 16 Oct 14:05-14:20: no pets at all for 15 min in gates - "seen 0/0" - and the 22
@@ -8438,7 +8571,7 @@ loop(2, function()
         end
         local farming = Extras.LastFightAt and now - Extras.LastFightAt < 10
         if here > 0 then Features.NoPetsFixes = 0 end
-        if here > 0 or not farming or Util.World() == "TimeChamber"
+        if here > 0 or not farming or Util.World() == "TimeChamber" or Data.SavedEquipped()
            or (Features.WorldChangedAt and now - Features.WorldChangedAt < 6) then
             Features.NoPetsSince = nil
             return
