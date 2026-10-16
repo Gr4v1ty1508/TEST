@@ -3514,7 +3514,9 @@ function Features.EnterDungeon(why)
     local res = Net.Call("DungeonLobby")
     local cf = toCFrame(res)
     if cf then
-        pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
+        -- (never wait for RequestStreamAroundAsync here: it can hang, and then the hub's main loop
+        -- hangs with it - log 16 Oct 18:25: in the dungeon, then nothing for 30 min)
+        task.spawn(pcall, function() LP:RequestStreamAroundAsync(cf.Position) end)
         Util.MoveTo(cf + Vector3.new(0, 4, 0))
         task.delay(0.5, function() pcall(Features.PetsFollow) end)
     end
@@ -4057,6 +4059,13 @@ function Features.Dungeon()
     if On("AutoOpenDungeon") then
         -- the next dungeon can't be opened yet: don't try (and don't hold the character -
         -- the next feature in the Priority list runs meanwhile)
+        -- inside a Time Trial / tower / gate / raid the summon is refused (log 16 Oct 18:24: 11
+        -- summons from a Time Trial rest room, all "cooldown didn't start") - wait for it to end
+        local busy = Features.InActiveRun and Features.InActiveRun()
+        if busy and busy ~= "dungeon" then
+            dungeonStep = "waiting for " .. tostring(busy)
+            return false
+        end
         local cd = Features.DungeonCooldown()
         if cd > 0 then
             -- the cooldown starts the moment a dungeon is summoned: summoned by us in the last
@@ -4066,6 +4075,8 @@ function Features.Dungeon()
             local finished = Features.DungeonFinishedAt and ls and Features.DungeonFinishedAt > ls.at
             if ls and os.clock() - ls.at < 90 and not finished then
                 dungeonStep = "joining"
+                -- the game already sent us in (JoinDungeon after the summon): only wait for it
+                if Features.JoinDungeonAt and Features.JoinDungeonAt >= ls.at then return true end
                 if Util.Every("dungeon-go-in", 3) then
                     if Util.Every("dungeon-open-log", 30) then
                         Combat.Log("dungeon", string.format("dungeon open (summoned %.0f s ago, next one in %d min) - going in", os.clock() - ls.at, math.floor(cd / 60)))
@@ -5924,8 +5935,16 @@ function DungeonGui.SummonDirect()
     if On("DungeonArtifact") and type(prevArt) == "string" and prevArt ~= "" and prevArt ~= "Dungeon" then
         Net.Call("EquipArtifact", prevArt, "CurrentArtefact")      -- your own artefact back on
     end
-    Features.EnterDungeon("just summoned")                           -- AttemptTravel("Dungeon") + go there
+    -- the game sends you in by itself right after the summon (JoinDungeon came 0.2 s after it in
+    -- the log): wait for that; only when it doesn't come, travel in ourselves
+    local sentAt = Features.LastSummon.at
     local t0 = os.clock()
+    while os.clock() - t0 < 3 and not Features.InDungeon()
+        and not (Features.JoinDungeonAt and Features.JoinDungeonAt >= sentAt) do task.wait(0.1) end
+    if not Features.InDungeon() and not (Features.JoinDungeonAt and Features.JoinDungeonAt >= sentAt) then
+        Features.EnterDungeon("just summoned")                       -- AttemptTravel("Dungeon") + go there
+    end
+    t0 = os.clock()
     while os.clock() - t0 < 4 and not Features.InDungeon() do task.wait(0.1) end
     if Features.InDungeon() then
         DungeonGui.waitUntil, DungeonGui.directTries = 0, 0
@@ -8121,6 +8140,7 @@ Net.Listen("SendSubtleMessage", function(msg)
     end
 end)
 Net.Listen("JoinDungeon", function(data)
+    Features.JoinDungeonAt = os.clock()
     Features.DungeonFinishedAt = nil
     Features.DungeonBossAt = nil Features.DungeonIdleSince = nil Features.DungeonMap = nil
     Features.DungeonHasKey = false
@@ -8375,7 +8395,76 @@ local function loop(interval, fn)
     end)
 end
 
-loop(0.1, Brain)
+-- the main loop ("priority: ...") runs in its own thread so it can be checked: stuck for 90 s
+-- -> where it is goes to combat_log.txt; stuck for 180 s -> it's restarted (log 16 Oct: in the
+-- dungeon at 18:25, then not one line until the dungeon ended 30 min later)
+function Features.StartBrain()
+    Features.BrainTickAt = os.clock()
+    Features.BrainThread = task.spawn(function()
+        while running do
+            Features.BrainTickAt = os.clock()
+            local ok, err = pcall(Brain)
+            if not ok then
+                warn("[" .. CFG.Name .. "] " .. tostring(err))
+                Diag.LogError("brain", err)
+                task.wait(1)
+            end
+            Features.BrainTickAt = os.clock()
+            task.wait(0.1)
+        end
+    end)
+end
+Features.StartBrain()
+loop(5, function()
+    local stuck = os.clock() - (Features.BrainTickAt or os.clock())
+    if stuck < 90 then Features.BrainStuckLogged = nil return end
+    if not Features.BrainStuckLogged then
+        Features.BrainStuckLogged = true
+        local tb = ""
+        pcall(function() tb = debug.traceback(Features.BrainThread) end)
+        tb = string.gsub(string.gsub(tostring(tb), "\n", " | "), "%s+", " ")
+        Combat.Log("brain", string.format("main loop stuck for %.0f s (in %s) at: %s", stuck, tostring(Features.BrainOwner), string.sub(tb, 1, 600)))
+    end
+    if stuck > 180 then
+        Combat.Log("brain", string.format("main loop stuck for %.0f s - restarting it", stuck))
+        pcall(task.cancel, Features.BrainThread)
+        Features.BrainStuckLogged = nil
+        Features.StartBrain()
+    end
+end)
+-- the character can't move (anchored / WalkSpeed 0 / PlatformStand) for 6 s: the game's own
+-- travel code freezes it and un-freezes it at the end - when the game's pet script errors in
+-- between (dead pet models), the un-freeze never comes ("every time the pets are gone I can't
+-- walk"). Put it back and write down what it was.
+loop(1, function()
+    local hum, root = Util.Humanoid(), Util.Root()
+    if not (hum and root) then Features.FrozenSince = nil return end
+    if hum.WalkSpeed > 0 then Features.LastWalkSpeed = hum.WalkSpeed end
+    local frozen = root.Anchored or hum.WalkSpeed == 0 or hum.PlatformStand
+    if not frozen then Features.FrozenSince = nil return end
+    Features.FrozenSince = Features.FrozenSince or os.clock()
+    if os.clock() - Features.FrozenSince < 6 then return end
+    Combat.Log("char", string.format("character frozen for %.0f s (anchored %s, walk speed %s, platform stand %s, world %s) - un-freezing it",
+        os.clock() - Features.FrozenSince, tostring(root.Anchored), tostring(hum.WalkSpeed), tostring(hum.PlatformStand), Util.World()))
+    pcall(function()
+        if root.Anchored then root.Anchored = false end
+        if hum.WalkSpeed == 0 then hum.WalkSpeed = Features.LastWalkSpeed or 16 end
+        if hum.PlatformStand then hum.PlatformStand = false end
+    end)
+    Features.FrozenSince = nil
+end)
+-- every 2 min one line of how things are (so a quiet stretch in the log can be read)
+loop(120, function()
+    local pets, here = Data.EquippedPets(), 0
+    for _, m in ipairs(pets) do if Data.PetAlive and Data.PetAlive(m) then here = here + 1 end end
+    local saved = Data.SavedEquipped and Data.SavedEquipped()
+    local savedN = 0
+    for _ in pairs(saved or {}) do savedN = savedN + 1 end
+    local hum, root = Util.Humanoid(), Util.Root()
+    Combat.Log("alive", string.format("status: %s | main loop %.0f s ago | pets here %d/%d (save %s) | anchored %s, walk %s | world %s | %s",
+        tostring(Features.BrainOwner), os.clock() - (Features.BrainTickAt or 0), here, #pets, saved and tostring(savedN) or "?",
+        tostring(root and root.Anchored), tostring(hum and hum.WalkSpeed), Util.World(), os.date("%H:%M")))
+end)
 loop(1, function()
     if Features.StatusLabel then Features.StatusLabel:Set(Features.StatusText()) end
 end)
@@ -8576,7 +8665,15 @@ loop(2, function()
         local savedSet, n = {}, 0
         for _, uid in pairs(saved) do savedSet[uid] = true n = n + 1 end
         -- a pet on that isn't in the save = the save hasn't caught up (team swap): wait
-        for u in pairs(alive) do if not savedSet[u] then Features.LostSince = nil return end end
+        for u in pairs(alive) do
+            if not savedSet[u] then
+                Features.LostSince = nil
+                if aliveN < n and Util.Every("lostpets-stale", 60) then
+                    Combat.Log("pets", string.format("pets here %d of %d, but pet %s isn't in the save's equipped list - not re-equipping (save not updated?)", aliveN, n, u))
+                end
+                return
+            end
+        end
         local lost = {}
         for slot, uid in pairs(saved) do
             if not alive[uid] then lost[#lost + 1] = { slot = slot, uid = uid } end
