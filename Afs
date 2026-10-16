@@ -4,7 +4,7 @@
 
     Tabs
       Main              auto farm (worlds / mobs / mode), quest, click, collect,
-                        ult, mount, pet TP, next world, rebirth, re-equip pets,
+                        ult, mount, pet TP, next world, rebirth,
                         auto battle pass (picked daily quests, 5 repeats each)
       Teleport          any world (numbered like the in-game list)
       Time Trial/Tower  trials multi-select, leave on floor, Infinity Tower
@@ -1254,20 +1254,16 @@ function Combat.Attack(e, wanted, opts)
                 end
                 -- still nobody on it after ~3 s: the pets are probably left behind somewhere else
                 -- (you can't see them: far away = not loaded on your screen). Call them over the
-                -- way the game does after a travel ("Teleported" + RequestPetTeleport); still
-                -- nothing ~3 s later -> take them off and put them back on (they spawn next to you)
+                -- way the game does after a travel ("Teleported" + RequestPetTeleport).
+                -- (No more "take them off and on" here: every re-equip in the log of 16 Oct was
+                -- followed by the game's pet script erroring, and once by no pets at all for
+                -- 15 min. No pets for a while -> the team goes on again, see the 2 s loop.)
                 if on == 0 and os.clock() - t0 > 3 and Combat.PetsFollow
                    and not (Combat.TeamBusy and Combat.TeamBusy()) then
                     if not stats.followAt and Util.Every("pets-follow", 5) then
                         stats.followAt = os.clock()
                         Combat.Log("pets", "pets don't come (" .. Combat.PetsSeen(pets) .. ") - calling them over")
                         pcall(Combat.PetsFollow)
-                    elseif stats.followAt and os.clock() - stats.followAt > 3 and not stats.reequipped
-                        and Combat.ReEquipPets and Util.Every("pets-reequip", 30) then
-                        stats.reequipped = true
-                        Combat.Log("pets", "pets still don't come (" .. Combat.PetsSeen(pets) .. ") - re-equipping them")
-                        pcall(Combat.ReEquipPets)
-                        pets, petsAt = Data.EquippedPets(), os.clock()
                     end
                 end
             end
@@ -5287,7 +5283,7 @@ function Extras.TeamNames()
     table.sort(out)
     return out
 end
-function Extras.EquipTeam(name, fromTravel)
+function Extras.EquipTeam(name, fromTravel, force)
     if not name or name == "" then return end
     -- never swap teams while the game is moving you to another world (wait 4 s after a world change)
     if Features.WorldChangedAt and os.clock() - Features.WorldChangedAt < 4 then return end
@@ -5297,10 +5293,11 @@ function Extras.EquipTeam(name, fromTravel)
     -- apart, Passive then DR, seen at 11:42 / 11:50 / 11:57 / 12:05 - left pet models the game's
     -- pet script still holds after they were removed: "Data is not a valid member of Model
     -- Summer25Kanna" at every teleport from then on, no pet following, until a rejoin.)
-    if name == currentTeam then return end
+    -- (force: no pets here at all - pressing it again only puts pets on, nothing to break)
+    if name == currentTeam and not force then return end
     -- the hub doesn't know what's on yet (just started / Refresh Teams): if the pets on are
     -- already that team, just note it - don't press
-    if currentTeam == nil and Extras.TeamOn(name) == true then currentTeam = name return end
+    if not force and currentTeam == nil and Extras.TeamOn(name) == true then currentTeam = name return end
     -- at least 10 s between two team swaps (a re-equip of all pets counts as one too)
     if Extras.TeamPressedAt and os.clock() - Extras.TeamPressedAt < 10 then return end
     if Features.LastPetSwapAt and os.clock() - Features.LastPetSwapAt < 10 then return end
@@ -5313,6 +5310,7 @@ function Extras.EquipTeam(name, fromTravel)
         -- checked once the pets stop changing (Extras.CheckTeam - it only reports, never presses)
         Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = #Data.EquippedPets() }
         task.wait(0.3)
+        return true
     end
 end
 function Extras.ResetTeam() currentTeam = nil Extras.TeamCheck = nil end
@@ -5376,7 +5374,7 @@ function Extras.CheckTeam()
     return false
 end
 -- which saved team fits what we're doing right now
-function Extras.TeamFor(target)
+function Extras.TeamNameFor(target)
     local world, owner = Util.World(), Features.BrainOwner
     local slot = "TeamFarm"
     if world == "Raid" then slot = "TeamRaid"
@@ -5397,7 +5395,11 @@ function Extras.TeamFor(target)
     elseif Features.InDungeon() then slot = "TeamDungeon" end   -- dungeon under another world name
     local name = F(slot)
     if target and string.find(string.lower(target.Name), "chest", 1, true) and F("TeamChest") then name = F("TeamChest") end
-    Extras.EquipTeam(name)
+    return name
+end
+function Extras.TeamFor(target)
+    local name = Extras.TeamNameFor(target)
+    if name then Extras.EquipTeam(name) end
 end
 
 -- PETS --------------------------------------------------------------------------------------------
@@ -5432,6 +5434,7 @@ end
 local baseAttack = Combat.Attack
 function Combat.Attack(e, wanted, opts)
     Extras.Fighting = true
+    Extras.LastFightAt = os.clock()
     if On("AutoTeams") then pcall(Extras.TeamFor, e) end
     if On("PullPets") then
         local root, pos = Util.Root(), e and Combat.Pos(e)
@@ -6833,13 +6836,10 @@ function Features.GateRun(amount, wanted)
                 -- write down once what the gate looks like right now
                 Net.Raw("SkipGateWait", {})
                 if not Gate.snapped then Gate.snapped = true pcall(Features.GateSnapshot, folder, start) end
-                -- pets still in the old world: take them off and put them back on = new pet
-                -- models spawn right next to the character, in the gate (every 20 s at most);
-                -- in between: the game's own "Teleported" + RequestPetTeleport
-                if Util.Every("gate-reequip", 20) then
-                    Combat.Log("gate", "first enemy takes no damage - re-equipping the pets so they spawn in the gate")
-                    pcall(Features.ReEquipPets)
-                elseif Util.Every("gate-pets", 5) then
+                -- pets still in the old world: the game's own "Teleported" + RequestPetTeleport
+                -- (no re-equip: it broke the game's pet script; no pets at all for a while ->
+                -- the team goes on again, see the 2 s loop)
+                if Util.Every("gate-pets", 5) then
                     Combat.Log("gate", "first enemy takes no damage - bringing the pets to the gate")
                     Features.PetsFollow()
                     pcall(Extras.PullPets)
@@ -7352,10 +7352,8 @@ do
     f:Toggle({ Title = "Auto Unlock And Tp Next World", Flag = "AutoNextWorld" })
     f:Toggle({ Title = "Auto Rebirth", Flag = "AutoRebirth" })
     f:Toggle({ Title = "Load Enemy On Teleport", Default = true, Flag = "LoadEnemy", Callback = function(v) Travel.LoadEnemies = v end })
-    f:Divider()
-    f:Paragraph({ Title = "Re equip Pets", Body = "For smooth farming set this correctly. Use 3 minutes for general farming and 1-2 minutes for the Infinity Tower." })
-    f:Toggle({ Title = "Auto Re Equip Pets", Flag = "AutoReEquip" })
-    f:Slider({ Title = "Delayed [minutes]", Min = 1, Max = 10, Default = 2, Flag = "ReEquipDelay" })
+    -- (Auto Re Equip Pets removed 16 Oct: taking every pet off and on every few minutes broke
+    -- the game's pet script - errors right after it, pets on the enemy 0/23, once no pets for 15 min)
 end
 
 -- STATUS TAB: what the hub is doing right now -------------------------------------------------
@@ -8443,6 +8441,50 @@ loop(2, function()
         end
         for m in pairs(Features.NoDataSince) do if not seen[m] then Features.NoDataSince[m] = nil end end
     end)
+    -- farming, and not one pet of ours is here (none equipped, or none loaded near you) for 15 s:
+    -- put the team on again with the game's own team button - the pets spawn next to you.
+    -- (Log 16 Oct 14:05-14:20: no pets at all for 15 min in gates - "seen 0/0" - and the 22
+    -- re-equips in between did nothing; the DR team going on at 14:20 brought all 23 back.)
+    -- At most once a minute, 3 times in a row; then only a rejoin helps (Settings > Rejoin).
+    pcall(function()
+        local now = os.clock()
+        local here = 0
+        for _, m in ipairs(Data.EquippedPets()) do
+            if m.Parent and m:FindFirstChildWhichIsA("BasePart", true) then here = here + 1 end
+        end
+        local farming = Extras.LastFightAt and now - Extras.LastFightAt < 10
+        if here > 0 then Features.NoPetsFixes = 0 end
+        if here > 0 or not farming or Util.World() == "TimeChamber"
+           or (Features.WorldChangedAt and now - Features.WorldChangedAt < 6) then
+            Features.NoPetsSince = nil
+            return
+        end
+        Features.NoPetsSince = Features.NoPetsSince or now
+        if now - Features.NoPetsSince < 15 then return end
+        if Features.NoPetsFixAt and now - Features.NoPetsFixAt < 60 then return end
+        if (Features.NoPetsFixes or 0) >= 3 then
+            if Util.Every("nopets-giveup", 300) then
+                Combat.Log("pets", "still no pets after putting the team on 3 times - a rejoin fixes it (Settings > Rejoin)")
+                Util.Notify("No pets with you - rejoin to fix it")
+            end
+            return
+        end
+        local name = Extras.TeamNameFor(nil)
+        if not name or name == "" then name = Extras.CurrentTeam() end
+        if not name or name == "" then name = F("TeamFarm") end
+        if not name or name == "" then
+            if Util.Every("nopets-noteam", 300) then
+                Combat.Log("pets", "no pets with you for 15 s and no team picked in Teams to put on - rejoin to fix it")
+            end
+            return
+        end
+        if Extras.EquipTeam(name, false, true) then
+            Features.NoPetsFixAt = now
+            Features.NoPetsFixes = (Features.NoPetsFixes or 0) + 1
+            Features.NoPetsSince = nil
+            Combat.Log("pets", "no pets with you for 15 s - put team " .. name .. " on again (" .. Features.NoPetsFixes .. "/3)")
+        end
+    end)
     -- drop skips that ran out / enemies that are gone (Combat.Skip is a normal table)
     for e, t in pairs(Combat.Skip) do
         if type(t) ~= "number" or os.clock() > t or not e.Parent then Combat.Skip[e] = nil end
@@ -8476,7 +8518,6 @@ loop(1, function()
     if On("AutoNextWorld") and Util.Every("nextworld", 15) then Features.NextWorld() end
     -- backup check; only acts when we can actually tell you're not mounted
     if On("AutoMount") and Util.Every("mount", 3) and Features.IsMounted() == false then Features.Mount() end
-    if On("AutoReEquip") and Util.Every("reequip", (F("ReEquipDelay") or 2) * 60) then Features.ReEquipPets() end
     if On("AutoSpin") and Util.Every("spin", 60) then Net.Call("DailySpin") end
     if On("AutoTicket") and Util.Every("ticket", 60) then Net.Call("ClaimTicket") end
     if On("AutoBoost") and Util.Every("boost", 60) then Net.Call("ClaimBoost") end
