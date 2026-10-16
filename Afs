@@ -8387,6 +8387,33 @@ end)
 -- extras
 loop(0.3, function() if On("AutoFreeGifts") then Extras.FreeGifts() end end)
 loop(2, function()
+    -- an EQUIPPED pet whose model is empty here (no Data / Humanoid): it was left far behind
+    -- after a big teleport and is no longer loaded on our screen (log 16 Oct: "Data is not a
+    -- valid member of Model Summer25Kanna" + "index nil with 'HipHeight'" at EVERY teleport,
+    -- starting right when a dungeon ended - no team swap involved). The game's pet script
+    -- trips on it each time, so no pet follows any more. Ask the server to bring that pet to us
+    -- (RequestPetTeleport) and load the area it's in; once it's loaded again the script works.
+    pcall(function()
+        Features.PetFetchAt = Features.PetFetchAt or {}
+        local now = os.clock()
+        for _, m in ipairs(Data.EquippedPets()) do
+            -- (only "no Data": some pets may have no Humanoid at all - an AnimationController)
+            local broken = not m:FindFirstChild("Data")
+            if broken and now - (Features.PetFetchAt[m] or -99) > 3 then
+                Features.PetFetchAt[m] = now
+                local okp, pv = pcall(m.GetPivot, m)
+                local pos = okp and pv and pv.Position
+                Combat.Log("pets", "pet " .. m.Name .. " isn't loaded (left behind" .. (pos and string.format(" at %.0f, %.0f, %.0f", pos.X, pos.Y, pos.Z) or "") .. ") - bringing it to you")
+                task.spawn(Net.Call, "PetTeleport", m)
+                if pos and pos.Magnitude > 1 then
+                    task.spawn(pcall, function() LP:RequestStreamAroundAsync(pos) end)
+                end
+            end
+        end
+        local eq = {}
+        for _, m in ipairs(Data.EquippedPets()) do eq[m] = true end
+        for m in pairs(Features.PetFetchAt) do if not eq[m] then Features.PetFetchAt[m] = nil end end
+    end)
     -- a pet model of ours left WITHOUT its Data folder after a team swap (log: the game's pet
     -- script errors "Data is not a valid member of Model DBZ2026BlackFrieza" - always the same
     -- pet - every time it takes the pets in for a teleport, so the pets never followed again).
