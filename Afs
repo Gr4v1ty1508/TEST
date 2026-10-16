@@ -5387,6 +5387,79 @@ function Extras.TeamUIDs(name)
     end
     return nil, 0
 end
+-- the team's UIDs in the save's order (only pets you still own)
+function Extras.TeamUIDList(name)
+    local st = Data.StoreData()
+    local owned = nil
+    if st and type(st.Pets) == "table" then
+        owned = {}
+        for _, p in pairs(st.Pets) do if type(p) == "table" and p.UID then owned[tostring(p.UID)] = true end end
+    end
+    for _, t in pairs(st and type(st.PetTeams) == "table" and st.PetTeams or {}) do
+        if type(t) == "table" and t.Name == name and type(t.UIDs) == "table" then
+            local keys = {}
+            for k in pairs(t.UIDs) do keys[#keys + 1] = k end
+            table.sort(keys, function(a, b)
+                local na, nb = tonumber(a), tonumber(b)
+                if na and nb then return na < nb end
+                return tostring(a) < tostring(b)
+            end)
+            local out = {}
+            for _, k in ipairs(keys) do
+                local u = tostring(t.UIDs[k])
+                if not owned or owned[u] then out[#out + 1] = u end
+            end
+            return out
+        end
+    end
+    return nil
+end
+-- the team that belongs to what's being played right now (Teams tab slots; Time Chamber team
+-- in the Time Chamber), else the team that's on, else the farm team
+function Extras.TeamForNow()
+    local name = Extras.TeamNameFor(nil)
+    if (not name or name == "") and Util.World() == "TimeChamber" then name = F("TeamChamber") end
+    if not name or name == "" then name = currentTeam end
+    if not name or name == "" then name = F("TeamFarm") end
+    if name == "" then name = nil end
+    return name
+end
+-- take EVERY equipped pet off, then put the whole team for the current mode on again (asked for
+-- on 16 Oct: "a pet fell off the map -> take the whole team off and put the whole team back on,
+-- the team of the mode being played"). The game's team button puts the pets on (with the
+-- team's title / artefact); no button found -> the team's pets from the save one by one;
+-- no team at all -> the same pets that were on.
+function Extras.ReloadTeam(why)
+    local name = Extras.TeamForNow()
+    local on = {}
+    local saved = Data.SavedEquipped and Data.SavedEquipped() or {}
+    for slot, uid in pairs(saved) do on[#on + 1] = { slot = slot, uid = uid } end
+    table.sort(on, function(a, b) return a.slot < b.slot end)
+    Combat.Log("pets", string.format("%s - taking all %d pets off and putting team %s on again (world %s)",
+        tostring(why), #on, tostring(name or "(same pets)"), Util.World()))
+    Features.LastPetSwapAt = os.clock()
+    Extras.TeamPressedAt = os.clock()
+    for _, p in ipairs(on) do Net.Call("ManagePetUnequip", tonumber(p.uid) or p.uid) end
+    local t0 = os.clock()
+    while #Data.EquippedPets() > 0 and os.clock() - t0 < 2 do task.wait(0.1) end
+    task.wait(0.3)
+    local btn = name and Extras.TeamButtons()[name]
+    if btn and pressOnce(btn) then
+        currentTeam = name
+        Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = 0 }
+    else
+        local list = name and Extras.TeamUIDList(name)
+        if list and #list > 0 then
+            for slot, uid in ipairs(list) do Net.Call("ManagePetEquip", tonumber(uid) or uid, slot) end
+            currentTeam = name
+        else
+            for _, p in ipairs(on) do Net.Call("ManagePetEquip", tonumber(p.uid) or p.uid, p.slot) end
+        end
+    end
+    Features.LastPetSwapAt = os.clock()
+    Extras.TeamPressedAt = os.clock()
+    return true
+end
 -- is the team on right now? true / false, nil = can't tell (team not in the save)
 function Extras.TeamOn(name)
     local set, teamN = Extras.TeamUIDs(name)
@@ -8638,11 +8711,11 @@ loop(2, function()
         end
         for m in pairs(Features.NoDataSince) do if not seen[m] then Features.NoDataSince[m] = nil end end
     end)
-    -- equipped pets (in the save) whose model is gone (fell out of the map / deleted) for 4 s, or
-    -- that kept falling (3 times in a minute): take just those off and on again = fresh models
-    -- next to you, and the game's pet script drops the dead ones from its list (what fixes it
-    -- by hand). Not right after a travel or a team swap; every 20 s at most, 5 times in a row
-    -- (then a rejoin is needed). Also in the Time Chamber (it worked there by hand).
+    -- a pet fell off the map (caught falling once), or an equipped pet's model is gone for 4 s:
+    -- take the WHOLE team off and put the whole team for the current mode back on (Extras.
+    -- ReloadTeam) = fresh models next to you, and the game's pet script drops the dead ones from
+    -- its list (what fixes it by hand). Not right after a travel or a team swap; every 20 s at
+    -- most, 5 times in a row (then a rejoin is needed). Also in the Time Chamber.
     pcall(function()
         local saved = Data.SavedEquipped()
         if not saved then return end
@@ -8653,7 +8726,7 @@ loop(2, function()
             local keep = {}
             for _, t in ipairs(hits) do if now0 - t < 60 then keep[#keep + 1] = t end end
             Features.PetLostHits[uid] = #keep > 0 and keep or nil
-            if #keep >= 3 then falling[uid] = true end
+            if #keep >= 1 then falling[uid] = true end
         end
         for _, m in ipairs(Data.EquippedPets()) do
             -- (fell 3 times in a minute = as good as gone)
@@ -8702,15 +8775,10 @@ loop(2, function()
         end
         Features.LostFixAt = now
         Features.LostFixes = (Features.LostFixes or 0) + 1
-        Features.LastPetSwapAt = now
         Features.LostSince = nil
-        for _, p in ipairs(lost) do Features.PetLostHits[p.uid] = nil end
-        table.sort(lost, function(a, b) return a.slot < b.slot end)
-        Combat.Log("pets", string.format("%d of %d equipped pets are gone (model fell out of the map / deleted / kept falling, %d here) - taking those off and on again (%d/5)",
+        table.clear(Features.PetLostHits)
+        Extras.ReloadTeam(string.format("%d of %d pets fell off the map / are gone (%d here, try %d/5)",
             #lost, n, aliveN, Features.LostFixes))
-        for _, p in ipairs(lost) do Net.Call("ManagePetUnequip", tonumber(p.uid) or p.uid) end
-        task.wait(0.5)
-        for _, p in ipairs(lost) do Net.Call("ManagePetEquip", tonumber(p.uid) or p.uid, p.slot) end
     end)
     -- farming, and not one pet of ours is here (none equipped, or none loaded near you) for 15 s:
     -- put the team on again with the game's own team button - the pets spawn next to you.
