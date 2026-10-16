@@ -5422,13 +5422,6 @@ function Extras.PullPets()
         end
     end
 end
--- client-side: raise the Speed effect of every passive (takes effect after re-equip)
-function Extras.BoostPetSpeed()
-    local ps = Data.Module("PassiveStats")
-    for _, t in pairs(ps or {}) do
-        if type(t) == "table" and type(t.Effects) == "table" then t.Effects.Speed = 20 end
-    end
-end
 
 -- attack wrapper: right team first, pets pulled in, and "fighting" flag for the team loop
 local baseAttack = Combat.Attack
@@ -5436,11 +5429,6 @@ function Combat.Attack(e, wanted, opts)
     Extras.Fighting = true
     Extras.LastFightAt = os.clock()
     if On("AutoTeams") then pcall(Extras.TeamFor, e) end
-    if On("PullPets") then
-        local root, pos = Util.Root(), e and Combat.Pos(e)
-        if Combat.CanTP() and root and pos then root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 4)) end
-        pcall(Extras.PullPets)
-    end
     local ok, err = pcall(baseAttack, e, wanted, opts)
     Extras.Fighting = false
     if not ok then warn("[" .. CFG.Name .. "] " .. tostring(err)) end
@@ -8017,13 +8005,9 @@ do
     t:Toggle({ Title = "Auto Equip Teams", Flag = "AutoTeams", Callback = function(v) if v then Extras.ResetTeam() end end })
     Refreshers[#Refreshers + 1] = refreshTeams
 
-    -- Main: pet extras + world gate
-    local p = TMain:Card("Pets Extra", "Right")
-    p:Toggle({ Title = "Pull Pets To Me On Attack", Flag = "PullPets" })
-    p:Toggle({ Title = "Boost Pet Speed ( re-equip after )", Flag = "BoostPetSpeed", Callback = function(v)
-        if v then Extras.BoostPetSpeed() Util.Notify("Re-equip your pets to apply") end
-    end })
-    p:Divider()
+    -- Main: world gate (the "Pets Extra" toggles Pull Pets / Boost Pet Speed were removed 16 Oct:
+    -- the attack already pulls far pets itself, and the speed boost only worked after a re-equip)
+    local p = TMain:Card("World Gate", "Right")
     p:Button({ Title = "Buy Current World Gate", Callback = function()
         if not Extras.BuyWorldGate() then Util.Notify("No closed gate in this world") end
     end })
@@ -8491,7 +8475,6 @@ loop(2, function()
     end
     -- team for places where nothing is being attacked (Time Chamber, idle)
     if On("AutoTeams") and not Extras.Fighting then Extras.TeamFor(nil) end
-    if On("BoostPetSpeed") and Util.Every("petspeed", 10) then Extras.BoostPetSpeed() end
     if Util.Every("maxhatch", 5) then pcall(Extras.MaxHatch) end
     if Extras.StatsLabel then Extras.StatsLabel:Set(Extras.StatsText()) end
 end)
