@@ -3507,18 +3507,35 @@ function Features.EquipOpenArtifact()
     return true
 end
 
+-- AttemptTravel("Dungeon") answers with WHERE to go (a Vector3, like every AttemptTravel in the
+-- spy log); the game's own client then moves you there. Calling it from the hub moved nobody:
+-- the dungeon was open, the character stayed outside ("it opened but didn't go in").
+function Features.EnterDungeon(why)
+    local res = Net.Call("DungeonLobby")
+    local cf = toCFrame(res)
+    if cf then
+        pcall(function() LP:RequestStreamAroundAsync(cf.Position) end)
+        Util.MoveTo(cf + Vector3.new(0, 4, 0))
+        task.delay(0.5, function() pcall(Features.PetsFollow) end)
+    end
+    if Util.Every("dungeon-enter-log", 4) then
+        Combat.Log("dungeon", "going in (" .. tostring(why) .. "): AttemptTravel(Dungeon) -> " .. (typeof(res) == "Vector3" and string.format("%.0f, %.0f, %.0f", res.X, res.Y, res.Z) or tostring(res)))
+    end
+    return cf ~= nil
+end
+
 function Features.OpenDungeon()
     if os.clock() < nextSummon then
         -- a dungeon was just summoned: keep trying to get in instead of summoning again
         if Util.Every("dungeon-rejoin", 5) then
-            Net.Call("DungeonLobby")
+            Features.EnterDungeon("summoned, retry")
             Net.Raw("JoinDungeon", Learn.Get("JoinDungeon") or {})
         end
         return
     end
     -- 1. dungeon lobby (summon only works there)
     if Util.World() ~= "Dungeon" then
-        Net.Call("DungeonLobby")
+        Features.EnterDungeon("to the lobby")
         local t0 = os.clock()
         while Util.World() ~= "Dungeon" and os.clock() - t0 < 4 do task.wait(0.1) end
         local cf = Travel.SpawnCFrame("Dungeon")
@@ -4042,6 +4059,28 @@ function Features.Dungeon()
         -- the next feature in the Priority list runs meanwhile)
         local cd = Features.DungeonCooldown()
         if cd > 0 then
+            -- the cooldown starts the moment a dungeon is summoned: summoned by us in the last
+            -- 90 s = it's open and waiting -> go in (the log of 16 Oct 17:23: summoned, then
+            -- "cooldown" -> Time Chamber, the dungeon was never entered)
+            local ls = Features.LastSummon
+            local finished = Features.DungeonFinishedAt and ls and Features.DungeonFinishedAt > ls.at
+            if ls and os.clock() - ls.at < 90 and not finished then
+                dungeonStep = "joining"
+                if Util.Every("dungeon-go-in", 3) then
+                    if Util.Every("dungeon-open-log", 30) then
+                        Combat.Log("dungeon", string.format("dungeon open (summoned %.0f s ago, next one in %d min) - going in", os.clock() - ls.at, math.floor(cd / 60)))
+                    end
+                    Features.EnterDungeon("summoned")
+                    Net.Raw("JoinDungeon", Learn.Get("JoinDungeon") or {})
+                    local mg = Data.MainGui()
+                    local dt = mg and mg:FindFirstChild("DungeonTravel")
+                    if dt and dt:IsA("GuiObject") and dt.Visible then
+                        local yes = dt:FindFirstChild("Yes", true)
+                        if yes and yes:IsA("GuiButton") then Features.FireGui(yes, { "Activated" }) end
+                    end
+                end
+                return true
+            end
             dungeonStep = "cooldown"
             return false
         end
@@ -5875,16 +5914,26 @@ function DungeonGui.SummonDirect()
     if flag == nil then flag = On("DungeonFriends") end
     Features.DungeonSent = { v = flag, private = On("DungeonFriends"), at = os.clock() }
     if CFG.DungeonSummonFlag ~= nil then flag = CFG.DungeonSummonFlag end
-    Net.Call("SummonDungeon", flag, sizeIndex, world)
+    local cdBefore = Features.DungeonCooldown()
+    local answer = Net.Call("SummonDungeon", flag, sizeIndex, world)
     Features.LastSummon = { source = "direct (Yuto Hub args)", artifact = "-", at = os.clock() }
     task.wait(1)
+    local opened = cdBefore <= 0 and Features.DungeonCooldown() > 0
+    Combat.Log("dungeon", string.format("summon %s, size %d (flag %s) -> answer %s, %s", world, sizeIndex, tostring(flag), tostring(answer),
+        opened and "opened (cooldown started)" or "cooldown didn't start yet"))
     if On("DungeonArtifact") and type(prevArt) == "string" and prevArt ~= "" and prevArt ~= "Dungeon" then
         Net.Call("EquipArtifact", prevArt, "CurrentArtefact")      -- your own artefact back on
     end
-    Net.Call("DungeonLobby")                                        -- AttemptTravel("Dungeon")
+    Features.EnterDungeon("just summoned")                           -- AttemptTravel("Dungeon") + go there
     local t0 = os.clock()
-    while os.clock() - t0 < 3 and not Features.InDungeon() do task.wait(0.1) end
-    if Features.InDungeon() then DungeonGui.waitUntil, DungeonGui.directTries = 0, 0 end
+    while os.clock() - t0 < 4 and not Features.InDungeon() do task.wait(0.1) end
+    if Features.InDungeon() then
+        DungeonGui.waitUntil, DungeonGui.directTries = 0, 0
+        Combat.Log("dungeon", "in the dungeon")
+    elseif opened then
+        -- it's open: no more summons, no walking to the door - keep going in (Features.Dungeon)
+        DungeonGui.waitUntil, DungeonGui.directTries = os.clock() + 60, 0
+    end
     return true
 end
 function Features.OpenDungeon()
@@ -8420,10 +8469,12 @@ loop(0.25, function()
             local p = part.Position
             local falling = part.AssemblyLinearVelocity.Y < -60 and p.Y < pos.Y - 20
             local lost = p.Y < pos.Y - 150 or (p - pos).Magnitude > 400
-            -- (a pet that stays far even so: every 15 s after 5 tries - never fight the game)
+            -- a pet still far / below after 3 pulls (log 16 Oct: "4 pets falling / left far
+            -- behind" every few seconds after they fell out of the map) isn't pulled any more:
+            -- the 2 s loop takes it off and on again (fresh model next to you)
             if not (falling or lost) then Features.PetRescueN[m] = nil end
-            local every = (Features.PetRescueN[m] or 0) < 5 and 1 or 15
-            if callAll or ((falling or lost) and now - (Features.PetRescueAt[m] or -99) > every) then
+            local tries = Features.PetRescueN[m] or 0
+            if (callAll and tries < 3) or ((falling or lost) and tries < 3 and now - (Features.PetRescueAt[m] or -99) > 1.5) then
                 Features.PetRescueAt[m] = now
                 if falling or lost then Features.PetRescueN[m] = (Features.PetRescueN[m] or 0) + 1 end
                 task.spawn(Net.Call, "PetTeleport", m)
@@ -8516,7 +8567,8 @@ loop(2, function()
         if not saved then return end
         local alive, aliveN = {}, 0
         for _, m in ipairs(Data.EquippedPets()) do
-            if Data.PetAlive(m) then
+            -- (pulled 3 times and still far / below us = as good as gone)
+            if Data.PetAlive(m) and (Features.PetRescueN[m] or 0) < 3 then
                 local u = Data.PetUID(m)
                 if u then alive[u] = true aliveN = aliveN + 1 end
             end
@@ -8552,7 +8604,7 @@ loop(2, function()
         Features.LastPetSwapAt = now
         Features.LostSince = nil
         table.sort(lost, function(a, b) return a.slot < b.slot end)
-        Combat.Log("pets", string.format("%d of %d equipped pets are gone (model fell out of the map / was deleted, %d here) - taking those off and on again (%d/5)",
+        Combat.Log("pets", string.format("%d of %d equipped pets are gone (model fell out of the map / deleted / stuck far away, %d here) - taking those off and on again (%d/5)",
             #lost, n, aliveN, Features.LostFixes))
         for _, p in ipairs(lost) do Net.Call("ManagePetUnequip", tonumber(p.uid) or p.uid) end
         task.wait(0.5)
