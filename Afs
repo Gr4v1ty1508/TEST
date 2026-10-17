@@ -5288,7 +5288,6 @@ function Features.UseBoosts()
                     if Util.Every("useboost-fail-" .. b.key, 120) then
                         Combat.Log("boost", string.format("using %s did nothing (%d left, %s on it) - use one by hand once so the hub learns how",
                             b.name, ubItems(b.item), fmtLeft(left)))
-                        Util.Notify("Auto Use Boost: " .. b.name .. " didn't work - use one by hand once")
                     end
                     break
                 end
@@ -5304,7 +5303,6 @@ function Features.UseBoosts()
                 UB.out[b.key] = why
                 if Util.Every("useboost-out-" .. b.key, 600) then
                     Combat.Log("boost", string.format("%s: no items left (%s), %s left - can't fill it", b.name, why, fmtLeft(left)))
-                    Util.Notify("Auto Use Boost: no " .. b.name .. " left (" .. why .. ")")
                 end
             else
                 UB.out[b.key] = nil
