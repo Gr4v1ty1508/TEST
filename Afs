@@ -323,7 +323,7 @@ end
 -- GravityHub/AFS/learned_calls.json and reused, so the script sends what the
 -- game really expects instead of a guess.
 local Learn = { data = nil }
-Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true, TrialShopPurchase = true, UpgradePotion = true, OpenEgg = true }
+Learn.Watch = { SummonDungeon = true, SetDungeonSetting = true, JoinDungeon = true, TrialShopPurchase = true, UpgradePotion = true, OpenEgg = true, UseItem = true }
 Learn.File = CFG.ConfigFolder .. "/learned_calls.json"
 function Learn.Load()
     if Learn.data then return Learn.data end
@@ -5103,6 +5103,181 @@ function Features.MegaCraft()
 end
 end
 
+-- AUTO USE BOOSTS ---------------------------------------------------------------------------------
+-- Mega / Super / Shiny boosts: the item "<Key>Boost" adds BoostData[<Key>].ItemSeconds (Mega 1 h,
+-- Super 30 min, Shiny 15 min) to that boost; a boost holds 500 h at most. When a picked boost has
+-- less than the set hours left, its items are used (Remote UseItem) until it's back above that.
+-- Time left: the game's boost bar (MainGui.ActiveBoost: BoostFrame = BoostImage + "416:26:38",
+-- matched by image), else the save (Boosts.SuperDmg = 1499194 s = the bar's 416:26:38).
+do
+local UB = { argsOk = nil }
+local BOOST_CAP = 500 * 3600
+function Features.UseBoostTypes()
+    local bd, is = Data.Module("BoostData") or {}, Data.Module("ItemStats") or {}
+    local out = {}
+    for key, v in pairs(bd) do
+        if type(v) == "table" and (string.sub(key, 1, 4) == "Mega" or string.sub(key, 1, 5) == "Super" or key == "Shiny")
+           and (next(is) == nil or is[key .. "Boost"] ~= nil) then
+            out[#out + 1] = { key = key, item = key .. "Boost", name = v.DisplayName or key,
+                secs = tonumber(v.ItemSeconds) or 1800, image = v.Image and tostring(v.Image) or nil }
+        end
+    end
+    if #out == 0 then
+        for _, k in ipairs({ "MegaDmg", "MegaDrops", "MegaLuck", "MegaPassiveLuck", "MegaTime", "MegaXp", "MegaYen",
+                             "SuperDmg", "SuperDrops", "SuperLuck", "SuperTime", "SuperXp", "SuperYen", "Shiny" }) do
+            out[#out + 1] = { key = k, item = k .. "Boost", name = k,
+                secs = string.sub(k, 1, 4) == "Mega" and 3600 or (k == "Shiny" and 900 or 1800) }
+        end
+    end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    return out
+end
+function Features.UseBoostNames()
+    local n = {}
+    for _, b in ipairs(Features.UseBoostTypes()) do n[#n + 1] = b.name end
+    return n
+end
+local function ubItems(name)
+    local st = Data.StoreData()
+    local it = st and st.Items
+    return type(it) == "table" and (tonumber(it[name]) or 0) or 0
+end
+-- seconds left on every boost shown in the game's boost bar (key -> seconds)
+function Features.BoostBar()
+    local mg = Data.MainGui()
+    local bar = mg and mg:FindFirstChild("ActiveBoost")
+    if not bar then return nil end
+    local byImage = {}
+    for _, b in ipairs(Features.UseBoostTypes()) do if b.image then byImage[b.image] = b.key end end
+    local out = {}
+    for _, f in ipairs(bar:GetChildren()) do
+        local img, amt = f:FindFirstChild("BoostImage"), f:FindFirstChild("Amount")
+        if img and amt and img:IsA("ImageLabel") and amt:IsA("TextLabel") then
+            local key = byImage[tostring(img.Image)]
+            local h, m, sec = string.match(amt.Text, "(%d+):(%d+):(%d+)")
+            if key and h then out[key] = tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(sec) end
+        end
+    end
+    return out
+end
+function Features.BoostLeft(key, bar)
+    bar = bar or Features.BoostBar()
+    if bar and bar[key] then return bar[key] end
+    local st = Data.StoreData()
+    local b = st and st.Boosts
+    local v = type(b) == "table" and tonumber(b[key]) or 0
+    if v > 1e9 then v = v - workspace:GetServerTimeNow() end     -- an end time, not seconds left
+    return math.max(0, v)
+end
+local function fmtLeft(secs)
+    secs = math.floor(secs)
+    return string.format("%d:%02d:%02d", secs // 3600, (secs % 3600) // 60, secs % 60)
+end
+-- what UseItem gets: what worked before / what the game sent when you used an item by hand
+-- (with this item swapped in) / a few forms - the one that takes an item away is kept
+local function useArgsList(b)
+    local list, seen = {}, {}
+    local function add(args)
+        if not args then return end
+        local k = {}
+        for i = 1, args.n or #args do k[i] = tostring(args[i]) end
+        k = table.concat(k, ",")
+        if not seen[k] then seen[k] = true list[#list + 1] = args end
+    end
+    if UB.argsOk then add(UB.argsOk(b)) end
+    local learned, n = Learn.Get("UseItem")
+    if learned then
+        local names = {}
+        for _, x in ipairs(Features.UseBoostTypes()) do names[x.item] = "item" names[x.key] = "key" end
+        local i2 = Data.Module("ItemStats") or {}
+        for i = 1, n do
+            local a = learned[i]
+            if type(a) == "string" and (names[a] or i2[a]) then learned[i] = (names[a] == "key") and b.key or b.item
+            elseif type(a) == "number" then learned[i] = 1 end
+        end
+        learned.n = n
+        add(learned)
+    end
+    add({ b.item, 1, n = 2 })
+    add({ b.item, n = 1 })
+    add({ b.key, 1, n = 2 })
+    return list
+end
+function Features.UseBoostOnce(b)
+    local before, leftBefore = ubItems(b.item), Features.BoostLeft(b.key)
+    for _, args in ipairs(useArgsList(b)) do
+        Net.Raw("UseItem", args)
+        local t0 = os.clock()
+        while os.clock() - t0 < 2.5 do
+            task.wait(0.25)
+            if ubItems(b.item) < before or Features.BoostLeft(b.key) > leftBefore + 1 then
+                -- remember the form: same shape, this boost's names put in
+                local shape = {}
+                for i = 1, args.n or #args do
+                    local a = args[i]
+                    shape[i] = (a == b.item and "item") or (a == b.key and "key") or a
+                end
+                local n = args.n or #args
+                UB.argsOk = function(x)
+                    local o = { n = n }
+                    for i = 1, n do o[i] = (shape[i] == "item" and x.item) or (shape[i] == "key" and x.key) or shape[i] end
+                    return o
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+UB.filling = {}
+function Features.UseBoosts()
+    local picked = F("UseBoostTypes") or {}
+    local below = (tonumber(F("UseBoostBelow")) or 24) * 3600
+    -- once under "Use When Less Than", keep using until "Fill Up To" (never lower than the first)
+    local target = math.max(below, (tonumber(F("UseBoostFill")) or 0) * 3600)
+    local bar = Features.BoostBar()
+    for _, b in ipairs(Features.UseBoostTypes()) do
+        if picked[b.name] then
+            local left = Features.BoostLeft(b.key, bar)
+            if left < below then UB.filling[b.key] = true end
+            if left >= target then UB.filling[b.key] = nil end
+            local used = 0
+            -- up to 10 at a time, never past what a boost holds (500 h)
+            while On("AutoUseBoost") and UB.filling[b.key] and used < 10 and left < target and left + b.secs <= BOOST_CAP and ubItems(b.item) > 0 do
+                if not Features.UseBoostOnce(b) then
+                    if Util.Every("useboost-fail-" .. b.key, 120) then
+                        Combat.Log("boost", string.format("using %s did nothing (%d left, %s on it) - use one by hand once so the hub learns how",
+                            b.name, ubItems(b.item), fmtLeft(left)))
+                        Util.Notify("Auto Use Boost: " .. b.name .. " didn't work - use one by hand once")
+                    end
+                    break
+                end
+                used = used + 1
+                left = left + b.secs
+                bar = nil
+            end
+            if left >= target or left + b.secs > BOOST_CAP or ubItems(b.item) <= 0 then UB.filling[b.key] = nil end
+            if used > 0 then
+                Combat.Log("boost", string.format("used %d %s -> %s left (%d items left, below %s -> up to %s)",
+                    used, b.name, fmtLeft(Features.BoostLeft(b.key)), ubItems(b.item), fmtLeft(below), fmtLeft(target)))
+            end
+        end
+    end
+end
+function Features.UseBoostStatus()
+    local picked = F("UseBoostTypes") or {}
+    local bar = Features.BoostBar()
+    local lines = {}
+    for _, b in ipairs(Features.UseBoostTypes()) do
+        if picked[b.name] then
+            lines[#lines + 1] = string.format("[-] %s : %s left | x%d", b.name, fmtLeft(Features.BoostLeft(b.key, bar)), ubItems(b.item))
+        end
+    end
+    if #lines == 0 then return "Pick the boosts to use" end
+    return table.concat(lines, "\n")
+end
+end
+
 -- PASSIVE MACHINE (like Yuto): rerolls are done standing at the machine.
 -- Each machine is Worlds.<World>.Passive (prompt "Reroll"). Event categories have their own
 -- world (Frieren2026, Easter2026, BC2026, Christmas2); Normal / Requiem use the main machine.
@@ -7799,6 +7974,16 @@ do
         Features.MegaStatus = mc:Paragraph({ Body = "Status : -" })
         mc:Toggle({ Title = "Auto Craft Mega Boost", Flag = "AutoMegaCraft" })
     end
+    do
+        local ub = TShop:Card("Auto Use Boosts", "Right")
+        ub:Paragraph({ Body = "[-] When a picked Mega / Super / Shiny boost has less time left than \"Use When Less Than\",\n"
+            .. "    its items are used until it has \"Fill Up To\" (a boost holds 500 h at most)." })
+        ub:Dropdown({ Title = "Boosts To Use", Items = Features.UseBoostNames(), Multi = true, Default = {}, Flag = "UseBoostTypes" })
+        ub:Slider({ Title = "Use When Less Than [hours]", Min = 1, Max = 499, Default = 24, Flag = "UseBoostBelow" })
+        ub:Slider({ Title = "Fill Up To [hours]", Min = 1, Max = 500, Default = 24, Flag = "UseBoostFill" })
+        Features.UseBoostLabel = ub:Paragraph({ Body = "Status : -" })
+        ub:Toggle({ Title = "Auto Use Boosts", Flag = "AutoUseBoost" })
+    end
     local c = TShop:Card("Auto Claim", "Right")
     c:Toggle({ Title = "Auto Daily Spin", Flag = "AutoSpin" })
     c:Toggle({ Title = "Auto Claim Ticket", Flag = "AutoTicket" })
@@ -8608,6 +8793,10 @@ loop(3, function() if On("HideOthers") then Features.HideOthers(true) end end)
 loop(0.31, function() if On("AttackUlt") then Features.Ult() end end)
 loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") then Features.Hatch() end end)
 loop(0.2, function() if On("AutoMegaCraft") then Features.MegaCraft() else task.wait(0.5) end end)
+loop(3, function() if On("AutoUseBoost") then Features.UseBoosts() end end)
+loop(3, function()
+    if Features.UseBoostLabel then pcall(function() Features.UseBoostLabel:Set(Features.UseBoostStatus()) end) end
+end)
 loop(2, function() if Features.MegaStatus then pcall(function() Features.MegaStatus:Set(Features.MegaStatusText()) end) end end)
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
 -- after joining, the save (GameData) loads a bit after the hub: refresh the pet lists once it's there
