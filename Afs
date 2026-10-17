@@ -5103,11 +5103,17 @@ function Features.MegaCraft()
     -- at most 500 per purchase (Passive Luck Boost holds 900 - one buy of 850 may be refused;
     -- the shop was only ever seen taking up to 499 at once): the rest goes in the next round
     if buyM then buyAmt = math.min(buyAmt, 500) end
+    -- nothing to do (every picked Mega is full / none picked): stay on but only look again every
+    -- 5 s (was every 0.2 s) - when Auto Use Boosts uses one, it's crafted back up by itself
     if not anyOpen then
-        Flags.AutoMegaCraft:Set(false)
-        Util.Notify("Mega Boosts: every selected boost is full")
+        if not Features.MegaIdle then
+            Features.MegaIdle = true
+            Combat.Log("mega", next(picked) and "every picked Mega boost is full - checking every 5 s" or "no Mega boost picked - checking every 5 s")
+        end
+        task.wait(5)
         return
     end
+    Features.MegaIdle = nil
     if craftM then
         local m = craftM
         -- craft at the Potion Master
@@ -8763,6 +8769,7 @@ do
         local mc = Features.TAuto:Card("Mega Boost Crafter", "Left")
         mc:Paragraph({ Body = "[-] Buys Super boosts (Max) in the Time Trial shop with Tower Shards, then crafts them\n"
             .. "    at the Potion Master (50 -> 1 Mega) until each selected Mega boost has 500.\n"
+            .. "[-] All full: it stays on and looks again every 5 s - a Mega used up is crafted back.\n"
             .. "[-] Buy one Super boost and craft one Mega boost by hand once: the hub learns the exact calls." })
         local names = Features.MegaNames()
         local def = {}
