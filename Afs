@@ -8152,8 +8152,6 @@ do
     ST.step = now:Stat({ Title = "Last step" })
     ST.pets = now:Stat({ Title = "Pets" })
     ST.loop = now:Stat({ Title = "Main loop" })
-    ST.net = now:Stat({ Title = "FPS / Ping" })
-    ST.up = now:Stat({ Title = "Session" })
 
     local md = Features.TStatus:Card("Modes", "Left")
     ST.dungeon = md:Stat({ Title = "Dungeon" })
@@ -8196,13 +8194,6 @@ function Features.UpdateStatus()
         local lag = os.clock() - (Features.BrainTickAt or os.clock())
         ST.loop:Set(lag < 10 and dot("green", "OK") or dot("red", string.format("stuck %ds", lag)))
     end)
-    pcall(function()
-        local fps = math.floor(workspace:GetRealPhysicsFPS() + 0.5)
-        local ping = "?"
-        pcall(function() ping = string.match(game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValueString(), "^(%d+)") or "?" end)
-        ST.net:Set(string.format("%d fps  ·  %s ms", fps, ping))
-    end)
-    pcall(function() ST.up:Set(hms(os.clock() - Features.StartedAt)) end)
 
     -- modes
     local off = "<font color='#6b7280'>off</font>"
