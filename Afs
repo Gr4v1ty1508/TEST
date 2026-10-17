@@ -8139,6 +8139,7 @@ do
 
     local eq = Features.TStatus:Card("Equipped", "Left")
     ST.title = eq:Stat({ Title = "Title" })
+    ST.avatar = eq:Stat({ Title = "Avatar" })
     ST.art1 = eq:Stat({ Title = "Artifact 1" })
     ST.art2 = eq:Stat({ Title = "Artifact 2" })
 
@@ -8206,6 +8207,18 @@ function Features.StatusRows()
             if typeof(c) == "Color3" then
                 R.titleColor = string.format("#%02x%02x%02x", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
             end
+        end
+        -- the avatar (Avatar Index) on: its game name (PetStats DisplayName) and rarity
+        local av = st.CurrentAvatar
+        if type(av) ~= "string" or av == "" then
+            local v = LP:FindFirstChild("CurrentAvatar")
+            av = v and v:IsA("ValueBase") and tostring(v.Value) or nil
+        end
+        if type(av) == "string" and av ~= "" then
+            R.avatar = Data.PetDisplay(av)
+            local ps = Data.Module("PetStats")
+            local d = type(ps) == "table" and ps[av]
+            R.avatarRarity = (type(d) == "table" and type(d.Rarity) == "string" and d.Rarity ~= "") and d.Rarity or nil
         end
     end)
     local function row(list, key, title, fn)
@@ -8325,6 +8338,7 @@ function Features.UpdateStatus()
         local none = "<font color='#6b7280'>none</font>"
         local function rt(x) return (string.gsub(string.gsub(string.gsub(tostring(x), "&", "&amp;"), "<", "&lt;"), ">", "&gt;")) end
         ST.title:Set(R.title and (R.titleColor and string.format("<font color='%s'><b>%s</b></font>", R.titleColor, rt(R.title)) or rt(R.title)) or none)
+        ST.avatar:Set(R.avatar and (rt(R.avatar) .. (R.avatarRarity and ("  <font color='#6b7280'>" .. rt(R.avatarRarity) .. "</font>") or "")) or none)
         ST.art1:Set(R.art1 and rt(R.art1) or none)
         ST.art2:Set(R.art2 and rt(R.art2) or (R.art2Locked and "<font color='#6b7280'>locked</font>" or none))
     end)
@@ -8506,6 +8520,7 @@ function Features.Webhook(kind)
         "",
         string.format("👤 ||%s||  ·  Lv **%s**  ·  Rebirth **%s**", esc(LP.Name), num(st.PlayerLevel), num(st.Rebirths)),
         string.format("🏅 **%s**  ·  👑 %s", esc(rank), esc(R.title or "-")),
+        string.format("🎭 **%s**%s", esc(R.avatar or "no avatar"), R.avatarRarity and (" (" .. esc(R.avatarRarity) .. ")") or ""),
         string.format("🏺 %s  ·  %s", esc(R.art1 or "no artifact"), esc(R.art2 or (R.art2Locked and "slot 2 locked" or "no 2nd artifact"))),
         string.format("🌍 **%s**  ·  ⏱️ up **%s**", esc(R.world), dur(up)),
         "📝 `" .. (step ~= "" and step or "-") .. "`",
