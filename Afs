@@ -5116,7 +5116,7 @@ function Features.UseBoostTypes()
     local bd, is = Data.Module("BoostData") or {}, Data.Module("ItemStats") or {}
     local out = {}
     for key, v in pairs(bd) do
-        if type(v) == "table" and (string.sub(key, 1, 4) == "Mega" or string.sub(key, 1, 5) == "Super" or key == "Shiny")
+        if type(v) == "table" and (string.sub(key, 1, 4) == "Mega" or string.sub(key, 1, 5) == "Super" or key == "Shiny" or key == "PassiveLuck")
            and (next(is) == nil or is[key .. "Boost"] ~= nil) then
             out[#out + 1] = { key = key, item = key .. "Boost", name = v.DisplayName or key,
                 secs = tonumber(v.ItemSeconds) or 1800, image = v.Image and tostring(v.Image) or nil }
@@ -5124,9 +5124,9 @@ function Features.UseBoostTypes()
     end
     if #out == 0 then
         for _, k in ipairs({ "MegaDmg", "MegaDrops", "MegaLuck", "MegaPassiveLuck", "MegaTime", "MegaXp", "MegaYen",
-                             "SuperDmg", "SuperDrops", "SuperLuck", "SuperTime", "SuperXp", "SuperYen", "Shiny" }) do
+                             "SuperDmg", "SuperDrops", "SuperLuck", "SuperTime", "SuperXp", "SuperYen", "Shiny", "PassiveLuck" }) do
             out[#out + 1] = { key = k, item = k .. "Boost", name = k,
-                secs = string.sub(k, 1, 4) == "Mega" and 3600 or (k == "Shiny" and 900 or 1800) }
+                secs = string.sub(k, 1, 4) == "Mega" and 3600 or (k == "Shiny" and 900 or (k == "PassiveLuck" and 600 or 1800)) }
         end
     end
     table.sort(out, function(a, b) return a.name < b.name end)
@@ -5229,6 +5229,36 @@ function Features.UseBoostOnce(b)
     end
     return false
 end
+-- the Time Trial shop sells the Super boosts and the normal Passive Luck Boost (Tower Shards):
+-- out of items while a boost is being filled -> buy what's still needed (crafting Mega boosts
+-- uses every Super up, so there were none left to use)
+local function ubShopPrice(item)
+    local shop = Data.Module("TimeTrialShop") or {}
+    local e = shop[item]
+    return type(e) == "table" and tonumber(e.Price) or nil
+end
+local function ubLimit(item)
+    local is = Data.Module("ItemStats") or {}
+    return type(is[item]) == "table" and tonumber(is[item].ItemLimit) or 500
+end
+function Features.UseBoostBuy(b, left, target)
+    local price = ubShopPrice(b.item)
+    if not price or price <= 0 or not Features.MegaBuy then return 0 end
+    local have = ubItems(b.item)
+    local need = math.ceil((target - left) / b.secs)
+    need = math.min(need, math.floor((BOOST_CAP - left) / b.secs))
+    local shards = ubItems("TowerShard")
+    local amount = math.min(need - have, ubLimit(b.item) - have, math.floor(shards / price), 500)
+    if amount <= 0 then
+        if need > have and Util.Every("useboost-poor-" .. b.key, 300) then
+            Combat.Log("boost", string.format("%s: out of items and not enough Tower Shards (%d, %d each)", b.name, shards, price))
+        end
+        return 0
+    end
+    local got = Features.MegaBuy({ src = b.item, name = b.name }, amount)
+    Combat.Log("boost", string.format("bought %d %s in the Time Trial shop (%d Tower Shards left)", got, b.name, ubItems("TowerShard")))
+    return got
+end
 UB.filling = {}
 function Features.UseBoosts()
     local picked = F("UseBoostTypes") or {}
@@ -5241,6 +5271,10 @@ function Features.UseBoosts()
             local left = Features.BoostLeft(b.key, bar)
             if left < below then UB.filling[b.key] = true end
             if left >= target then UB.filling[b.key] = nil end
+            if UB.filling[b.key] and ubItems(b.item) * b.secs < target - left and On("UseBoostBuy")
+               and Util.Every("useboost-buy-" .. b.key, 10) then
+                Features.UseBoostBuy(b, left, target)
+            end
             local used = 0
             -- up to 10 at a time, never past what a boost holds (500 h)
             while On("AutoUseBoost") and UB.filling[b.key] and used < 10 and left < target and left + b.secs <= BOOST_CAP and ubItems(b.item) > 0 do
@@ -5270,7 +5304,8 @@ function Features.UseBoostStatus()
     local lines = {}
     for _, b in ipairs(Features.UseBoostTypes()) do
         if picked[b.name] then
-            lines[#lines + 1] = string.format("[-] %s : %s left | x%d", b.name, fmtLeft(Features.BoostLeft(b.key, bar)), ubItems(b.item))
+            lines[#lines + 1] = string.format("[-] %s : %s left | x%d%s", b.name, fmtLeft(Features.BoostLeft(b.key, bar)), ubItems(b.item),
+                ubShopPrice(b.item) and " (shop)" or "")
         end
     end
     if #lines == 0 then return "Pick the boosts to use" end
@@ -7976,11 +8011,13 @@ do
     end
     do
         local ub = TShop:Card("Auto Use Boosts", "Right")
-        ub:Paragraph({ Body = "[-] When a picked Mega / Super / Shiny boost has less time left than \"Use When Less Than\",\n"
-            .. "    its items are used until it has \"Fill Up To\" (a boost holds 500 h at most)." })
+        ub:Paragraph({ Body = "[-] When a picked Mega / Super / Shiny / Passive Luck boost has less time left than\n"
+            .. "    \"Use When Less Than\", its items are used until it has \"Fill Up To\" (500 h at most).\n"
+            .. "[-] Super and Passive Luck boosts that run out are bought in the Time Trial shop (shop)." })
         ub:Dropdown({ Title = "Boosts To Use", Items = Features.UseBoostNames(), Multi = true, Default = {}, Flag = "UseBoostTypes" })
         ub:Slider({ Title = "Use When Less Than [hours]", Min = 1, Max = 499, Default = 24, Flag = "UseBoostBelow" })
         ub:Slider({ Title = "Fill Up To [hours]", Min = 1, Max = 500, Default = 24, Flag = "UseBoostFill" })
+        ub:Toggle({ Title = "Buy Super / Passive Luck When Out (Tower Shards)", Default = true, Flag = "UseBoostBuy" })
         Features.UseBoostLabel = ub:Paragraph({ Body = "Status : -" })
         ub:Toggle({ Title = "Auto Use Boosts", Flag = "AutoUseBoost" })
     end
