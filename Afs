@@ -9137,6 +9137,15 @@ loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") t
 loop(0.2, function() if On("AutoMegaCraft") then Features.MegaCraft() else task.wait(0.5) end end)
 loop(3, function() if On("AutoUseBoost") then Features.UseBoosts() end end)
 loop(20, function() if On("AutoClone") then Features.CloneTick() end end)
+-- Auto Lunar's picked pets: their fingerprints follow the pets during the game (a pet renamed /
+-- levelled / fused keeps its UID until you leave), so after a rejoin they're still found
+loop(30, function()
+    if not (Features.PicksReady and Features.ConfigLoaded and Features.SavePetPicks) then return end
+    local st = Data.StoreData()
+    if not (st and type(st.Pets) == "table" and next(st.Pets)) then return end   -- save not readable: keep the old ones
+    local picks = F("EQPets")
+    if type(picks) == "table" and next(picks) then pcall(Features.SavePetPicks, "EQPets", picks) end
+end)
 loop(5, function()
     if Features.CloneLabel then pcall(function() Features.CloneLabel:Set(Features.CloneStatus()) end) end
 end)
