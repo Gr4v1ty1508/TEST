@@ -4874,8 +4874,14 @@ function Features.MegaTypes()
     local out = {}
     for _, m in ipairs(list) do
         local base = string.sub(m.key, 5)                         -- "Xp", "PassiveLuck"
+        -- (Passive Luck has no Super boost: its Mega is made from the normal Passive Luck Boost -
+        -- also when the shop module can't be read, the item list says which one exists)
+        local items = Data.Module("ItemStats") or {}
         local src = shop["Super" .. base .. "Boost"] and ("Super" .. base .. "Boost")
-            or (shop[base .. "Boost"] and (base .. "Boost")) or ("Super" .. base .. "Boost")
+            or (shop[base .. "Boost"] and (base .. "Boost"))
+            or (items["Super" .. base .. "Boost"] == nil and items[base .. "Boost"] ~= nil and (base .. "Boost"))
+            or (base == "PassiveLuck" and "PassiveLuckBoost")
+            or ("Super" .. base .. "Boost")
         local price = type(shop[src]) == "table" and tonumber(shop[src].Price) or nil
         out[#out + 1] = { key = m.key, form = m.form, name = m.name, mega = m.key .. "Boost", src = src, price = price }
     end
@@ -4952,19 +4958,40 @@ function Features.MegaBuy(m, amount)
     end
     return 0
 end
+-- what UpgradePotion gets for this boost: what worked for it before, else the learned call with
+-- this boost swapped in, then the other forms. (Mega Passive Luck was never crafted by hand, so
+-- only the swapped learned form "Passive" was ever tried for it; if the game wants another name
+-- for it, nothing happened and it stopped there.) The one that works is kept per boost.
+MB.craftArgsFor = {}
 function Features.MegaCraftOne(m)
     local before = itemCount(m.mega)
-    local learned = learnedArgs("UpgradePotion", m, CRAFT_KINDS, nil)
-    if learned then
-        Net.Raw("UpgradePotion", learned)
-        return waitChange(m.mega, before, 3)
+    local tries, seen = {}, {}
+    local function add(args)
+        if not args then return end
+        local k = table.concat((function() local t = {} for i = 1, args.n or #args do t[i] = tostring(args[i]) end return t end)(), ",")
+        if not seen[k] then seen[k] = true tries[#tries + 1] = args end
     end
-    local first = MB.craftForm or 1
-    for i = first, (MB.craftForm or #CRAFT_GUESSES) do
-        Net.Raw("UpgradePotion", CRAFT_GUESSES[i](m))
+    add(MB.craftArgsFor[m.key])
+    add(learnedArgs("UpgradePotion", m, CRAFT_KINDS, nil))
+    add({ m.form, n = 1 })
+    add({ string.sub(m.key, 5), n = 1 })                        -- "PassiveLuck"
+    for _, g in ipairs(CRAFT_GUESSES) do add(g(m)) end
+    for _, args in ipairs(tries) do
+        Net.Raw("UpgradePotion", args)
         local got = waitChange(m.mega, before, 2.5)
-        if got > 0 then MB.craftForm = i return got end
+        if got > 0 then
+            if MB.craftArgsFor[m.key] ~= args then
+                Combat.Log("mega", "crafted " .. m.name .. " with UpgradePotion(" .. tostring(args[1]) .. ")")
+            end
+            MB.craftArgsFor[m.key] = args
+            return got
+        end
+        before = itemCount(m.mega)
     end
+    local names = {}
+    for _, a in ipairs(tries) do names[#names + 1] = tostring(a[1]) end
+    Combat.Log("mega", string.format("crafting %s did nothing (%s %d, %s %d) - tried UpgradePotion(%s)",
+        m.name, m.src, itemCount(m.src), m.mega, itemCount(m.mega), table.concat(names, " / ")))
     return 0
 end
 -- the Potion Master stands in Worlds.Frieren (MegaBooster)
@@ -5007,6 +5034,7 @@ function Features.MegaCraft()
     local picked = F("MegaTypes") or {}
     local shards = itemCount("TowerShard")
     local anyOpen, craftM, buyM, buyAmt = false, nil, nil, 0
+    local partM, partAmt, short = nil, 0, nil
     for _, m in ipairs(Features.MegaTypes()) do
         local mega = itemCount(m.mega)
         if picked[m.name] and mega < itemLimit(m.mega) then
@@ -5017,8 +5045,13 @@ function Features.MegaCraft()
             local room = math.min(itemLimit(m.src) - src, (itemLimit(m.mega) - mega) * 50 - src)
             if m.price and m.price > 0 then room = math.min(room, math.floor(shards / m.price)) end
             if room >= 50 - src and not buyM then buyM, buyAmt = m, room end
+            -- can't reach 50 in one go (Passive Luck Boost: 7,500 Tower Shards EACH = 375,000 for
+            -- one Mega - it never got bought): buy what the shards allow now, collect up to 50
+            if room > 0 and room < 50 - src and not partM then partM, partAmt = m, room end
+            if room <= 0 and not short then short = { m = m, src = src } end
         end
     end
+    if not buyM and partM then buyM, buyAmt = partM, partAmt end
     if not anyOpen then
         Flags.AutoMegaCraft:Set(false)
         Util.Notify("Mega Boosts: every selected boost is full")
@@ -5046,13 +5079,23 @@ function Features.MegaCraft()
         return
     end
     if buyM then
-        if Features.MegaBuy(buyM, buyAmt) <= 0 and Util.Every("mega-buy", 30) then
+        local got = Features.MegaBuy(buyM, buyAmt)
+        if Util.Every("mega-buy-log", 20) then
+            Combat.Log("mega", string.format("bought %d %s for %s (%d/50 now, %d Tower Shards left)", got, buyM.src, buyM.name, itemCount(buyM.src), itemCount("TowerShard")))
+        end
+        if got <= 0 and Util.Every("mega-buy", 30) then
             Util.Notify("Mega Boosts: buying didn't work - buy one Super boost by hand in the Time Trial shop")
             task.wait(3)
         end
         return
     end
-    if Util.Every("mega-poor", 60) then Util.Notify("Mega Boosts: not enough Tower Shards to buy more Super boosts") end
+    if Util.Every("mega-poor", 60) then
+        Util.Notify("Mega Boosts: not enough Tower Shards to buy more Super boosts")
+        if short then
+            Combat.Log("mega", string.format("%s: %d/50 %s, %d Tower Shards (%s each) - waiting for shards",
+                short.m.name, short.src, short.m.src, shards, tostring(short.m.price)))
+        end
+    end
     task.wait(5)
 end
 end
