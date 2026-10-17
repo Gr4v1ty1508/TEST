@@ -954,7 +954,9 @@ function Combat.Log(key, msg)
     local now = os.clock()
     if Combat.LogLast[key] == msg then return end
     Combat.LogLast[key] = msg
-    if key ~= "brain" then Combat.Status = msg end
+    -- "Last step" on the Status tab: what the main loop / the modes did - not the background
+    -- automations or the 2-minute status line
+    if key ~= "brain" and key ~= "alive" and key ~= "boost" and key ~= "mega" and key ~= "clone" then Combat.Status = msg end
     if not appendfile then return end
     pcall(function()
         if isfolder and makefolder and not isfolder(CFG.ConfigFolder) then
@@ -1577,6 +1579,46 @@ function Elements:Paragraph(opt)
         TextYAlignment = Enum.TextYAlignment.Top, RichText = true,
         Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 2, Parent = f })
     return { Set = function(_, v) body.Text = v end }
+end
+
+-- big "what's running" header: caption, title, sub line, colour bar + pulsing dot
+function Elements:Hero(opt)
+    self._order = self._order + 1
+    local box = make("Frame", { BackgroundColor3 = Theme.Element, Size = UDim2.new(1, 0, 0, 74),
+        LayoutOrder = self._order, Parent = self.Body }, { corner(10), stroke(Theme.Stroke) })
+    local bar = make("Frame", { BackgroundColor3 = Color3.fromRGB(74, 222, 128), BorderSizePixel = 0,
+        Size = UDim2.new(0, 4, 1, -20), Position = UDim2.fromOffset(10, 10), Parent = box }, { corner(2) })
+    local cap = text({ Text = opt.Caption or "RUNNING NOW", Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Theme.Dim,
+        Position = UDim2.fromOffset(24, 10), Size = UDim2.new(1, -60, 0, 12), Parent = box })
+    local title = text({ Text = opt.Title or "-", Font = Enum.Font.GothamBold, TextSize = 20, TextColor3 = Theme.Text,
+        TextTruncate = Enum.TextTruncate.AtEnd, Position = UDim2.fromOffset(24, 24), Size = UDim2.new(1, -60, 0, 24), Parent = box })
+    local sub = text({ Text = opt.Sub or "", TextSize = 12, TextColor3 = Theme.Sub, RichText = true,
+        TextTruncate = Enum.TextTruncate.AtEnd, Position = UDim2.fromOffset(24, 50), Size = UDim2.new(1, -36, 0, 14), Parent = box })
+    local dot = make("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, -22, 0, 22),
+        Size = UDim2.fromOffset(10, 10), BackgroundColor3 = bar.BackgroundColor3, Parent = box }, { corner(5) })
+    local ring = make("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = dot.Position,
+        Size = UDim2.fromOffset(10, 10), BackgroundColor3 = bar.BackgroundColor3, BackgroundTransparency = 0.4, Parent = box }, { corner(10) })
+    task.spawn(function()
+        while box.Parent do
+            ring.Size, ring.BackgroundTransparency = UDim2.fromOffset(10, 10), 0.4
+            tween(ring, { Size = UDim2.fromOffset(24, 24), BackgroundTransparency = 1 }, 1.2)
+            task.wait(1.4)
+        end
+    end)
+    return { Set = function(_, t, sb, color)
+        title.Text = tostring(t or "-")
+        sub.Text = tostring(sb or "")
+        if color then bar.BackgroundColor3, dot.BackgroundColor3, ring.BackgroundColor3 = color, color, color end
+    end }
+end
+-- one "name ........ value" line (value can be rich text)
+function Elements:Stat(opt)
+    local r = row(self, 24)
+    text({ Text = opt.Title or "", TextSize = 12, TextColor3 = Theme.Dim, Size = UDim2.new(0.38, 0, 1, 0), Parent = r })
+    local v = text({ Text = opt.Value or "-", TextSize = 12, TextColor3 = Theme.Text, RichText = true,
+        TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd,
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.new(0.62, 0, 1, 0), Parent = r })
+    return { Set = function(_, val) v.Text = tostring(val) end, Row = r }
 end
 
 function Elements:Label(str)
@@ -7976,6 +8018,7 @@ local TRaid     = Window:Tab("Raid / Defense / Meteor")
 local TDungeon  = Window:Tab("Dungeon / Gate / Time")
 local TMode     = Window:Tab("Game Mode")
 local TShop     = Window:Tab("Shop / Transfer")
+Features.TAuto  = Window:Tab("Automation")
 local TOpen     = Window:Tab("Open UI")
 local THatch    = Window:Tab("Hatch", true)
 local TPassive  = Window:Tab("Passive")
@@ -8090,9 +8133,176 @@ function Features.StatusText()
     end
     return table.concat(L, "\n")
 end
+-- the Status tab: what's running (big), the modes, the automations and the Priority order
+Features.StartedAt = os.clock()
 do
-    local c = Features.TStatus:Card("Status", "Left")
-    Features.StatusLabel = c:Paragraph({ Body = "Running now : -" })
+local ST = {}
+Features.StatusUI = ST
+local SC = { green = "#4ade80", yellow = "#facc15", red = "#f87171", gray = "#6b7280", blue = "#60a5fa" }
+local function dot(c, txt) return string.format("<font color='%s'>●</font>  %s", SC[c] or c, txt) end
+local function hms(sec)
+    sec = math.max(0, math.floor(sec or 0))
+    if sec >= 86400 then return string.format("%dd %02dh", sec // 86400, (sec % 86400) // 3600) end
+    return string.format("%d:%02d:%02d", sec // 3600, (sec % 3600) // 60, sec % 60)
+end
+do
+    local now = Features.TStatus:Card("Now", "Left")
+    ST.hero = now:Hero({ Caption = "RUNNING NOW", Title = "-", Sub = "" })
+    ST.world = now:Stat({ Title = "World" })
+    ST.step = now:Stat({ Title = "Last step" })
+    ST.pets = now:Stat({ Title = "Pets" })
+    ST.loop = now:Stat({ Title = "Main loop" })
+    ST.net = now:Stat({ Title = "FPS / Ping" })
+    ST.up = now:Stat({ Title = "Session" })
+
+    local md = Features.TStatus:Card("Modes", "Left")
+    ST.dungeon = md:Stat({ Title = "Dungeon" })
+    ST.trial = md:Stat({ Title = "Time Trial" })
+    ST.inf = md:Stat({ Title = "Infinity Tower" })
+    ST.gate = md:Stat({ Title = "Gate" })
+    ST.lunar = md:Stat({ Title = "Auto Lunar" })
+    ST.bp = md:Stat({ Title = "Battle Pass" })
+    ST.rejoin = md:Stat({ Title = "Auto Rejoin" })
+
+    local pr = Features.TStatus:Card("Priority", "Right")
+    ST.prio = pr:Paragraph({ Body = "-" })
+
+    local au = Features.TStatus:Card("Automation", "Right")
+    ST.mega = au:Stat({ Title = "Mega Craft" })
+    ST.boost = au:Stat({ Title = "Auto Boosts" })
+    ST.clone = au:Stat({ Title = "Auto Clone" })
+end
+function Features.UpdateStatus()
+    local names = {}
+    for _, t in ipairs(Features.Tasks or {}) do names[t.id] = t.name end
+    local owner = Features.BrainOwner
+    pcall(function()
+        local busy = Features.InActiveRun and Features.InActiveRun()
+        ST.hero:Set(owner and (names[owner] or owner) or "Idle",
+            owner and (busy and ("in " .. tostring(busy)) or "working") or "nothing to do right now",
+            owner and Color3.fromRGB(74, 222, 128) or Color3.fromRGB(107, 114, 128))
+    end)
+    pcall(function() ST.world:Set(tostring(Data.WorldDisplay(Util.World()))) end)
+    pcall(function() ST.step:Set("<font color='#9ca3af'>" .. tostring(Combat.Status or "-") .. "</font>") end)
+    pcall(function()
+        local pets, here = Data.EquippedPets(), 0
+        for _, m in ipairs(pets) do if Data.PetAlive and Data.PetAlive(m) then here = here + 1 end end
+        local saved = 0
+        for _ in pairs(Data.SavedEquipped and Data.SavedEquipped() or {}) do saved = saved + 1 end
+        saved = math.max(saved, #pets)
+        ST.pets:Set(dot(here >= saved and saved > 0 and "green" or (here > 0 and "yellow" or "red"), here .. " / " .. saved .. " with you"))
+    end)
+    pcall(function()
+        local lag = os.clock() - (Features.BrainTickAt or os.clock())
+        ST.loop:Set(lag < 10 and dot("green", "OK") or dot("red", string.format("stuck %ds", lag)))
+    end)
+    pcall(function()
+        local fps = math.floor(workspace:GetRealPhysicsFPS() + 0.5)
+        local ping = "?"
+        pcall(function() ping = string.match(game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValueString(), "^(%d+)") or "?" end)
+        ST.net:Set(string.format("%d fps  ·  %s ms", fps, ping))
+    end)
+    pcall(function() ST.up:Set(hms(os.clock() - Features.StartedAt)) end)
+
+    -- modes
+    local off = "<font color='#6b7280'>off</font>"
+    pcall(function()
+        if not (On("AutoFarmDungeon") or On("AutoOpenDungeon")) then ST.dungeon:Set(off) return end
+        local cd = Features.DungeonCooldown and Features.DungeonCooldown() or 0
+        local bo = Features.DungeonBackoffUntil and Features.DungeonBackoffUntil - os.clock() or 0
+        ST.dungeon:Set(Features.InDungeon() and dot("green", "in a run")
+            or (cd > 0 and dot("yellow", "next in " .. hms(cd)))
+            or (bo > 0 and dot("red", "refused, retry in " .. hms(bo)))
+            or dot("blue", "ready to open"))
+    end)
+    pcall(function()
+        if not On("AutoTrial") then ST.trial:Set(off) return end
+        local left = Extras.TrialTimeLeft()
+        if left then ST.trial:Set(dot("green", "in a run, " .. left .. " left")) return end
+        local best, bestName
+        for _, name in ipairs(Util.SetToList(F("Trials"))) do
+            local id = CFG.TimeTrialIds[name]
+            local secs = id and Features.DoorCountdown(id)
+            if secs and (not best or secs < best) then best, bestName = secs, name end
+        end
+        ST.trial:Set(best and dot("yellow", string.format("%s in %d:%02d", bestName, math.floor(best / 60), math.floor(best % 60)))
+            or dot("gray", "waiting for the door times"))
+    end)
+    pcall(function()
+        if not On("AutoInf") then ST.inf:Set(off) return end
+        ST.inf:Set(Util.World() == "InfinityTower" and dot("green", "climbing") or dot("yellow", "waiting"))
+    end)
+    pcall(function()
+        if not On("AutoGate") then ST.gate:Set(off) return end
+        ST.gate:Set(Util.World() == "GatesMode" and dot("green", "in a gate") or dot("yellow", "waiting / summoning"))
+    end)
+    pcall(function()
+        if not On("AutoEventQuests") then ST.lunar:Set(off) return end
+        local cd = Features.EventQuestCooldown()
+        ST.lunar:Set(cd > 0 and dot("yellow", "new quests in " .. hms(cd)) or dot("green", tostring(Features.EQLast or "rolling")))
+    end)
+    pcall(function()
+        if not On("AutoBattlePass") then ST.bp:Set(off) return end
+        local t = Features.BattlePass and Features.BattlePass.task
+        ST.bp:Set(t and dot("green", tostring(t)) or dot("gray", "nothing picked left"))
+    end)
+    pcall(function()
+        if not (On("AutoRejoin") and Features.RejoinLeft) then ST.rejoin:Set(off) return end
+        local left, busy = Features.RejoinLeft(), Features.RejoinBusy()
+        ST.rejoin:Set(left > 0 and dot("gray", "in " .. hms(left)) or dot("yellow", busy and ("due - waiting: " .. busy) or "rejoining"))
+    end)
+
+    -- priority list, the running one lit up
+    pcall(function()
+        local L = {}
+        for i, t in ipairs(Features.TaskOrder()) do
+            if t.id == owner then
+                L[#L + 1] = string.format("<font color='#4ade80'><b>▶  %2d   %s</b></font>", i, t.name)
+            else
+                L[#L + 1] = string.format("<font color='#8a8a93'>     %2d   %s</font>", i, t.name)
+            end
+        end
+        ST.prio:Set(table.concat(L, "\n"))
+    end)
+
+    -- automations
+    pcall(function()
+        if not On("AutoMegaCraft") then ST.mega:Set(off) return end
+        local txt = Features.MegaStatusText and Features.MegaStatusText() or ""
+        local done, all = 0, 0
+        for line in string.gmatch(txt, "[^\n]+") do
+            if string.find(line, "^%[") then all = all + 1 if string.find(line, "^%[done%]") then done = done + 1 end end
+        end
+        ST.mega:Set(dot(done == all and all > 0 and "green" or "blue", string.format("%d / %d full", done, all)))
+    end)
+    pcall(function()
+        if not On("AutoUseBoost") then ST.boost:Set(off) return end
+        local picked, n, low = F("UseBoostTypes") or {}, 0, nil
+        local bar = Features.BoostBar and Features.BoostBar()
+        for _, b in ipairs(Features.UseBoostTypes()) do
+            if picked[b.name] then
+                n = n + 1
+                local l = Features.BoostLeft(b.key, bar)
+                if not low or l < low then low = l end
+            end
+        end
+        ST.boost:Set(n == 0 and dot("gray", "nothing picked") or dot("green", string.format("%d boosts · lowest %s", n, hms(low))))
+    end)
+    pcall(function()
+        if not On("AutoClone") then ST.clone:Set(off) return end
+        local busy, nextDone = 0, nil
+        for _, m in ipairs(Features.CloneMachines or {}) do
+            local st = Features.CloneState(m.id)
+            if st then
+                busy = busy + 1
+                local left = st.finish - workspace:GetServerTimeNow()
+                if not nextDone or left < nextDone then nextDone = left end
+            end
+        end
+        ST.clone:Set(dot(busy > 0 and "green" or "yellow", string.format("%d / %d cloning%s", busy, #(Features.CloneMachines or {}),
+            nextDone and (" · next " .. (nextDone > 0 and hms(nextDone) or "done")) or "")))
+    end)
+end
 end
 
 -- BATTLE PASS -------------------------------------------------------------------------------
@@ -8272,7 +8482,7 @@ do
     Refreshers[#Refreshers + 1] = function() from:Refresh(Data.Pets()) to:Refresh(Data.Pets()) end
 
     do
-        local mc = TShop:Card("Mega Boost Crafter", "Left")
+        local mc = Features.TAuto:Card("Mega Boost Crafter", "Left")
         mc:Paragraph({ Body = "[-] Buys Super boosts (Max) in the Time Trial shop with Tower Shards, then crafts them\n"
             .. "    at the Potion Master (50 -> 1 Mega) until each selected Mega boost has 500.\n"
             .. "[-] Buy one Super boost and craft one Mega boost by hand once: the hub learns the exact calls." })
@@ -8285,7 +8495,7 @@ do
         mc:Toggle({ Title = "Auto Craft Mega Boost", Flag = "AutoMegaCraft" })
     end
     do
-        local ub = TShop:Card("Auto Use Boosts", "Right")
+        local ub = Features.TAuto:Card("Auto Use Boosts", "Left")
         ub:Paragraph({ Body = "[-] When a picked Mega / Super / Shiny / Passive Luck boost has less time left than\n"
             .. "    \"Use When Less Than\", its items are used until it has \"Fill Up To\" (500 h at most).\n"
             .. "[-] Super and Passive Luck boosts that run out are bought in the Time Trial shop (shop)." })
@@ -8297,7 +8507,7 @@ do
         ub:Toggle({ Title = "Auto Use Boosts", Flag = "AutoUseBoost" })
     end
     do
-        local cl = TShop:Card("Auto Clone", "Left")
+        local cl = Features.TAuto:Card("Auto Clone", "Right")
         cl:Paragraph({ Body = "[-] Pick a fighter for each Clone Machine. An empty machine gets it put in; a finished one\n"
             .. "    is emptied (clone taken out) and gets it again. Fighters in a team are never put in." })
         local function cloneItems()
@@ -9134,7 +9344,7 @@ loop(120, function()
         tostring(root and root.Anchored), tostring(hum and hum.WalkSpeed), Util.World(), os.date("%H:%M")))
 end)
 loop(1, function()
-    if Features.StatusLabel then Features.StatusLabel:Set(Features.StatusText()) end
+    if Features.StatusUI and Features.StatusUI.hero then Features.UpdateStatus() end
 end)
 track(game:GetService("RunService").Heartbeat:Connect(function()
     if running and On("AutoClick") then Net.Call("Click") end
