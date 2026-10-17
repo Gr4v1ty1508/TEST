@@ -4095,6 +4095,12 @@ function Features.Dungeon()
             dungeonStep = "cooldown"
             return false
         end
+        -- the game kept refusing the summon (log 17 Oct 13:12-14:53: 400 summons, the hub
+        -- stood at the dungeon door for 1 h 40 min and nothing else ran): wait, do other things
+        if Features.DungeonBackoffUntil and os.clock() < Features.DungeonBackoffUntil then
+            dungeonStep = "refused, waiting"
+            return false
+        end
         Features.OpenDungeon()
         return true
     end
@@ -6268,9 +6274,16 @@ function DungeonGui.SummonDirect()
     local sizeIndex = (table.find(CFG.DungeonSizes, F("DungeonSize") or "Small") or 1) - 1
     -- Yuto Hub (watched): EquipArtefact("Dungeon") -> SummonDungeon(true, {Size, Theme})
     --   -> ~1 s -> EquipArtefact(<the one you had>) -> AttemptTravel("Dungeon") = you're in
-    local prevArt
+    local prevArt, nowArt, lastAge
     pcall(function() prevArt = Data.StoreData().CurrentArtefact end)
     if On("DungeonArtifact") then Features.EquipOpenArtifact() end
+    pcall(function() nowArt = Data.StoreData().CurrentArtefact end)
+    pcall(function()
+        local last = tonumber(Data.StoreData().LastDungeon) or 0
+        if last > 0 then lastAge = workspace:GetServerTimeNow() - last end
+    end)
+    -- what the game answers in the next seconds (its refusal reason) goes to combat_log.txt
+    Features.SummonMsgUntil = os.clock() + 6
     -- first value: what the game sent when its "Public" / "Friends Only" button was clicked
     -- (learned); Public not learned yet -> true, like Yuto Hub
     local known = Learn.Load().DungeonFlags or {}
@@ -6286,8 +6299,25 @@ function DungeonGui.SummonDirect()
     Features.LastSummon = { source = "direct (Yuto Hub args)", artifact = "-", at = os.clock() }
     task.wait(1)
     local opened = cdBefore <= 0 and Features.DungeonCooldown() > 0
-    Combat.Log("dungeon", string.format("summon %s, size %d (flag %s) -> answer %s, %s", world, sizeIndex, tostring(flag), tostring(answer),
-        opened and "opened (cooldown started)" or "cooldown didn't start yet"))
+    Combat.Log("dungeon", string.format("summon %s, size %d (flag %s) -> answer %s, %s | artefact %s -> %s | last dungeon %s ago, wait %d min",
+        world, sizeIndex, tostring(flag), tostring(answer),
+        opened and "opened (cooldown started)" or "cooldown didn't start yet",
+        tostring(prevArt), tostring(nowArt),
+        lastAge and string.format("%d:%02d", lastAge // 3600, (lastAge % 3600) // 60) or "?",
+        math.floor(Features.DungeonCooldownLength() / 60)))
+    if opened then
+        Features.DungeonFails, Features.DungeonBackoffUntil, Features.DungeonBackoffLen = 0, nil, nil
+    else
+        Features.DungeonFails = (Features.DungeonFails or 0) + 1
+        if Features.DungeonFails >= 8 then
+            Features.DungeonBackoffLen = math.min((Features.DungeonBackoffLen or 150) * 2, 1800)
+            Features.DungeonBackoffUntil = os.clock() + Features.DungeonBackoffLen
+            Features.DungeonFails = 0
+            Combat.Log("dungeon", string.format("the game refused 8 summons in a row - doing other things, trying again in %d min (summon one dungeon by hand once so the hub learns the call)",
+                Features.DungeonBackoffLen // 60))
+            Util.Notify("Dungeon: the game refused the summon - trying again in " .. (Features.DungeonBackoffLen // 60) .. " min")
+        end
+    end
     if On("DungeonArtifact") and type(prevArt) == "string" and prevArt ~= "" and prevArt ~= "Dungeon" then
         Net.Call("EquipArtifact", prevArt, "CurrentArtefact")      -- your own artefact back on
     end
@@ -7782,8 +7812,11 @@ function Features.StatusText()
     pcall(function()
         if On("AutoFarmDungeon") or On("AutoOpenDungeon") then
             local cd = Features.DungeonCooldown and Features.DungeonCooldown() or 0
+            local bo = Features.DungeonBackoffUntil and Features.DungeonBackoffUntil - os.clock() or 0
             L[#L + 1] = "Dungeon : " .. (Features.InDungeon() and "inside a run"
-                or (cd > 0 and string.format("next one in %d:%02d:%02d", cd // 3600, (cd % 3600) // 60, cd % 60) or "ready to open"))
+                or (cd > 0 and string.format("next one in %d:%02d:%02d", cd // 3600, (cd % 3600) // 60, cd % 60))
+                or (bo > 0 and string.format("the game refused the summon - trying again in %d:%02d", bo // 60, bo % 60))
+                or "ready to open")
         end
     end)
     pcall(function()
@@ -8507,6 +8540,22 @@ Net.Listen("SendSubtleMessage", function(msg)
         Features.DungeonBossAt = os.clock()
     end
 end)
+for _, rn in ipairs({ "SendMessage", "SendSubtleMessage" }) do
+    Net.Listen(rn, function(...)
+        if Features.SummonMsgUntil and os.clock() < Features.SummonMsgUntil then
+            local parts = {}
+            for i = 1, select("#", ...) do
+                local v = select(i, ...)
+                if type(v) == "table" then
+                    local ok, j = pcall(HttpService.JSONEncode, HttpService, v)
+                    v = ok and j or "table"
+                end
+                parts[#parts + 1] = tostring(v)
+            end
+            Combat.Log("dungeon", "the game says (" .. rn .. "): " .. string.sub(table.concat(parts, " | "), 1, 240))
+        end
+    end)
+end
 Net.Listen("JoinDungeon", function(data)
     Features.JoinDungeonAt = os.clock()
     Features.DungeonFinishedAt = nil
