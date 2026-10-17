@@ -5259,7 +5259,7 @@ function Features.UseBoostBuy(b, left, target)
     Combat.Log("boost", string.format("bought %d %s in the Time Trial shop (%d Tower Shards left)", got, b.name, ubItems("TowerShard")))
     return got
 end
-UB.filling = {}
+UB.filling, UB.out = {}, {}
 function Features.UseBoosts()
     local picked = F("UseBoostTypes") or {}
     local below = (tonumber(F("UseBoostBelow")) or 24) * 3600
@@ -5290,6 +5290,19 @@ function Features.UseBoosts()
                 left = left + b.secs
                 bar = nil
             end
+            -- needs time but there's nothing to use (Mega / Shiny aren't sold, or no shards): say so
+            if UB.filling[b.key] and ubItems(b.item) <= 0 and left < target then
+                local why = not ubShopPrice(b.item) and "not sold in the Time Trial shop"
+                    or (not On("UseBoostBuy") and "buying is off")
+                    or "not enough Tower Shards"
+                UB.out[b.key] = why
+                if Util.Every("useboost-out-" .. b.key, 600) then
+                    Combat.Log("boost", string.format("%s: no items left (%s), %s left - can't fill it", b.name, why, fmtLeft(left)))
+                    Util.Notify("Auto Use Boost: no " .. b.name .. " left (" .. why .. ")")
+                end
+            else
+                UB.out[b.key] = nil
+            end
             if left >= target or left + b.secs > BOOST_CAP or ubItems(b.item) <= 0 then UB.filling[b.key] = nil end
             if used > 0 then
                 Combat.Log("boost", string.format("used %d %s -> %s left (%d items left, below %s -> up to %s)",
@@ -5304,8 +5317,9 @@ function Features.UseBoostStatus()
     local lines = {}
     for _, b in ipairs(Features.UseBoostTypes()) do
         if picked[b.name] then
+            local out = UB.out[b.key]
             lines[#lines + 1] = string.format("[-] %s : %s left | x%d%s", b.name, fmtLeft(Features.BoostLeft(b.key, bar)), ubItems(b.item),
-                ubShopPrice(b.item) and " (shop)" or "")
+                out and (" <font color='#f87171'>out - " .. out .. "</font>") or (ubShopPrice(b.item) and " (shop)" or ""))
         end
     end
     if #lines == 0 then return "Pick the boosts to use" end
