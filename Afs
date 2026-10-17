@@ -8137,6 +8137,11 @@ do
     ST.pets = now:Stat({ Title = "Pets" })
     ST.loop = now:Stat({ Title = "Main loop" })
 
+    local eq = Features.TStatus:Card("Equipped", "Left")
+    ST.title = eq:Stat({ Title = "Title" })
+    ST.art1 = eq:Stat({ Title = "Artifact 1" })
+    ST.art2 = eq:Stat({ Title = "Artifact 2" })
+
     local md = Features.TStatus:Card("Modes", "Left")
     ST.dungeon = md:Stat({ Title = "Dungeon" })
     ST.trial = md:Stat({ Title = "Time Trial" })
@@ -8177,6 +8182,32 @@ function Features.StatusRows()
         R.pets = { here = here, saved = saved, c = here >= saved and saved > 0 and "green" or (here > 0 and "yellow" or "red") }
     end)
     R.lag = math.max(0, os.clock() - (Features.BrainTickAt or os.clock()))
+    -- what's on: title (in its own colour) and artifacts 1 / 2 (the game's names)
+    pcall(function()
+        local st = Data.StoreData() or {}
+        local arts = Data.Module("ArtefactData") or {}
+        local function art(k)
+            if type(k) ~= "string" or k == "" then return nil end
+            local a = arts[k]
+            return (type(a) == "table" and type(a.DisplayName) == "string" and a.DisplayName ~= "") and a.DisplayName or k
+        end
+        R.art1 = art(st.CurrentArtefact)
+        R.art2 = art(st.CurrentSecondArtefact)
+        R.art2Locked = st.ExtraArtifact == false
+        local t = st.CurrentTitle
+        if type(t) ~= "string" or t == "" then
+            local v = LP:FindFirstChild("CurrentTitle")
+            t = v and v:IsA("ValueBase") and tostring(v.Value) or nil
+        end
+        if type(t) == "string" and t ~= "" then
+            R.title = t
+            local td = Data.Module("TitleData")
+            local c = type(td) == "table" and type(td[t]) == "table" and td[t].Colour
+            if typeof(c) == "Color3" then
+                R.titleColor = string.format("#%02x%02x%02x", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+            end
+        end
+    end)
     local function row(list, key, title, fn)
         local ok, c, txt = pcall(fn)
         if not ok then c, txt = "gray", "-" end
@@ -8290,6 +8321,13 @@ function Features.UpdateStatus()
     pcall(function() ST.step:Set("<font color='#9ca3af'>" .. R.step .. "</font>") end)
     pcall(function() ST.pets:Set(dot(R.pets.c, R.pets.here .. " / " .. R.pets.saved .. " with you")) end)
     pcall(function() ST.loop:Set(R.lag < 10 and dot("green", "OK") or dot("red", string.format("stuck %ds", math.floor(R.lag)))) end)
+    pcall(function()
+        local none = "<font color='#6b7280'>none</font>"
+        local function rt(x) return (string.gsub(string.gsub(string.gsub(tostring(x), "&", "&amp;"), "<", "&lt;"), ">", "&gt;")) end
+        ST.title:Set(R.title and (R.titleColor and string.format("<font color='%s'><b>%s</b></font>", R.titleColor, rt(R.title)) or rt(R.title)) or none)
+        ST.art1:Set(R.art1 and rt(R.art1) or none)
+        ST.art2:Set(R.art2 and rt(R.art2) or (R.art2Locked and "<font color='#6b7280'>locked</font>" or none))
+    end)
 
     -- modes + automations
     local off = "<font color='#6b7280'>off</font>"
@@ -8467,7 +8505,8 @@ function Features.Webhook(kind)
         "*" .. esc(sub) .. "*",
         "",
         string.format("👤 ||%s||  ·  Lv **%s**  ·  Rebirth **%s**", esc(LP.Name), num(st.PlayerLevel), num(st.Rebirths)),
-        string.format("🏅 **%s**  ·  👑 %s", esc(rank), esc(st.CurrentTitle ~= "" and st.CurrentTitle or "-")),
+        string.format("🏅 **%s**  ·  👑 %s", esc(rank), esc(R.title or "-")),
+        string.format("🏺 %s  ·  %s", esc(R.art1 or "no artifact"), esc(R.art2 or (R.art2Locked and "slot 2 locked" or "no 2nd artifact"))),
         string.format("🌍 **%s**  ·  ⏱️ up **%s**", esc(R.world), dur(up)),
         "📝 `" .. (step ~= "" and step or "-") .. "`",
     }, "\n")
