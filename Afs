@@ -5331,6 +5331,162 @@ function Features.UseBoostStatus()
 end
 end
 
+-- AUTO CLONE --------------------------------------------------------------------------------------
+-- 4 Clone Machines: K Time Chamber, A Mystic Island (DBZSuper), B + M Machine World (two models
+-- named CloneMachine, attribute CloneMachineId). Recorded 17 Oct:
+--   put a fighter in      AttemptClone(<pet UID>, "<id>")
+--   cancel                AttemptClone(nil, "<id>")          (not used by the hub)
+--   take the clone out    AttemptWithdrawCloneMachine("<id>")
+-- The save: CloneMachineData[<id>] = { UID, FinishTime } while a machine is busy (~8 days).
+-- Each machine gets the fighter picked for it; an empty machine gets it put in, a finished one
+-- is emptied (withdraw) and gets it again. Tried from wherever you are first; when the game
+-- doesn't take it from there, the hub goes to the machine (Priority "Auto Clone") and does it there.
+do
+local CM = { want = nil, fails = {} }
+Features.CloneMachines = {
+    { id = "K", world = "TimeChamber", name = "Time Chamber" },
+    { id = "A", world = "DBZSuper", name = "Mystic Island" },
+    { id = "B", world = "MachineWorld", name = "Machine World 1" },
+    { id = "M", world = "MachineWorld", name = "Machine World 2" },
+}
+function Features.CloneState(id)
+    local st = Data.StoreData()
+    local d = st and st.CloneMachineData
+    local e = type(d) == "table" and d[id]
+    if type(e) == "table" and e.UID ~= nil then
+        return { uid = tostring(e.UID), finish = tonumber(e.FinishTime) or 0 }
+    end
+    return nil
+end
+local function cloneNow() return workspace:GetServerTimeNow() end
+local function clonePick(m)
+    local label = F("Clone_" .. m.id)
+    if type(label) ~= "string" or label == "" or label == "(none)" then return nil end
+    return Data.PetId(label), label
+end
+function Features.CloneMachineModel(m)
+    local w = Worlds:FindFirstChild(m.world)
+    for _, c in ipairs(w and w:GetChildren() or {}) do
+        if c:GetAttribute("CloneMachineId") == m.id then return c end
+    end
+    return nil
+end
+-- what a machine needs now: "put" / "withdraw" / nil
+local function cloneNeed(m)
+    local uid = clonePick(m)
+    local st = Features.CloneState(m.id)
+    if st then
+        if st.finish > 0 and st.finish <= cloneNow() then return "withdraw" end
+        return nil
+    end
+    if not uid then return nil end
+    -- a fighter in one of your teams is never put in (it would leave the team for ~8 days)
+    local saved = Data.SavedEquipped and Data.SavedEquipped() or {}
+    for _, u in pairs(saved) do if u == uid then return "inteam" end end
+    return "put"
+end
+local function cloneSend(m, need)
+    local before = Features.CloneState(m.id)
+    if need == "withdraw" then
+        Net.Raw("AttemptWithdrawCloneMachine", { m.id, n = 1 })
+    else
+        local uid = clonePick(m)
+        Net.Raw("AttemptClone", { tonumber(uid) or uid, m.id, n = 2 })
+    end
+    local t0 = os.clock()
+    while os.clock() - t0 < 3 do
+        task.wait(0.25)
+        local now = Features.CloneState(m.id)
+        if need == "withdraw" and (not now or (before and now.uid ~= before.uid) or (now.finish > cloneNow())) then return true end
+        if need == "put" and now then return true end
+    end
+    return false
+end
+-- every 20 s: what can be done from here is done; the rest is left to the Brain task
+function Features.CloneTick()
+    CM.want = nil
+    for _, m in ipairs(Features.CloneMachines) do
+        local need = cloneNeed(m)
+        if need == "inteam" then
+            if Util.Every("clone-inteam-" .. m.id, 600) then
+                Combat.Log("clone", m.name .. ": the picked fighter is in your team - not putting it in")
+            end
+        elseif need then
+            local f = CM.fails[m.id]
+            if f and f.n >= 3 and os.clock() < f.untilT then
+                -- tried 3 times at the machine too: wait
+            elseif not (f and f.remoteFailed) and cloneSend(m, need) then
+                Combat.Log("clone", string.format("%s: %s from here", m.name, need == "put" and ("put " .. tostring(select(2, clonePick(m))) .. " in") or "took the clone out"))
+                CM.fails[m.id] = nil
+            else
+                CM.fails[m.id] = CM.fails[m.id] or { n = 0, untilT = 0 }
+                CM.fails[m.id].remoteFailed = true
+                CM.want = CM.want or { m = m, need = need }
+            end
+        end
+    end
+end
+-- Brain task: go to the machine and do it there
+function Features.CloneGo()
+    local w = CM.want
+    if not w then return false end
+    local m = w.m
+    if Util.World() ~= m.world then
+        if Util.Every("clone-travel", 6) then Travel.To(m.world) task.wait(1.5) end
+        return true
+    end
+    local mdl = Features.CloneMachineModel(m)
+    local part = mdl and (mdl.PrimaryPart or mdl:FindFirstChild("RootPart") or mdl:FindFirstChildWhichIsA("BasePart", true))
+    if part then Util.MoveTo(part.CFrame * CFrame.new(0, 3, 6)) task.wait(0.5) end
+    local need = cloneNeed(m)
+    if need ~= "put" and need ~= "withdraw" then CM.want = nil return false end
+    local prompt = mdl and mdl:FindFirstChild("CloneMachineRemotePrompt", true)
+    if prompt and fireproximityprompt then pcall(fireproximityprompt, prompt) task.wait(0.5) end
+    local ok = cloneSend(m, need)
+    local f = CM.fails[m.id] or { n = 0, untilT = 0 }
+    if ok then
+        Combat.Log("clone", string.format("%s: %s at the machine", m.name, need == "put" and ("put " .. tostring(select(2, clonePick(m))) .. " in") or "took the clone out"))
+        f.n, f.remoteFailed = 0, nil
+    else
+        f.n = f.n + 1
+        if f.n >= 3 then
+            f.untilT = os.clock() + 600
+            Combat.Log("clone", string.format("%s: the game didn't take '%s' 3 times at the machine - trying again in 10 min", m.name, need))
+        end
+    end
+    CM.fails[m.id] = f
+    CM.want = nil
+    -- close the game's clone window if the prompt opened it
+    pcall(function()
+        local win = Data.MainGui():FindFirstChild("CloneMachine")
+        if win and win.Visible then win.Visible = false end
+    end)
+    return true
+end
+function Features.CloneWanted() return CM.want ~= nil end
+function Features.CloneStatus()
+    local lines = {}
+    for _, m in ipairs(Features.CloneMachines) do
+        local st = Features.CloneState(m.id)
+        local uid, label = clonePick(m)
+        local txt
+        if st then
+            local left = st.finish - cloneNow()
+            if left > 0 then
+                txt = string.format("cloning [%s] - %dd %02d:%02d left", st.uid, left // 86400, (left % 86400) // 3600, (left % 3600) // 60)
+            else
+                txt = "<font color='#4ade80'>done</font> - taking it out"
+            end
+        else
+            txt = uid and ((cloneNeed(m) == "inteam") and ("empty - <font color='#f87171'>" .. tostring(label) .. " is in your team, not put in</font>")
+                or ("empty - next: " .. tostring(label))) or "empty (no fighter picked)"
+        end
+        lines[#lines + 1] = string.format("[-] %s (%s) : %s", m.name, m.id, txt)
+    end
+    return table.concat(lines, "\n")
+end
+end
+
 -- PASSIVE MACHINE (like Yuto): rerolls are done standing at the machine.
 -- Each machine is Worlds.<World>.Passive (prompt "Reroll"). Event categories have their own
 -- world (Frieren2026, Easter2026, BC2026, Christmas2); Normal / Requiem use the main machine.
@@ -7696,13 +7852,16 @@ Features.Tasks = {
             return true
         end
     end },
+    { id = "Clone", name = "Auto Clone", run = function()
+        if On("AutoClone") and Features.CloneWanted() and not Features.InActiveRun() then return Features.CloneGo() end
+    end },
     { id = "TimeChamber", name = "Time Chamber", run = function()
         if On("AutoTimeChamber") then Features.TimeChamber() return true end
     end },
 }
 -- default order (Settings > Priority changes it)
 Features.DefaultPrio = { Lunar = 1, Trial = 2, BattlePass = 3, Dungeon = 4, Hatch = 5, Passive = 6, Mega = 7, Infinity = 8,
-    Gate = 9, Raid = 10, Defense = 11, Event = 12, GlobalBoss = 13, Meteor = 14, Farm = 15, TimeChamber = 16 }
+    Gate = 9, Raid = 10, Defense = 11, Event = 12, GlobalBoss = 13, Meteor = 14, Clone = 15, Farm = 16, TimeChamber = 17 }
 -- the tasks sorted by their Priority number (ties keep the default order)
 function Features.TaskOrder()
     local list = {}
@@ -8065,6 +8224,26 @@ do
         ub:Toggle({ Title = "Buy Super / Passive Luck When Out (Tower Shards)", Default = true, Flag = "UseBoostBuy" })
         Features.UseBoostLabel = ub:Paragraph({ Body = "Status : -" })
         ub:Toggle({ Title = "Auto Use Boosts", Flag = "AutoUseBoost" })
+    end
+    do
+        local cl = TShop:Card("Auto Clone", "Left")
+        cl:Paragraph({ Body = "[-] Pick a fighter for each Clone Machine. An empty machine gets it put in; a finished one\n"
+            .. "    is emptied (clone taken out) and gets it again. Fighters in a team are never put in." })
+        local function cloneItems()
+            local list = Data.Pets()
+            table.insert(list, 1, "(none)")
+            return list
+        end
+        local dds = {}
+        for _, m in ipairs(Features.CloneMachines) do
+            dds[#dds + 1] = cl:Dropdown({ Title = m.name .. " (" .. m.id .. ")", Items = cloneItems(), Default = "(none)", Flag = "Clone_" .. m.id })
+        end
+        cl:Button({ Title = "Refresh Pets", Callback = function()
+            for _, d in ipairs(dds) do pcall(function() d:Refresh(cloneItems()) end) end
+        end })
+        Refreshers[#Refreshers + 1] = function() for _, d in ipairs(dds) do pcall(function() d:Refresh(cloneItems()) end) end end
+        Features.CloneLabel = cl:Paragraph({ Body = "Status : -" })
+        cl:Toggle({ Title = "Auto Clone", Flag = "AutoClone" })
     end
     local c = TShop:Card("Auto Claim", "Right")
     c:Toggle({ Title = "Auto Daily Spin", Flag = "AutoSpin" })
@@ -8892,6 +9071,10 @@ loop(0.31, function() if On("AttackUlt") then Features.Ult() end end)
 loop(function() return F("HatchDelay") or 1 end, function() if On("AutoHatch") then Features.Hatch() end end)
 loop(0.2, function() if On("AutoMegaCraft") then Features.MegaCraft() else task.wait(0.5) end end)
 loop(3, function() if On("AutoUseBoost") then Features.UseBoosts() end end)
+loop(20, function() if On("AutoClone") then Features.CloneTick() end end)
+loop(5, function()
+    if Features.CloneLabel then pcall(function() Features.CloneLabel:Set(Features.CloneStatus()) end) end
+end)
 loop(3, function()
     if Features.UseBoostLabel then pcall(function() Features.UseBoostLabel:Set(Features.UseBoostStatus()) end) end
 end)
