@@ -5706,29 +5706,7 @@ function Features.OpenMenu(name, on)
 end
 
 -- SETTINGS ----------------------------------------------------------------------------------------
-function Features.Webhook(title)
-    local send = (syn and syn.request) or (http and http.request) or http_request or request
-    local url = F("WebhookUrl") or ""
-    if not send or url == "" then Util.Notify("No webhook / request function") return end
-    local yen = "?"
-    pcall(function()
-        for _, s in ipairs(LP.leaderstats:GetChildren()) do if s.Name ~= "Rank" then yen = tostring(s.Value) break end end
-    end)
-    pcall(send, {
-        Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" },
-        Body = HttpService:JSONEncode({ embeds = { {
-            title = title, color = 0x2B2B2F, description = "Player: ||" .. LP.Name .. "||",
-            fields = {
-                { name = "World", value = Util.World() ~= "" and Util.World() or "-", inline = true },
-                { name = "Yen", value = yen, inline = true },
-                { name = "Inf Tower Best", value = tostring(Stats.InfBest), inline = true },
-                { name = "Dungeon Runs", value = tostring(Stats.DungeonRuns), inline = true },
-                { name = "Gate Runs", value = tostring(Stats.GateRuns), inline = true },
-            },
-            footer = { text = CFG.Name }, timestamp = DateTime.now():ToIsoDate(),
-        } } }),
-    })
-end
+-- (the Discord webhook is built next to the Status tab: Features.Webhook)
 
 -- ULTRA PERFORMANCE -------------------------------------------------------------------
 -- only hides / disables visuals; nothing the script farms with (enemies, pickups,
@@ -8170,104 +8148,99 @@ do
     ST.boost = au:Stat({ Title = "Auto Boosts" })
     ST.clone = au:Stat({ Title = "Auto Clone" })
 end
-function Features.UpdateStatus()
+-- one read of everything the Status tab and the webhook show
+-- (each row: c = colour name, or nil when the mode is off)
+function Features.StatusRows()
+    local R = { modes = {}, auto = {}, prio = {} }
     local names = {}
     for _, t in ipairs(Features.Tasks or {}) do names[t.id] = t.name end
     local owner = Features.BrainOwner
-    pcall(function()
-        local busy = Features.InActiveRun and Features.InActiveRun()
-        ST.hero:Set(owner and (names[owner] or owner) or "Idle",
-            owner and (busy and ("in " .. tostring(busy)) or "working") or "nothing to do right now",
-            owner and Color3.fromRGB(74, 222, 128) or Color3.fromRGB(107, 114, 128))
-    end)
-    pcall(function() ST.world:Set(tostring(Data.WorldDisplay(Util.World()))) end)
-    pcall(function() ST.step:Set("<font color='#9ca3af'>" .. tostring(Combat.Status or "-") .. "</font>") end)
+    R.owner = owner
+    R.ownerName = owner and tostring(names[owner] or owner) or nil
+    pcall(function() R.busy = Features.InActiveRun and Features.InActiveRun() or nil end)
+    R.world = "-"
+    pcall(function() R.world = tostring(Data.WorldDisplay(Util.World())) end)
+    R.step = tostring(Combat.Status or "-")
+    R.pets = { here = 0, saved = 0, c = "red" }
     pcall(function()
         local pets, here = Data.EquippedPets(), 0
         for _, m in ipairs(pets) do if Data.PetAlive and Data.PetAlive(m) then here = here + 1 end end
         local saved = 0
         for _ in pairs(Data.SavedEquipped and Data.SavedEquipped() or {}) do saved = saved + 1 end
         saved = math.max(saved, #pets)
-        ST.pets:Set(dot(here >= saved and saved > 0 and "green" or (here > 0 and "yellow" or "red"), here .. " / " .. saved .. " with you"))
+        R.pets = { here = here, saved = saved, c = here >= saved and saved > 0 and "green" or (here > 0 and "yellow" or "red") }
     end)
-    pcall(function()
-        local lag = os.clock() - (Features.BrainTickAt or os.clock())
-        ST.loop:Set(lag < 10 and dot("green", "OK") or dot("red", string.format("stuck %ds", lag)))
-    end)
+    R.lag = math.max(0, os.clock() - (Features.BrainTickAt or os.clock()))
+    local function row(list, key, title, fn)
+        local ok, c, txt = pcall(fn)
+        if not ok then c, txt = "gray", "-" end
+        list[#list + 1] = { key = key, title = title, c = c, txt = c and tostring(txt or "-") or "off" }
+    end
 
     -- modes
-    local off = "<font color='#6b7280'>off</font>"
-    pcall(function()
-        if not (On("AutoFarmDungeon") or On("AutoOpenDungeon")) then ST.dungeon:Set(off) return end
+    row(R.modes, "dungeon", "Dungeon", function()
+        if not (On("AutoFarmDungeon") or On("AutoOpenDungeon")) then return nil end
         local cd = Features.DungeonCooldown and Features.DungeonCooldown() or 0
         local bo = Features.DungeonBackoffUntil and Features.DungeonBackoffUntil - os.clock() or 0
-        ST.dungeon:Set(Features.InDungeon() and dot("green", "in a run")
-            or (cd > 0 and dot("yellow", "next in " .. hms(cd)))
-            or (bo > 0 and dot("red", "refused, retry in " .. hms(bo)))
-            or dot("blue", "ready to open"))
+        if Features.InDungeon() then return "green", "in a run" end
+        if cd > 0 then return "yellow", "next in " .. hms(cd) end
+        if bo > 0 then return "red", "refused, retry in " .. hms(bo) end
+        return "blue", "ready to open"
     end)
-    pcall(function()
-        if not On("AutoTrial") then ST.trial:Set(off) return end
+    row(R.modes, "trial", "Time Trial", function()
+        if not On("AutoTrial") then return nil end
         local left = Extras.TrialTimeLeft()
-        if left then ST.trial:Set(dot("green", "in a run, " .. left .. " left")) return end
+        if left then return "green", "in a run, " .. left .. " left" end
         local best, bestName
         for _, name in ipairs(Util.SetToList(F("Trials"))) do
             local id = CFG.TimeTrialIds[name]
             local secs = id and Features.DoorCountdown(id)
             if secs and (not best or secs < best) then best, bestName = secs, name end
         end
-        ST.trial:Set(best and dot("yellow", string.format("%s in %d:%02d", bestName, math.floor(best / 60), math.floor(best % 60)))
-            or dot("gray", "waiting for the door times"))
+        if best then return "yellow", string.format("%s in %d:%02d", bestName, math.floor(best / 60), math.floor(best % 60)) end
+        return "gray", "waiting for the door times"
     end)
-    pcall(function()
-        if not On("AutoInf") then ST.inf:Set(off) return end
-        ST.inf:Set(Util.World() == "InfinityTower" and dot("green", "climbing") or dot("yellow", "waiting"))
+    row(R.modes, "inf", "Infinity Tower", function()
+        if not On("AutoInf") then return nil end
+        if Util.World() == "InfinityTower" then return "green", "climbing" end
+        return "yellow", "waiting"
     end)
-    pcall(function()
-        if not On("AutoGate") then ST.gate:Set(off) return end
-        ST.gate:Set(Util.World() == "GatesMode" and dot("green", "in a gate") or dot("yellow", "waiting / summoning"))
+    row(R.modes, "gate", "Gate", function()
+        if not On("AutoGate") then return nil end
+        if Util.World() == "GatesMode" then return "green", "in a gate" end
+        return "yellow", "waiting / summoning"
     end)
-    pcall(function()
-        if not On("AutoEventQuests") then ST.lunar:Set(off) return end
+    row(R.modes, "lunar", "Auto Lunar", function()
+        if not On("AutoEventQuests") then return nil end
         local cd = Features.EventQuestCooldown()
-        ST.lunar:Set(cd > 0 and dot("yellow", "new quests in " .. hms(cd)) or dot("green", tostring(Features.EQLast or "rolling")))
+        if cd > 0 then return "yellow", "new quests in " .. hms(cd) end
+        return "green", tostring(Features.EQLast or "rolling")
     end)
-    pcall(function()
-        if not On("AutoBattlePass") then ST.bp:Set(off) return end
+    row(R.modes, "bp", "Battle Pass", function()
+        if not On("AutoBattlePass") then return nil end
         local t = Features.BattlePass and Features.BattlePass.task
-        ST.bp:Set(t and dot("green", tostring(t)) or dot("gray", "nothing picked left"))
+        if t then return "green", tostring(t) end
+        return "gray", "nothing picked left"
     end)
-    pcall(function()
-        if not (On("AutoRejoin") and Features.RejoinLeft) then ST.rejoin:Set(off) return end
+    row(R.modes, "rejoin", "Auto Rejoin", function()
+        if not (On("AutoRejoin") and Features.RejoinLeft) then return nil end
         local left, busy = Features.RejoinLeft(), Features.RejoinBusy()
-        ST.rejoin:Set(left > 0 and dot("gray", "in " .. hms(left)) or dot("yellow", busy and ("due - waiting: " .. busy) or "rejoining"))
-    end)
-
-    -- priority list, the running one lit up
-    pcall(function()
-        local L = {}
-        for i, t in ipairs(Features.TaskOrder()) do
-            if t.id == owner then
-                L[#L + 1] = string.format("<font color='#4ade80'><b>▶  %2d   %s</b></font>", i, t.name)
-            else
-                L[#L + 1] = string.format("<font color='#8a8a93'>     %2d   %s</font>", i, t.name)
-            end
-        end
-        ST.prio:Set(table.concat(L, "\n"))
+        if left > 0 then return "gray", "in " .. hms(left) end
+        return "yellow", busy and ("due - waiting: " .. tostring(busy)) or "rejoining"
     end)
 
     -- automations
-    pcall(function()
-        if not On("AutoMegaCraft") then ST.mega:Set(off) return end
+    row(R.auto, "mega", "Mega Craft", function()
+        if not On("AutoMegaCraft") then return nil end
         local txt = Features.MegaStatusText and Features.MegaStatusText() or ""
         local done, all = 0, 0
         for line in string.gmatch(txt, "[^\n]+") do
             if string.find(line, "^%[") then all = all + 1 if string.find(line, "^%[done%]") then done = done + 1 end end
         end
-        ST.mega:Set(dot(done == all and all > 0 and "green" or "blue", string.format("%d / %d full", done, all)))
+        return (done == all and all > 0) and "green" or "blue", string.format("%d / %d full", done, all)
     end)
-    pcall(function()
-        if not On("AutoUseBoost") then ST.boost:Set(off) return end
+    row(R.auto, "boost", "Auto Boosts", function()
+        if not On("AutoUseBoost") then return nil end
         local picked, n, low = F("UseBoostTypes") or {}, 0, nil
         local bar = Features.BoostBar and Features.BoostBar()
         for _, b in ipairs(Features.UseBoostTypes()) do
@@ -8277,10 +8250,11 @@ function Features.UpdateStatus()
                 if not low or l < low then low = l end
             end
         end
-        ST.boost:Set(n == 0 and dot("gray", "nothing picked") or dot("green", string.format("%d boosts · lowest %s", n, hms(low))))
+        if n == 0 then return "gray", "nothing picked" end
+        return "green", string.format("%d boosts · lowest %s", n, hms(low))
     end)
-    pcall(function()
-        if not On("AutoClone") then ST.clone:Set(off) return end
+    row(R.auto, "clone", "Auto Clone", function()
+        if not On("AutoClone") then return nil end
         local busy, nextDone = 0, nil
         for _, m in ipairs(Features.CloneMachines or {}) do
             local st = Features.CloneState(m.id)
@@ -8290,10 +8264,323 @@ function Features.UpdateStatus()
                 if not nextDone or left < nextDone then nextDone = left end
             end
         end
-        ST.clone:Set(dot(busy > 0 and "green" or "yellow", string.format("%d / %d cloning%s", busy, #(Features.CloneMachines or {}),
-            nextDone and (" · next " .. (nextDone > 0 and hms(nextDone) or "done")) or "")))
+        return busy > 0 and "green" or "yellow", string.format("%d / %d cloning%s", busy, #(Features.CloneMachines or {}),
+            nextDone and (" · next " .. (nextDone > 0 and hms(nextDone) or "done")) or "")
+    end)
+
+    pcall(function()
+        for i, t in ipairs(Features.TaskOrder()) do R.prio[#R.prio + 1] = { i = i, name = t.name, on = t.id == owner } end
+    end)
+    return R
+end
+function Features.UpdateStatus()
+    local R = Features.StatusRows()
+    pcall(function()
+        ST.hero:Set(R.ownerName or "Idle",
+            R.owner and (R.busy and ("in " .. tostring(R.busy)) or "working") or "nothing to do right now",
+            R.owner and Color3.fromRGB(74, 222, 128) or Color3.fromRGB(107, 114, 128))
+    end)
+    pcall(function() ST.world:Set(R.world) end)
+    pcall(function() ST.step:Set("<font color='#9ca3af'>" .. R.step .. "</font>") end)
+    pcall(function() ST.pets:Set(dot(R.pets.c, R.pets.here .. " / " .. R.pets.saved .. " with you")) end)
+    pcall(function() ST.loop:Set(R.lag < 10 and dot("green", "OK") or dot("red", string.format("stuck %ds", math.floor(R.lag)))) end)
+
+    -- modes + automations
+    local off = "<font color='#6b7280'>off</font>"
+    for _, list in ipairs({ R.modes, R.auto }) do
+        for _, r in ipairs(list) do
+            local el = ST[r.key]
+            if el then pcall(function() el:Set(r.c and dot(r.c, r.txt) or off) end) end
+        end
+    end
+
+    -- priority list, the running one lit up
+    pcall(function()
+        local L = {}
+        for _, p in ipairs(R.prio) do
+            if p.on then
+                L[#L + 1] = string.format("<font color='#4ade80'><b>▶  %2d   %s</b></font>", p.i, p.name)
+            else
+                L[#L + 1] = string.format("<font color='#8a8a93'>     %2d   %s</font>", p.i, p.name)
+            end
+        end
+        ST.prio:Set(table.concat(L, "\n"))
     end)
 end
+end
+
+-- DISCORD WEBHOOK ---------------------------------------------------------------------------
+-- one status card: what's running, the player, money / items (with what this session added),
+-- the modes and automations, records, gate keys and the time left on every boost
+Features.WH = { start = nil, avatar = nil, tries = 0 }
+Features.WH.Track = { "DungeonWins", "RaidWins", "MobsKilled", "BossesKilled", "ChestsOpened", "Yen", "LunarEventPoints", "Crystals", "Clovers" }
+Features.WH.TrackItems = { "TowerShard", "CloneToken", "PassiveToken", "RequiemToken", "DungeonSummon", "EventToken" }
+function Features.WH.Snap(st)
+    local s = { items = {} }
+    for _, k in ipairs(Features.WH.Track) do s[k] = tonumber(st[k]) end
+    local it = type(st.Items) == "table" and st.Items or {}
+    for _, k in ipairs(Features.WH.TrackItems) do s.items[k] = tonumber(it[k]) or 0 end
+    return s
+end
+-- what the save looks like when the hub starts = the "This Session" baseline
+task.spawn(function()
+    for _ = 1, 180 do
+        local ok, st = pcall(Data.StoreData)
+        if ok and type(st) == "table" and next(st) ~= nil then Features.WH.start = Features.WH.Snap(st) return end
+        task.wait(1)
+    end
+end)
+-- the player's headshot (asked once; Discord shows it as the card's picture)
+function Features.WH.Avatar(send)
+    local WH = Features.WH
+    if WH.avatar or WH.tries >= 3 then return WH.avatar end
+    WH.tries = WH.tries + 1
+    pcall(function()
+        local r = send({ Url = "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=" .. tostring(LP.UserId)
+            .. "&size=420x420&format=Png&isCircular=false", Method = "GET" })
+        local body = type(r) == "table" and (r.Body or r.body)
+        local d = type(body) == "string" and HttpService:JSONDecode(body)
+        local u = type(d) == "table" and type(d.data) == "table" and d.data[1] and d.data[1].imageUrl
+        if type(u) == "string" and string.find(u, "^https://") then WH.avatar = u end
+    end)
+    return WH.avatar
+end
+function Features.Webhook(kind)
+    local send = (syn and syn.request) or (http and http.request) or http_request or request
+    local url = string.gsub(string.gsub(tostring(F("WebhookUrl") or ""), "^%s+", ""), "%s+$", "")
+    local test = kind == true or kind == "test" or kind == "Test message"
+    if not send or url == "" then Util.Notify("No webhook / request function") return end
+    local WH = Features.WH
+    local R = Features.StatusRows()
+    local okS, st = pcall(Data.StoreData)
+    st = (okS and type(st) == "table") and st or {}
+    local it = type(st.Items) == "table" and st.Items or {}
+    if not WH.start and next(st) ~= nil then WH.start = WH.Snap(st) end
+    local S = WH.start or { items = {} }
+
+    local EMO = { green = "🟢", yellow = "🟡", red = "🔴", blue = "🔵", gray = "⚪" }
+    local SUF = { "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "De" }
+    local function num(n)
+        n = tonumber(n)
+        if not n or n ~= n then return "-" end
+        if math.abs(n) < 1e6 then
+            local s = string.reverse(tostring(math.floor(math.abs(n) + 0.5)))
+            s = string.reverse((string.gsub(s, "(%d%d%d)", "%1,")))
+            s = string.gsub(s, "^,", "")
+            return (n < 0 and "-" or "") .. s
+        end
+        local i = math.floor(math.log10(math.abs(n)) / 3)
+        if i >= 1 and i <= #SUF then return string.format("%.2f%s", n / 10 ^ (i * 3), SUF[i]) end
+        return string.format("%.2e", n)
+    end
+    local function dur(sec)
+        sec = math.max(0, math.floor(tonumber(sec) or 0))
+        if sec >= 86400 then return string.format("%dd %dh", sec // 86400, (sec % 86400) // 3600) end
+        if sec >= 3600 then return string.format("%dh %02dm", sec // 3600, (sec % 3600) // 60) end
+        return string.format("%dm %02ds", sec // 60, sec % 60)
+    end
+    local function hm(sec)
+        sec = math.max(0, math.floor(tonumber(sec) or 0))
+        return string.format("%dh %02dm", sec // 3600, (sec % 3600) // 60)
+    end
+    local function esc(s) return (string.gsub(tostring(s or "-"), "([%*_~`|>\\])", "\\%1")) end
+    local function cut(s, n)
+        s = tostring(s or "")
+        if #s <= n then return s end
+        s = string.sub(s, 1, n - 3)
+        while #s > 0 and not utf8.len(s) do s = string.sub(s, 1, -2) end
+        return s .. "..."
+    end
+    -- "▲ 12" / "▼ 3" against the start of the session
+    local function delta(now, was)
+        now, was = tonumber(now), tonumber(was)
+        if not now or not was or now == was then return "" end
+        return now > was and ("  ▲ " .. num(now - was)) or ("  ▼ " .. num(was - now))
+    end
+    local function gain(k)
+        local a, b = tonumber(st[k]), S[k]
+        return (a and b) and ("+" .. num(math.max(0, a - b))) or "-"
+    end
+    local function item(k) return "`" .. num(tonumber(it[k]) or 0) .. "`" .. delta(it[k] or 0, S.items[k]) end
+    -- label left, value right, in a code block
+    local function box(rows)
+        local wl, wv = 0, 0
+        for _, r in ipairs(rows) do
+            r[2] = tostring(r[2])
+            wl = math.max(wl, #r[1])
+            wv = math.max(wv, utf8.len(r[2]) or #r[2])
+        end
+        local L = {}
+        for _, r in ipairs(rows) do
+            L[#L + 1] = r[1] .. string.rep(" ", wl - #r[1] + 1 + wv - (utf8.len(r[2]) or #r[2])) .. r[2]
+        end
+        return "```\n" .. (#L > 0 and table.concat(L, "\n") or "-") .. "\n```"
+    end
+    local function lines(list)
+        local L, off = {}, {}
+        for _, r in ipairs(list) do
+            if r.c then L[#L + 1] = (EMO[r.c] or "⚪") .. " **" .. r.title .. "** — " .. esc(r.txt)
+            else off[#off + 1] = r.title end
+        end
+        if #off > 0 then L[#L + 1] = "⚫ *off : " .. table.concat(off, ", ") .. "*" end
+        return table.concat(L, "\n")
+    end
+    local fields = {}
+    local function add(name, value, inline)
+        value = tostring(value or "")
+        if value == "" then value = "-" end
+        fields[#fields + 1] = { name = name, value = cut(value, 1024), inline = inline and true or false }
+    end
+
+    -- headline: green = working, gray = idle, red = something needs a look
+    local state, sub = "gray", "nothing to do right now"
+    if R.owner then state, sub = "green", (R.busy and ("in " .. tostring(R.busy)) or "working") end
+    if R.lag >= 30 then state, sub = "red", "main loop stuck for " .. dur(R.lag)
+    elseif R.pets.saved > 0 and R.pets.here == 0 then state, sub = "red", "no pets with you" end
+    local COL = { green = 0x4ADE80, gray = 0x6B7280, red = 0xF87171 }
+
+    local rank, yen = "-", nil
+    pcall(function()
+        for _, s in ipairs(LP.leaderstats:GetChildren()) do
+            if s.Name == "Rank" then rank = tostring(s.Value) elseif not yen then yen = tostring(s.Value) end
+        end
+    end)
+    local yenTxt = "`" .. (yen or num(st.Yen)) .. "`"
+    local y1, y0 = tonumber(st.Yen), tonumber(S.Yen)
+    if y1 and y0 and y0 > 0 and y1 ~= y0 then
+        local p = (y1 - y0) / y0 * 100
+        yenTxt = yenTxt .. string.format(p > 0 and "  ▲ %s%%" or "  ▼ %s%%", math.abs(p) >= 1000 and num(math.abs(p))
+            or string.format(math.abs(p) < 0.01 and "%.3f" or "%.2f", math.abs(p)))
+    end
+    local up = os.clock() - (Features.StartedAt or os.clock())
+    local plrs, maxp = 0, 0
+    pcall(function() plrs, maxp = #Players:GetPlayers(), Players.MaxPlayers end)
+    local step = cut(string.gsub(R.step, "`", "'"), 150)
+
+    local desc = table.concat({
+        "*" .. esc(sub) .. "*",
+        "",
+        string.format("👤 ||%s||  ·  Lv **%s**  ·  Rebirth **%s**", esc(LP.Name), num(st.PlayerLevel), num(st.Rebirths)),
+        string.format("🏅 **%s**  ·  👑 %s", esc(rank), esc(st.CurrentTitle ~= "" and st.CurrentTitle or "-")),
+        string.format("🌍 **%s**  ·  ⏱️ up **%s**", esc(R.world), dur(up)),
+        "📝 `" .. (step ~= "" and step or "-") .. "`",
+    }, "\n")
+
+    -- health
+    add("🐾 Pets", (EMO[R.pets.c] or "⚪") .. " **" .. R.pets.here .. " / " .. R.pets.saved .. "** with you", true)
+    add("🔁 Main Loop", R.lag < 10 and "🟢 **OK**" or ((R.lag < 30 and "🟡" or "🔴") .. " **stuck " .. dur(R.lag) .. "**"), true)
+    add("👥 Server", "**" .. plrs .. " / " .. maxp .. "** players", true)
+    -- money and items (▲ = gained this session)
+    add("💴 Yen", yenTxt, true)
+    add("💎 Crystals", "`" .. num(st.Crystals) .. "`" .. delta(st.Crystals, S.Crystals), true)
+    add("🍀 Clovers", "`" .. num(st.Clovers) .. "`" .. delta(st.Clovers, S.Clovers), true)
+    add("🗼 Tower Shards", item("TowerShard"), true)
+    add("🧬 Clone Tokens", item("CloneToken"), true)
+    add("🎟️ Dungeon Summons", item("DungeonSummon"), true)
+    add("🔮 Passive Tokens", item("PassiveToken"), true)
+    add("✨ Requiem Tokens", item("RequiemToken"), true)
+    add("🌙 Lunar Points", "`" .. num(st.LunarEventPoints) .. "`" .. delta(st.LunarEventPoints, S.LunarEventPoints), true)
+
+    -- what each mode / automation is doing
+    add("🎮 Modes", lines(R.modes), false)
+    local auto = lines(R.auto)
+    pcall(function()
+        if not On("AutoClone") then return end
+        local byUid = {}
+        for _, p in ipairs(type(st.Pets) == "table" and st.Pets or {}) do
+            if type(p) == "table" and p.UID ~= nil then byUid[tostring(p.UID)] = p end
+        end
+        for _, m in ipairs(Features.CloneMachines or {}) do
+            local cs = Features.CloneState(m.id)
+            if cs then
+                local left = cs.finish - workspace:GetServerTimeNow()
+                local p = byUid[cs.uid]
+                local pn = p and ((type(p.CustomName) == "string" and p.CustomName ~= "") and p.CustomName or Data.PetDisplay(p.PetId)) or nil
+                auto = auto .. "\n┗ " .. m.name .. (pn and (" · " .. esc(pn)) or "") .. " — " .. (left > 0 and dur(left) or "ready")
+            end
+        end
+    end)
+    add("⚙️ Automation", auto, false)
+
+    -- session / all-time / gate keys
+    add("📊 This Session", box({
+        { "Uptime", dur(up) },
+        { "Dungeons", S.DungeonWins and gain("DungeonWins") or ("+" .. num(Stats.DungeonRuns)) },
+        { "Gates", "+" .. num(Stats.GateRuns) },
+        { "Raids", gain("RaidWins") },
+        { "Mobs", gain("MobsKilled") },
+        { "Bosses", gain("BossesKilled") },
+        { "Chests", gain("ChestsOpened") },
+        { "Inf best", Stats.InfBest > 0 and num(Stats.InfBest) or "-" },
+    }), true)
+    add("🏆 Records", box({
+        { "Dungeons", num(st.DungeonWins) },
+        { "Raids", num(st.RaidWins) },
+        { "Inf Tower", num(st.MaxInfinityFloors) },
+        { "Inf Trial", num(st.MaxInfinityTrialFloors) },
+        { "Chamber", st.TimeChamberLevel and ("Lv " .. num(st.TimeChamberLevel)) or "-" },
+        { "Fighters", type(st.Pets) == "table" and num(#st.Pets) or "-" },
+        { "Playtime", st.PlayTime and dur(st.PlayTime) or "-" },
+    }), true)
+    local keys = {}
+    for _, g in ipairs({ { "X", "XRankGate" }, { "Z", "ZRankGate" }, { "S", "SRankGate" }, { "A", "ARankGate" }, { "B", "BRankGate" },
+                         { "C", "CRankGate" }, { "D", "DRankGate" }, { "E", "ERankGate" }, { "Anniv", "AnniversaryRankGate" } }) do
+        keys[#keys + 1] = { g[1] .. (g[1] == "Anniv" and "" or " Rank"), num(tonumber(it[g[2]]) or 0) }
+    end
+    add("🔑 Gate Keys", box(keys), true)
+
+    -- every boost's time left
+    local okB, bar = pcall(Features.BoostBar)
+    bar = okB and bar or nil
+    local function left(key)
+        local ok, v = pcall(Features.BoostLeft, key, bar)
+        v = ok and tonumber(v) or 0
+        return v > 0 and hm(v) or "—"
+    end
+    local KINDS = { { "Luck", "Luck" }, { "Dmg", "Damage" }, { "Drops", "Drops" }, { "Xp", "XP" }, { "Yen", "Yen" }, { "Time", "Time" } }
+    local mega, super = {}, {}
+    for _, k in ipairs(KINDS) do
+        mega[#mega + 1] = { k[2], left("Mega" .. k[1]) }
+        super[#super + 1] = { k[2], left("Super" .. k[1]) }
+    end
+    mega[#mega + 1] = { "P.Luck", left("MegaPassiveLuck") }
+    local other = { { "Shiny", left("Shiny") }, { "P.Luck", left("PassiveLuck") } }
+    local bs = type(st.Boosts) == "table" and st.Boosts or {}
+    local extra = {}
+    for k in pairs(bs) do
+        if type(k) == "string" and not string.find(k, "^Mega") and not string.find(k, "^Super") and k ~= "Shiny" and k ~= "PassiveLuck" then
+            extra[#extra + 1] = k
+        end
+    end
+    table.sort(extra)
+    for _, k in ipairs(extra) do other[#other + 1] = { k == "Dmg" and "Damage" or k, left(k) } end
+    add("🧪 Mega Boosts", box(mega), true)
+    add("⚡ Super Boosts", box(super), true)
+    add("✨ Other Boosts", box(other), true)
+
+    local avatar = WH.Avatar(send)
+    local job = tostring(game.JobId or "")
+    local embed = {
+        author = { name = CFG.Name .. "  •  Anime Fighters Simulator" },
+        title = cut((test and "🧪 Test  ·  " or "") .. EMO[state] .. "  " .. (R.ownerName or "Idle"), 250),
+        description = cut(desc, 4000),
+        color = COL[state],
+        fields = fields,
+        footer = { text = string.format("%s  ·  every %d min%s", CFG.Name, math.floor(tonumber(F("WebhookEvery")) or 10),
+            job ~= "" and ("  ·  server " .. string.sub(job, 1, 8)) or ""), icon_url = avatar },
+        timestamp = DateTime.now():ToIsoDate(),
+    }
+    if avatar then embed.thumbnail = { url = avatar } end
+    local ok, res = pcall(send, {
+        Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" },
+        Body = HttpService:JSONEncode({ username = CFG.Name, avatar_url = avatar, embeds = { embed } }),
+    })
+    if test then
+        local code = ok and type(res) == "table" and tonumber(res.StatusCode or res.status_code) or nil
+        if ok and (not code or (code >= 200 and code < 300)) then Util.Notify("Webhook sent")
+        else Util.Notify("Webhook failed" .. (code and (" (" .. code .. ")") or (ok and "" or (": " .. tostring(res))))) end
+    end
+    return ok
 end
 
 -- BATTLE PASS -------------------------------------------------------------------------------
@@ -8848,10 +9135,13 @@ do
     rj:Button({ Title = "Rejoin Now", Callback = function() Features.RejoinNow("Rejoin Now pressed") end })
 
     local w = TSettings:Card("Webhook", "Right")
+    w:Paragraph({ Body = "One Discord card: what's running, pets, loop, Yen / items (▲ = gained this session), "
+        .. "every mode and automation, session totals, records, gate keys and every boost's time left. "
+        .. "The first card goes out a minute after the hub starts." })
     w:Input({ Title = "Webhook URL", Placeholder = "https://discord.com/api/webhooks/...", Flag = "WebhookUrl" })
     w:Slider({ Title = "Send Every [minutes]", Min = 1, Max = 60, Default = 10, Flag = "WebhookEvery" })
     w:Toggle({ Title = "Send Status", Flag = "WebhookOn" })
-    w:Button({ Title = "Send Test", Callback = function() Features.Webhook("Test message") end })
+    w:Button({ Title = "Send Test", Callback = function() Features.Webhook(true) end })
 end
 
 -- UI SETTINGS --------------------------------------------------------------------------------------
@@ -9664,6 +9954,7 @@ loop(5, function()
 end)
 
 local lastWebhook = os.clock()
+Features.WH.firstAt = os.clock() + 60
 loop(1, function()
     if On("AutoRebirth") and Util.Every("rebirth", 5) then Net.Call("Rebirth") end
     if On("AutoNextWorld") and Util.Every("nextworld", 15) then Features.NextWorld() end
@@ -9674,9 +9965,12 @@ loop(1, function()
     if On("AutoBoost") and Util.Every("boost", 60) then Net.Call("ClaimBoost") end
     Features.Shop()
 
-    if On("WebhookOn") and os.clock() - lastWebhook >= (F("WebhookEvery") or 10) * 60 then
+    -- the first card goes out a minute after the hub starts, then every N minutes
+    if On("WebhookOn") and (os.clock() - lastWebhook >= (F("WebhookEvery") or 10) * 60
+        or (Features.WH.firstAt and os.clock() >= Features.WH.firstAt)) then
         lastWebhook = os.clock()
-        Features.Webhook("Anime Fighters Simulator - Status")
+        Features.WH.firstAt = nil
+        task.spawn(Features.Webhook)
     end
 
 
