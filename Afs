@@ -5387,13 +5387,23 @@ function Features.CloneState(id)
     return nil
 end
 local function cloneNow() return workspace:GetServerTimeNow() end
+-- the picked fighter can't be found any more (renamed / levelled while the hub wasn't running,
+-- fused, sold - or picked with an older hub without a fingerprint): the machine's box is
+-- cleared to "(none)", like Auto Lunar drops pets it can't find again
+local function cloneClear(m, label)
+    local dd = Features.CloneDropdowns[m.id]
+    if dd then pcall(dd.Set, dd, "(none)", true) end
+    CM.sigs[m.id], CM.confirmed[m.id] = nil, nil
+    Combat.Log("clone", string.format("%s: the picked fighter (%s) isn't there any more - box cleared, pick it again", m.name, tostring(label)))
+    Util.Notify("Auto Clone: " .. m.name .. " - picked fighter not found, pick it again")
+end
 local function clonePick(m)
     local label = F("Clone_" .. m.id)
     if type(label) ~= "string" or label == "" or label == "(none)" then return nil end
     local sig = CM.sigs[m.id]
-    if not sig or not Data.PetSig then return nil, label, "nosig" end
     local pets = clonePets()
-    if not next(pets) then return nil, label, "loading" end
+    if not next(pets) or not Data.PetSig or not Features.ConfigLoaded then return nil, label, "loading" end
+    if not sig then cloneClear(m, label) return nil end
     local uid = Data.PetId(label)
     if pets[uid] and Data.PetSig(pets[uid]) == sig then CM.confirmed[m.id] = uid return uid, label end
     -- same game, same UID, but renamed / levelled / fused since: still that pet - new fingerprint
@@ -5415,7 +5425,8 @@ local function clonePick(m)
             return u, newLabel
         end
     end
-    return nil, label, "gone"
+    cloneClear(m, label)
+    return nil
 end
 function Features.CloneMachineModel(m)
     local w = Worlds:FindFirstChild(m.world)
@@ -5535,8 +5546,6 @@ function Features.CloneStatus()
             if uid then
                 txt = (cloneNeed(m) == "inteam") and ("empty - <font color='#f87171'>" .. tostring(label) .. " is in your team, not put in</font>")
                     or ("empty - next: " .. tostring(label))
-            elseif why == "nosig" or why == "gone" then
-                txt = "empty - <font color='#f87171'>pick the fighter again</font>"
             elseif why == "loading" then
                 txt = "empty - reading your pets..."
             else
