@@ -4646,7 +4646,7 @@ end
 -- the board shows "0:01:59:43" (2 h, TeamEventInfo.CooldownTimer) and rolls don't count then.
 -- Read from the save (TeamEventData.QuestTimer + CooldownTimer) and from the board's Timer text.
 function Features.EventQuestCooldown()
-    local left = 0
+    local left, saveOk = 0, false
     pcall(function()
         -- QuestTimer = when the last quest was finished (0 = never); the new quests come
         -- CooldownTimer (7200 s) later. Seen: QuestTimer 1791140914, board "0:01:53:19".
@@ -4656,16 +4656,29 @@ function Features.EventQuestCooldown()
         local cdLen = tonumber(info.CooldownTimer) or 7200
         local now = workspace:GetServerTimeNow()
         if t > 0 and t + cdLen > now then left = math.min(t + cdLen - now, cdLen) end
+        saveOk = true
     end)
     pcall(function()
         local timer = Data.MainGui().TeamEvent.Quests.Timer
         -- "Quest Timer: 00:00:00" (open) or "0:01:59:43" (d:hh:mm:ss) / "01:59:43"
+        local txt = timer.Text
         local parts = {}
-        for n in string.gmatch(timer.Text, "%d+") do parts[#parts + 1] = tonumber(n) end
+        for n in string.gmatch(txt, "%d+") do parts[#parts + 1] = tonumber(n) end
         local secs, any = 0, #parts > 0
         for i, n in ipairs(parts) do
             secs = (i == 2 and #parts == 4) and (secs * 24 + n) or (secs * 60 + n)
         end
+        -- the game's board timer gets stuck at "0:00:00:01" (17 Oct: quests already open and
+        -- playable, it only resets after a rejoin). A countdown that hasn't moved for 5 s is
+        -- stale, and 1-2 s left is as good as open: then only the save counts (when it could
+        -- be read - else a stuck long cooldown on the board still counts)
+        local seen = Features.EQTimerSeen
+        if not seen or seen.text ~= txt then
+            seen = { text = txt, at = os.clock() }
+            Features.EQTimerSeen = seen
+        end
+        local stale = os.clock() - seen.at > 5
+        if secs <= 2 or (stale and saveOk) then return end
         if any and secs > left then left = secs end
     end)
     return math.floor(left)
