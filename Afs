@@ -5343,6 +5343,30 @@ end
 -- doesn't take it from there, the hub goes to the machine (Priority "Auto Clone") and does it there.
 do
 local CM = { want = nil, fails = {} }
+-- THE GAME GIVES EVERY PET A NEW UID EACH TIME YOU JOIN: the picked fighter is kept as a
+-- fingerprint (Data.PetSig: PetId, nickname, FusedXP, level, shiny, void, look) per machine,
+-- saved in the config as the hidden flag "CloneSigs", and found again by it after a rejoin.
+-- A pick without a fingerprint (made before this) is never used - its UID is another pet now.
+CM.sigs = {}
+Library.Flags.CloneSigs = { Type = "Hidden",
+    Get = function() return CM.sigs end,
+    Set = function(_, v) if type(v) == "table" then CM.sigs = v end end }
+Features.CloneDropdowns = {}
+local function clonePets()
+    local out = {}
+    local st = Data.StoreData()
+    for _, t in pairs(st and type(st.Pets) == "table" and st.Pets or {}) do
+        if type(t) == "table" and t.UID ~= nil then out[tostring(t.UID)] = t end
+    end
+    return out
+end
+-- the dropdown was changed by you: remember the fighter's fingerprint
+function Features.ClonePicked(id, label)
+    if not Features.ConfigLoaded then return end          -- the config being loaded, not you
+    if type(label) ~= "string" or label == "" or label == "(none)" then CM.sigs[id] = nil return end
+    local raw = clonePets()[Data.PetId(label)]
+    CM.sigs[id] = Data.PetSig and Data.PetSig(raw) or nil
+end
 Features.CloneMachines = {
     { id = "K", world = "TimeChamber", name = "Time Chamber" },
     { id = "A", world = "DBZSuper", name = "Mystic Island" },
@@ -5362,7 +5386,25 @@ local function cloneNow() return workspace:GetServerTimeNow() end
 local function clonePick(m)
     local label = F("Clone_" .. m.id)
     if type(label) ~= "string" or label == "" or label == "(none)" then return nil end
-    return Data.PetId(label), label
+    local sig = CM.sigs[m.id]
+    if not sig or not Data.PetSig then return nil, label, "nosig" end
+    local pets = clonePets()
+    if not next(pets) then return nil, label, "loading" end
+    local uid = Data.PetId(label)
+    if pets[uid] and Data.PetSig(pets[uid]) == sig then return uid, label end
+    -- a rejoin gave the pet a new UID: find it by its fingerprint and show today's label
+    for u, raw in pairs(pets) do
+        if Data.PetSig(raw) == sig then
+            local newLabel
+            for _, l in ipairs(Data.Pets()) do if Data.PetId(l) == u then newLabel = l break end end
+            newLabel = newLabel or label
+            local dd = Features.CloneDropdowns[m.id]
+            if dd then pcall(dd.Set, dd, newLabel, true) end
+            Combat.Log("clone", string.format("%s: picked fighter found again after a rejoin (%s)", m.name, newLabel))
+            return u, newLabel
+        end
+    end
+    return nil, label, "gone"
 end
 function Features.CloneMachineModel(m)
     local w = Worlds:FindFirstChild(m.world)
@@ -5478,8 +5520,17 @@ function Features.CloneStatus()
                 txt = "<font color='#4ade80'>done</font> - taking it out"
             end
         else
-            txt = uid and ((cloneNeed(m) == "inteam") and ("empty - <font color='#f87171'>" .. tostring(label) .. " is in your team, not put in</font>")
-                or ("empty - next: " .. tostring(label))) or "empty (no fighter picked)"
+            local _, _, why = clonePick(m)
+            if uid then
+                txt = (cloneNeed(m) == "inteam") and ("empty - <font color='#f87171'>" .. tostring(label) .. " is in your team, not put in</font>")
+                    or ("empty - next: " .. tostring(label))
+            elseif why == "nosig" or why == "gone" then
+                txt = "empty - <font color='#f87171'>pick the fighter again</font>"
+            elseif why == "loading" then
+                txt = "empty - reading your pets..."
+            else
+                txt = "empty (no fighter picked)"
+            end
         end
         lines[#lines + 1] = string.format("[-] %s (%s) : %s", m.name, m.id, txt)
     end
@@ -8236,7 +8287,10 @@ do
         end
         local dds = {}
         for _, m in ipairs(Features.CloneMachines) do
-            dds[#dds + 1] = cl:Dropdown({ Title = m.name .. " (" .. m.id .. ")", Items = cloneItems(), Default = "(none)", Flag = "Clone_" .. m.id })
+            local dd = cl:Dropdown({ Title = m.name .. " (" .. m.id .. ")", Items = cloneItems(), Default = "(none)", Flag = "Clone_" .. m.id,
+                Callback = function(v) Features.ClonePicked(m.id, v) end })
+            dds[#dds + 1] = dd
+            Features.CloneDropdowns[m.id] = dd
         end
         cl:Button({ Title = "Refresh Pets", Callback = function()
             for _, d in ipairs(dds) do pcall(function() d:Refresh(cloneItems()) end) end
