@@ -5052,6 +5052,9 @@ function Features.MegaCraft()
         end
     end
     if not buyM and partM then buyM, buyAmt = partM, partAmt end
+    -- at most 500 per purchase (Passive Luck Boost holds 900 - one buy of 850 may be refused;
+    -- the shop was only ever seen taking up to 499 at once): the rest goes in the next round
+    if buyM then buyAmt = math.min(buyAmt, 500) end
     if not anyOpen then
         Flags.AutoMegaCraft:Set(false)
         Util.Notify("Mega Boosts: every selected boost is full")
