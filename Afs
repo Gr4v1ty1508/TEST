@@ -6052,30 +6052,52 @@ function Extras.ReloadTeam(why)
     local saved = Data.SavedEquipped and Data.SavedEquipped() or {}
     for slot, uid in pairs(saved) do on[#on + 1] = { slot = slot, uid = uid } end
     table.sort(on, function(a, b) return a.slot < b.slot end)
-    Combat.Log("pets", string.format("%s - taking all %d pets off and putting team %s on again (world %s)",
-        tostring(why), #on, tostring(name or "(same pets)"), Util.World()))
     Features.LastPetSwapAt = os.clock()
     Extras.TeamPressedAt = os.clock()
+    -- another team belongs here than the one on: a normal team swap gives fresh models as well
+    -- (and puts that team's title / artefact on)
+    if name and currentTeam and name ~= currentTeam then
+        local btn = Extras.TeamButtons()[name]
+        if btn and pressOnce(btn) then
+            Combat.Log("pets", string.format("%s - putting team %s on (world %s)", tostring(why), name, Util.World()))
+            currentTeam = name
+            Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = #on }
+            return true
+        end
+    end
+    Combat.Log("pets", string.format("%s - taking all %d pets off and putting team %s on again (world %s)",
+        tostring(why), #on, tostring(name or "(same pets)"), Util.World()))
     for _, p in ipairs(on) do Net.Call("ManagePetUnequip", tonumber(p.uid) or p.uid) end
     local t0 = os.clock()
     while #Data.EquippedPets() > 0 and os.clock() - t0 < 2 do task.wait(0.1) end
     task.wait(0.3)
-    local btn = name and Extras.TeamButtons()[name]
-    if btn and pressOnce(btn) then
+    -- back on with the game's own call, slot by slot (ManagePet(uid, "Equip", slot) - what the team
+    -- button sends). Pressing the team button right after taking the pets off put NOTHING back on
+    -- (log 17 Oct 17:59 and 23 Oct 12:15: "team DR: 0/23 pets on" - then no pets for 5-30 min)
+    local list = name and Extras.TeamUIDList(name)
+    if list and #list > 0 then
+        for slot, uid in ipairs(list) do Net.Call("ManagePetEquip", tonumber(uid) or uid, slot) end
         currentTeam = name
-        Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = 0 }
+        Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = 0, direct = true }
     else
-        local list = name and Extras.TeamUIDList(name)
-        if list and #list > 0 then
-            for slot, uid in ipairs(list) do Net.Call("ManagePetEquip", tonumber(uid) or uid, slot) end
-            currentTeam = name
-        else
-            for _, p in ipairs(on) do Net.Call("ManagePetEquip", tonumber(p.uid) or p.uid, p.slot) end
-        end
+        for _, p in ipairs(on) do Net.Call("ManagePetEquip", tonumber(p.uid) or p.uid, p.slot) end
     end
     Features.LastPetSwapAt = os.clock()
     Extras.TeamPressedAt = os.clock()
     return true
+end
+-- put a team's pets on one by one (ManagePet "Equip" per slot), without the team button.
+-- Used when nothing at all is equipped: a team press that put nothing on, a reload that didn't
+-- come back. Returns how many pets were sent.
+function Extras.PutTeamOn(name)
+    local list = name and Extras.TeamUIDList(name)
+    if not list or #list == 0 then return 0 end
+    Features.LastPetSwapAt = os.clock()
+    Extras.TeamPressedAt = os.clock()
+    for slot, uid in ipairs(list) do Net.Call("ManagePetEquip", tonumber(uid) or uid, slot) end
+    currentTeam = name
+    Extras.TeamCheck = { name = name, at = os.clock(), tries = 0, before = 0, direct = true }
+    return #list
 end
 -- is the team on right now? true / false, nil = can't tell (team not in the save)
 function Extras.TeamOn(name)
@@ -6107,6 +6129,15 @@ function Extras.CheckTeam()
     if wrong == 0 and #pets >= want then
         Extras.TeamCheck = nil
         return true
+    end
+    -- NOTHING went on (the save says 0 equipped too): pressing again is not the risk here - there are
+    -- no pet models to break. Put the team's pets on one by one instead (once).
+    local savedN = 0
+    for _ in pairs(Data.SavedEquipped() or {}) do savedN = savedN + 1 end
+    if #pets == 0 and savedN == 0 and not c.direct then
+        local n = Extras.PutTeamOn(c.name)
+        Combat.Log("team", string.format("team %s: no pets went on - putting its %d pets on one by one", c.name, n))
+        return false
     end
     -- not all on: only say so (pressing the team again is what broke the game's pet script)
     Extras.TeamCheck = nil
@@ -9865,7 +9896,10 @@ loop(0.25, function()
         local part = m.Parent and Data.PetPart(m)
         if part then
             local p = part.Position
-            local falling = (part.AssemblyLinearVelocity.Y < -80 and p.Y < pos.Y - 30) or p.Y < pos.Y - 300
+            -- (only a pet really FALLING: going down fast. "300 studs below you" was dropped - after
+            -- every travel up into the Time Trial / a dungeon the pets left behind at the lobby are
+            -- thousands of studs below, standing still, and were taken for falling (log 23 Oct))
+            local falling = part.AssemblyLinearVelocity.Y < -80 and p.Y < pos.Y - 30
             if falling and now - (Features.PetRescueAt[m] or -99) > 2 then
                 Features.PetRescueAt[m] = now
                 rescued = rescued + 1
@@ -9952,8 +9986,8 @@ loop(2, function()
         end
         for m in pairs(Features.NoDataSince) do if not seen[m] then Features.NoDataSince[m] = nil end end
     end)
-    -- a pet fell off the map (caught falling once), or an equipped pet's model is gone for 4 s:
-    -- take the WHOLE team off and put the whole team for the current mode back on (Extras.
+    -- a pet fell off the map (caught falling, 4 s), or the same equipped pet hasn't been here for
+    -- 20 s: take the WHOLE team off and put the whole team for the current mode back on (Extras.
     -- ReloadTeam) = fresh models next to you, and the game's pet script drops the dead ones from
     -- its list (what fixes it by hand). Not right after a travel or a team swap; every 20 s at
     -- most, 5 times in a row (then a rejoin is needed). Also in the Time Chamber.
@@ -9989,10 +10023,20 @@ loop(2, function()
             end
         end
         local lost = {}
-        for slot, uid in pairs(saved) do
-            if not alive[uid] then lost[#lost + 1] = { slot = slot, uid = uid } end
-        end
         local now = os.clock()
+        Features.MissingSince = Features.MissingSince or {}
+        local longest, anyFall = 0, false
+        for slot, uid in pairs(saved) do
+            if not alive[uid] then
+                lost[#lost + 1] = { slot = slot, uid = uid }
+                Features.MissingSince[uid] = Features.MissingSince[uid] or now
+                longest = math.max(longest, now - Features.MissingSince[uid])
+                if falling[uid] then anyFall = true end
+            else
+                Features.MissingSince[uid] = nil
+            end
+        end
+        for uid in pairs(Features.MissingSince) do if not savedSet[uid] then Features.MissingSince[uid] = nil end end
         if #lost == 0 then
             Features.LostSince = nil
             if Features.LostFixAt and now - Features.LostFixAt > 60 then Features.LostFixes = 0 end
@@ -10002,10 +10046,13 @@ loop(2, function()
            or (Features.LastPetSwapAt and now - Features.LastPetSwapAt < 8)
            or (Extras.TeamPressedAt and now - Extras.TeamPressedAt < 8) then
             Features.LostSince = nil
+            table.clear(Features.MissingSince)
             return
         end
-        Features.LostSince = Features.LostSince or now
-        if now - Features.LostSince < 4 then return end
+        -- caught FALLING: after 4 s. Only not here (not loaded after a teleport - the check above
+        -- asks the server to bring it every 3 s): the same pet missing for 20 s. (Pets that are just
+        -- behind after a teleport in a dungeon / the Time Trial set it off every 20 s before.)
+        if longest < (anyFall and 4 or 20) then return end
         if Features.LostFixAt and now - Features.LostFixAt < 20 then return end
         if (Features.LostFixes or 0) >= 5 then
             if Util.Every("lostpets-giveup", 300) then
@@ -10018,14 +10065,44 @@ loop(2, function()
         Features.LostFixes = (Features.LostFixes or 0) + 1
         Features.LostSince = nil
         table.clear(Features.PetLostHits)
-        Extras.ReloadTeam(string.format("%d of %d pets fell off the map / are gone (%d here, try %d/5)",
-            #lost, n, aliveN, Features.LostFixes))
+        table.clear(Features.MissingSince)
+        Extras.ReloadTeam(string.format("%d of %d pets %s (%d here, try %d/5)",
+            #lost, n, anyFall and "fell off the map" or "missing for 20 s", aliveN, Features.LostFixes))
     end)
     -- farming, and not one pet of ours is here (none equipped, or none loaded near you) for 15 s:
     -- put the team on again with the game's own team button - the pets spawn next to you.
     -- (Log 16 Oct 14:05-14:20: no pets at all for 15 min in gates - "seen 0/0" - and the 22
     -- re-equips in between did nothing; the DR team going on at 14:20 brought all 23 back.)
     -- At most once a minute, 3 times in a row; then only a rejoin helps (Settings > Rejoin).
+    -- NOT ONE PET EQUIPPED (the save says 0 and there are no pet models): a team press / reload
+    -- that put nothing back on. Nothing else notices this (no pet is "missing" from an empty
+    -- list, and the team the hub thinks is on is never pressed again) - before, the hub then
+    -- farmed with no pets for 5-30 min (logs 17 Oct 18:01-18:37, 23 Oct 12:15-12:20).
+    -- After 6 s: the team for what's being done now goes on, pet by pet. Every 30 s at most.
+    pcall(function()
+        local now = os.clock()
+        local saved = Data.SavedEquipped()
+        local savedN = 0
+        for _ in pairs(saved or {}) do savedN = savedN + 1 end
+        if not saved or savedN > 0 or #Data.EquippedPets() > 0 then Features.ZeroSince = nil return end
+        if (Features.WorldChangedAt and now - Features.WorldChangedAt < 10)
+           or (Features.LastPetSwapAt and now - Features.LastPetSwapAt < 6) then
+            Features.ZeroSince = nil
+            return
+        end
+        Features.ZeroSince = Features.ZeroSince or now
+        if now - Features.ZeroSince < 6 then return end
+        if Features.ZeroFixAt and now - Features.ZeroFixAt < 30 then return end
+        Features.ZeroFixAt, Features.ZeroSince = now, nil
+        local name = Extras.TeamForNow()
+        local n = name and Extras.PutTeamOn(name) or 0
+        if n > 0 then
+            Combat.Log("pets", string.format("no pets equipped at all - putting team %s on (%d pets, world %s)", name, n, Util.World()))
+        elseif Util.Every("zero-noteam", 300) then
+            Combat.Log("pets", "no pets equipped at all and no team to put on - pick your teams in Teams")
+            Util.Notify("No pets equipped - pick your teams in Teams")
+        end
+    end)
     pcall(function()
         local now = os.clock()
         local here = 0
