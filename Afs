@@ -4550,8 +4550,8 @@ function Features.Passive()
                         Util.Notify(label .. ": can't read its passive - equip it to roll it")
                     end
                     break
-                elseif passiveWanted(now) or Features.SlotHasDemonic(id, slot) then
-                    passiveDone[key] = true            -- already good (or a Demonic passive): keep it, never roll it
+                elseif passiveWanted(now) or (Features.KeepDemonic("passive") and Features.SlotHasDemonic(id, slot)) then
+                    passiveDone[key] = true            -- already good (or a Demonic passive you keep): never roll it
                 else
                     passiveRolls[key] = (passiveRolls[key] or 0) + 1
                     Net.Call("RollPassive", id, machine, slot, F("PassiveMethod") == "Shard")
@@ -4883,8 +4883,9 @@ function Features.EventQuests()
     local slot = tonumber(F("EQSlot") or "1") or 1
     if not Features.PassiveReady(machine, "lunar") then return end
     for _, label in ipairs(pets) do
-        -- never roll away a Demonic passive (one the Demonic crafter parked there, or yours)
-        if Features.SlotHasDemonic(Data.PetId(label), slot) then
+        -- a Demonic passive (one the Demonic crafter parked there, or yours) is left alone
+        -- unless "Reroll Over Demonic Passives" is on
+        if Features.KeepDemonic("lunar") and Features.SlotHasDemonic(Data.PetId(label), slot) then
             if Util.Every("eq-demonic-" .. label, 600) then
                 Combat.Log("eq", label .. ": slot " .. slot .. " holds a Demonic passive - not rerolled")
             end
@@ -5802,12 +5803,24 @@ function DM.HasKey(raw, key)
     return false
 end
 -- uids Auto Lunar / Auto Passive reroll
+-- pets rerolled by Auto Lunar / Auto Passive: true, or "wipe" when that card's "Reroll Over Demonic
+-- Passives" is on (a Demonic passive parked there would be rolled away)
 function DM.RolledPets()
     local out = {}
-    for _, flag in ipairs({ "EQPets", "PassivePets" }) do
-        for label, on in pairs(F(flag) or {}) do if on then out[Data.PetId(label)] = true end end
+    for _, f in ipairs({ { "EQPets", "EQRollDemonic" }, { "PassivePets", "PassiveRollDemonic" } }) do
+        local wipe = On(f[2])
+        for label, on in pairs(F(f[1]) or {}) do
+            if on then
+                local id = Data.PetId(label)
+                if wipe then out[id] = "wipe" elseif not out[id] then out[id] = true end
+            end
+        end
     end
     return out
+end
+-- does that reroll card leave Demonic passives alone? (its "Reroll Over Demonic Passives" toggle off)
+function Features.KeepDemonic(card)
+    return not On(card == "passive" and "PassiveRollDemonic" or "EQRollDemonic")
 end
 -- where a new Demonic passive <key> is kept until you move it to a main fighter yourself: a Take
 -- Divines From (Reroll) fighter with a free slot. The SAME Demonic passives are kept together (a
@@ -5837,7 +5850,8 @@ function DM.Destination(P, key, midSet)
             elseif demOther == 0 then tier = 4
             elseif other > 0 then tier = 5
             else tier = 6 end
-            local score = tier * 100 + (rolled[u] and 50 or 0) - same
+            -- rerolled fighters come last; ones that are rerolled OVER Demonic passives only when nothing else is left
+            local score = tier * 100 + (rolled[u] == "wipe" and 1000 or (rolled[u] and 50 or 0)) - same
             if not bestScore or score < bestScore then best, bestScore = u, score end
         end
     end
@@ -5883,7 +5897,7 @@ function DM.Plan()
     --     Demonic passive, they go onto another fighter holding only that kind with room (the fullest
     --     takes from the emptiest), e.g. R1 {Raging Wraith} + R2 {Raging Wraith} -> R1 {Raging Wraith x2}
     --     (they end up alone when the Divine passives next to them are used up)
-    local pure = {}
+    local pure, rolled = {}, DM.RolledPets()
     for u in pairs(srcSet) do
         local pas = DM.Passives(P[u])
         local k = pas[1] and pas[1].key
@@ -5892,13 +5906,18 @@ function DM.Plan()
             for _, p in ipairs(pas) do if p.key ~= k then allK = false end end
             if allK then
                 pure[k] = pure[k] or {}
-                table.insert(pure[k], { uid = u, n = #pas, free = DM.FreeSlots(P[u]) })
+                table.insert(pure[k], { uid = u, n = #pas, free = DM.FreeSlots(P[u]), wipe = rolled[u] == "wipe" })
             end
         end
     end
     for k, list in pairs(pure) do
         if #list >= 2 then
-            table.sort(list, function(a, b) if a.n ~= b.n then return a.n > b.n end return a.uid < b.uid end)
+            -- safe fighters first (a fighter rerolled over Demonic passives only takes from another such one)
+            table.sort(list, function(a, b)
+                if a.wipe ~= b.wipe then return not a.wipe end
+                if a.n ~= b.n then return a.n > b.n end
+                return a.uid < b.uid
+            end)
             for i = 1, #list do
                 local to = list[i]
                 if to.free > 0 then
@@ -6121,10 +6140,14 @@ function DM.Status()
         end
     end
     L[#L + 1] = string.format("Take Divines From : %d fighters", #DM.Picked("DemonicSources"))
+    local rolled = DM.RolledPets()
     for _, u in ipairs(DM.Picked("DemonicSources")) do
         local names = {}
         for _, p in ipairs(DM.Passives(P[u])) do if DM.IsDemonicPassive(p.key) then names[#names + 1] = DM.PassiveName(p.key) end end
-        if #names > 0 then L[#L + 1] = "    parked on " .. DM.PetName(P[u]) .. " : " .. table.concat(names, ", ") end
+        if #names > 0 then
+            L[#L + 1] = "    parked on " .. DM.PetName(P[u]) .. " : " .. table.concat(names, ", ")
+                .. (rolled[u] == "wipe" and "  <font color='#facc15'>(rerolled over - move it soon)</font>" or "")
+        end
     end
     -- how many of each picked recipe the Divine fighters can make
     local want = F("DemonicRecipes") or {}
@@ -8188,7 +8211,7 @@ BP.Run = {
         end
         local slot = tonumber(F("EQSlot") or "1") or 1
         for _, label in ipairs(pets) do
-            if not Features.SlotHasDemonic(Data.PetId(label), slot) then Net.Call("RollPassive", Data.PetId(label), "Normal", slot, false) end
+            if not (Features.KeepDemonic("lunar") and Features.SlotHasDemonic(Data.PetId(label), slot)) then Net.Call("RollPassive", Data.PetId(label), "Normal", slot, false) end
         end
         task.wait(F("EQDelay") or 0.5)
         return true
@@ -9463,7 +9486,9 @@ do
             .. "    (Passive Transfer, uses tokens) - you move it to your main fighter yourself. Main fighters are never touched.\n"
             .. "[-] The first craft / park is tried from where you are: if the game takes it, it's done from anywhere\n"
             .. "    (in the background, no trip); if not, the hub goes to the machine for it.\n"
-            .. "[-] Rerolls (Auto Lunar / Auto Passive / Battle Pass) never touch a slot that holds a Demonic passive." })
+            .. "[-] Auto Lunar / Auto Passive / Battle Pass rerolls skip a slot that holds a Demonic passive,\n"
+            .. "    unless that card's \"Reroll Over Demonic Passives\" is on - then fighters rerolled there are only\n"
+            .. "    used for parking when no other has room, and the status says to move it soon." })
         dc:Dropdown({ Title = "Recipes", Items = DM.Labels(), Multi = true, Default = {}, Flag = "DemonicRecipes" })
         local function save(flag) return function(v) if Features.SavePetPicks then Features.SavePetPicks(flag, v) end end end
         local mid = dc:Dropdown({ Title = "Middle Fighter (Demonic)", Items = DM.MiddleItems(Data.Pets()), Multi = true, CountOnly = true,
@@ -9663,6 +9688,9 @@ do
     p:Dropdown({ Title = "Reroll With", Items = CFG.RerollMethods, Default = "Token", Required = true, Flag = "PassiveMethod" })
     p:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 2, Default = 0.5, Decimals = 1, Flag = "PassiveDelay" })
     p:Toggle({ Title = "Teleport To Reroll Machine", Default = true, Flag = "PassiveGoMachine" })
+    -- off: a slot holding a Demonic passive is skipped; on: it's rerolled like any other
+    p:Toggle({ Title = "Reroll Over Demonic Passives", Default = false, Flag = "PassiveRollDemonic",
+        Callback = function() Features.ResetPassive() end })
     p:Toggle({ Title = "Auto Reroll Passive !", Flag = "AutoPassive", Callback = function(v) if v then Features.ResetPassive() end end })
     if #names == 0 then
         p:Paragraph({ Body = "PassiveStats module could not be read. Type a passive name below instead." })
@@ -9703,6 +9731,9 @@ do
     -- adds later is ticked by itself once (see Features.EQAddNewQuests)
     Flags.EQKnownQuests = { value = nil, Get = function(self) return self.value end, Set = function(self, v) self.value = v end }
     q:Slider({ Title = "Delayed [seconds]", Min = 0.1, Max = 2, Default = 0.5, Decimals = 1, Flag = "EQDelay" })
+    -- off: a pet whose slot holds a Demonic passive is skipped; on: it's rerolled like any other
+    -- (also Battle Pass "Roll Passive", which uses these pets / slot)
+    q:Toggle({ Title = "Reroll Over Demonic Passives", Default = false, Flag = "EQRollDemonic" })
     Features.EQTimer = q:Paragraph({ Body = "New Quests In : -" })
     Features.EQStatus = q:Paragraph({ Body = "Status : -" })
     q:Button({ Title = "Read Board Now", Callback = function()
