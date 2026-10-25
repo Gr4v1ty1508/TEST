@@ -5810,18 +5810,28 @@ function DM.RolledPets()
     return out
 end
 -- where a new Demonic passive <key> is kept until you move it to a main fighter yourself: a Take
--- Divines From (Reroll) fighter with a free slot that doesn't have it yet; fighters Auto Lunar /
--- Auto Passive reroll come last (their rerolls skip a slot that holds a Demonic passive anyway)
+-- Divines From (Reroll) fighter with a free slot that doesn't have it yet. The Demonic passives are
+-- KEPT TOGETHER (so one fighter holds only Demonic ones and is easy to move from):
+--   1. a fighter that already holds Demonic passives and nothing else (the fullest first)
+--   2. an empty fighter (starts a new group)
+--   3. a fighter that already has a Demonic one next to other passives
+--   4. any fighter with a free slot
+-- fighters Auto Lunar / Auto Passive reroll come last in each (their rerolls skip Demonic slots anyway)
 function DM.Destination(P, key, midSet)
-    local rolled, later = DM.RolledPets(), nil
+    local rolled, best, bestScore = DM.RolledPets(), nil, nil
     for _, u in ipairs(DM.Picked("DemonicSources")) do
         local raw = P[u]
         if raw and not midSet[u] and DM.FreeSlots(raw) > 0 and not DM.HasKey(raw, key) then
-            if not rolled[u] then return u end
-            later = later or u
+            local dem, other = 0, 0
+            for _, p in ipairs(DM.Passives(raw)) do
+                if DM.IsDemonicPassive(p.key) then dem = dem + 1 else other = other + 1 end
+            end
+            local tier = (dem > 0 and other == 0) and 1 or ((dem == 0 and other == 0) and 2 or (dem > 0 and 3 or 4))
+            local score = tier * 100 + (rolled[u] and 50 or 0) - dem
+            if not bestScore or score < bestScore then best, bestScore = u, score end
         end
     end
-    return later
+    return best
 end
 -- a reroll must never hit a Demonic passive (a parked one, or yours): true = leave that slot alone
 function Features.SlotHasDemonic(petId, slot)
