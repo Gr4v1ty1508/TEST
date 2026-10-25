@@ -111,6 +111,7 @@ local CFG = {
     -- worlds pinned to the TOP of every world list, in this order.
     -- write the name exactly as the list shows it (not case sensitive)
     PinnedWorlds = {
+        "Hallowed Castle",                -- Halloween 2026 event (world Halloween2026)
         "Summer (2025) Island", "Anniversary (2024) Island", "Patrick Event", "Christmas 2025",
         "Easter Event 2026", "Beyond The Valentine", "Summer (2024) Island", "Winter (2023) Island",
         "Super Island",
