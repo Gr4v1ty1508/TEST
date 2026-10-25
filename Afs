@@ -5906,7 +5906,7 @@ local function fail(what, why)
     DM.failUntil = os.clock() + (DM.fails >= 3 and 600 or 20)
     Combat.Log("demonic", string.format("%s didn't work (%s)%s", what, why, DM.fails >= 3 and " - 3 times in a row, trying again in 10 min" or ""))
 end
-function DM.Craft(p)
+function DM.Craft(p, trial)
     local P = DM.Pets()
     local before = #DM.Passives(P[p.mid])
     DM.msg, DM.msgUntil = nil, os.clock() + 5
@@ -5924,12 +5924,13 @@ function DM.Craft(p)
             return true
         end
     end
+    if trial then return false end
     DM.badPair[p.recipe.key .. p.left .. p.right] = os.clock() + 600
     fail("crafting " .. p.recipe.name, DM.msg and ("the game says: " .. DM.msg) or "the middle fighter got nothing")
     return false
 end
 -- park: TransferAllPassives(middle, rerollFighter) (recorded: "Transferred 1 passive!")
-function DM.Park(p)
+function DM.Park(p, trial)
     local P = DM.Pets()
     DM.msg, DM.msgUntil = nil, os.clock() + 5
     Net.Raw("TransferAllPassives", { tonumber(p.from) or p.from, tonumber(p.to) or p.to, n = 2 })
@@ -5943,13 +5944,43 @@ function DM.Park(p)
             return true
         end
     end
+    if trial then return false end
     fail("parking " .. DM.PassiveName(p.what) .. " on " .. DM.PetName(P[p.to]), DM.msg and ("the game says: " .. DM.msg) or "nothing changed")
     return false
+end
+-- DOES IT HAVE TO BE DONE AT THE MACHINE? Not known yet: the first craft and the first park are
+-- tried from wherever you are (a try that doesn't work costs nothing: the save shows nothing changed,
+-- no passive is used). Works -> done from anywhere from then on, in the background, without taking
+-- the character; doesn't -> the Brain task goes to the machine for it. (Per hub start.)
+DM.Here = {}          -- kind ("craft" / "park") -> true = anywhere, false = at the machine, nil = not tried
+local function kindName(k) return k == "craft" and "crafting" or "parking" end
+function DM.Background()
+    if not On("AutoDemonic") or DM.busy then return end
+    if os.clock() < DM.failUntil or os.clock() < DM.idleUntil then return end
+    local plan, why = DM.Plan()
+    if not plan then
+        DM.why = why
+        DM.idleUntil = os.clock() + 20
+        return
+    end
+    local here, away = DM.Here[plan.kind], Util.World() ~= "MachineWorld"
+    if here == false or (here == nil and not away) then return end     -- the Brain task does it at the machine
+    DM.busy = true
+    DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name) or ("parking " .. DM.PassiveName(plan.what))
+    local ok
+    if plan.kind == "craft" then ok = DM.Craft(plan, here == nil) else ok = DM.Park(plan, here == nil) end
+    if here == nil then
+        DM.Here[plan.kind] = ok and true or false
+        Combat.Log("demonic", ok and (kindName(plan.kind) .. " works from anywhere - no trip to the machine for it")
+            or (kindName(plan.kind) .. " didn't work from here (" .. Util.World() .. ") - doing it at the machine"))
+    end
+    closeWindows()
+    DM.busy = false
 end
 -- Brain task: go to Machine World, stand at the machine, do one step
 function DM.Run()
     if not On("AutoDemonic") then DM.why = "off" return false end
-    if os.clock() < DM.failUntil or os.clock() < DM.idleUntil then return false end
+    if DM.busy or os.clock() < DM.failUntil or os.clock() < DM.idleUntil then return false end
     if Features.InActiveRun and Features.InActiveRun() then return false end
     local plan, why = DM.Plan()
     if not plan then
@@ -5957,6 +5988,9 @@ function DM.Run()
         DM.idleUntil = os.clock() + 20
         return false
     end
+    -- done from anywhere (or about to be tried from here): the background loop does it
+    local here = DM.Here[plan.kind]
+    if here == true or (here == nil and Util.World() ~= "MachineWorld") then return false end
     DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name) or ("parking " .. DM.PassiveName(plan.what))
     if Util.World() ~= "MachineWorld" then
         DM.waitModel = nil
@@ -5986,7 +6020,11 @@ function DM.Run()
     task.wait(0.6)
     local prompt = mdl:FindFirstChildWhichIsA("ProximityPrompt", true)
     if prompt and fireproximityprompt then pcall(fireproximityprompt, prompt) task.wait(0.4) end
-    if plan.kind == "craft" then DM.Craft(plan) else DM.Park(plan) end
+    DM.busy = true
+    local ok
+    if plan.kind == "craft" then ok = DM.Craft(plan) else ok = DM.Park(plan) end
+    DM.busy = false
+    if ok and DM.Here[plan.kind] == nil then DM.Here[plan.kind] = false end    -- (done at the machine: keep going there)
     closeWindows()
     return true
 end
@@ -6027,6 +6065,8 @@ function DM.Status()
         end
     end
     L[#L + 1] = string.format("This session : %d crafted, %d parked", DM.crafted, DM.moved)
+    local function where(k) local h = DM.Here[k] return h == true and "anywhere" or (h == false and "at the machine" or "not tried yet") end
+    L[#L + 1] = "Crafting : " .. where("craft") .. "  /  Parking : " .. where("park")
     if On("AutoDemonic") then
         L[#L + 1] = "Now : " .. tostring(DM.why)
             .. (os.clock() < DM.failUntil and string.format("  (waiting %ds after a failure)", math.ceil(DM.failUntil - os.clock())) or "")
@@ -9349,6 +9389,8 @@ do
             .. "    one Divine passive from each of 2 fighters in Take Divines From -> the middle Demonic fighter.\n"
             .. "[-] Each new Demonic passive is then parked on a Take Divines From (Reroll) fighter with a free slot\n"
             .. "    (Passive Transfer, uses tokens) - you move it to your main fighter yourself. Main fighters are never touched.\n"
+            .. "[-] The first craft / park is tried from where you are: if the game takes it, it's done from anywhere\n"
+            .. "    (in the background, no trip); if not, the hub goes to the machine for it.\n"
             .. "[-] Rerolls (Auto Lunar / Auto Passive / Battle Pass) never touch a slot that holds a Demonic passive." })
         dc:Dropdown({ Title = "Recipes", Items = DM.Labels(), Multi = true, Default = {}, Flag = "DemonicRecipes" })
         local function save(flag) return function(v) if Features.SavePetPicks then Features.SavePetPicks(flag, v) end end end
@@ -10221,6 +10263,7 @@ loop(30, function()
         if type(picks) == "table" and next(picks) then pcall(Features.SavePetPicks, flag, picks) end
     end
 end)
+loop(2, function() if Features.Demonic then Features.Demonic.Background() end end)
 loop(5, function()
     if Features.CloneLabel then pcall(function() Features.CloneLabel:Set(Features.CloneStatus()) end) end
     if Features.DemonicLabel and Features.Demonic then pcall(function() Features.DemonicLabel:Set(Features.Demonic.Status()) end) end
