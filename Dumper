@@ -18,6 +18,9 @@
       modules/<name>.txt   data of every ModuleScripts module (require)
       calls_*.txt      RECORD: every remote call you make + what the server
                        sends back, while recording is on
+      demonic/         DEMONIC MACHINE button: the Demonic Passive Machine's own code
+                       (decompiled), its data, and any table in memory that holds
+                       the recipes - read only, nothing is crafted
       watch_*.txt      WATCH OTHER HUB: the same, but also everything another
                        script (e.g. another hub) does: remote / Bindable calls,
                        fireproximityprompt, firetouchinterest, and every teleport
@@ -479,6 +482,149 @@ local function dumpAll()
 end
 
 ------------------------------------------------------------------------
+-- DEMONIC MACHINE: what YOUR client knows about the Demonic Passive Machine
+-- (MainGui.Scripts.MainGuiHandler.DemonicPassiveHandler): its code (decompiled),
+-- its data, the strings its functions use, and every small table in memory that
+-- names a Demonic passive together with a Divine one = the recipes, if the client
+-- holds them. Read only - nothing is sent to the server, nothing is crafted.
+-- Saved to dump/demonic/  (summary.txt says what was found)
+------------------------------------------------------------------------
+local DEMONIC = { "FallenAngel", "Omnipresent", "AbyssalWealth", "AquaticDominion", "TimelessPyre",
+    "InfernalContract", "AbyssalFury", "DemonOverdrive", "EasterOverlord",
+    "RagingWraith", "WitchOfLuck", "UndyingGreed", "SinisterShade" }
+local DIVINE = { "Angel", "Demon", "Interstellar", "BrokenLimiter", "CoralCommander", "ShiningSun",
+    "CelestialOath", "DivineHarmony", "HeavensRadiance", "EternalAscension", "BlossomDeity", "TheGrandHatchmaster",
+    "JacksHatred", "HollowedMight", "FrozenInTime", "HauntedScarecrow", "SpookyShade" }
+local function dumpDemonic()
+    local kind = {}
+    for _, n in ipairs(DIVINE) do kind[n] = "divine" end
+    for _, n in ipairs(DEMONIC) do kind[n] = "demonic" end
+    local sum = { "Demonic machine dump  " .. os.date("%Y-%m-%d %H:%M:%S"), "" }
+    local getup = (debug and debug.getupvalues) or getupvalues
+    local getk = (debug and debug.getconstants) or getconstants
+
+    -- 1. the scripts: every script with "demonic" in its name + MainGuiHandler (the one that uses it)
+    local pg = LP:FindFirstChild("PlayerGui")
+    local scripts = {}
+    for _, d in ipairs(pg and pg:GetDescendants() or {}) do
+        if (d:IsA("ModuleScript") or d:IsA("LocalScript")) and string.find(string.lower(d.Name), "demonic", 1, true) then
+            scripts[#scripts + 1] = d
+        end
+    end
+    sum[#sum + 1] = "scripts named *demonic*: " .. #scripts .. (decompile and "" or "   (this executor can't decompile)")
+    for _, s in ipairs(scripts) do
+        sum[#sum + 1] = "  " .. path(s) .. "  <" .. s.ClassName .. ">"
+        if decompile then
+            status("decompiling " .. s.Name .. "...")
+            local ok, src = pcall(decompile, s)
+            save("demonic/" .. s.Name .. ".lua", ok and tostring(src) or ("(decompile failed) " .. tostring(src)))
+            sum[#sum + 1] = "    code: " .. (ok and (#tostring(src) .. " chars -> demonic/" .. s.Name .. ".lua") or ("decompile failed: " .. tostring(src)))
+        end
+        if s:IsA("ModuleScript") then
+            -- the game required it already: this hands back the same table, no code runs again
+            local done, ok, res = false, false, nil
+            task.spawn(function() ok, res = pcall(require, s) done = true end)
+            local t0 = os.clock()
+            while not done and os.clock() - t0 < 3 do task.wait() end
+            local lines = {}
+            if not done then lines[1] = "(require timed out)"
+            elseif not ok then lines[1] = "(require failed) " .. tostring(res)
+            else
+                lines[1] = "returns: " .. ser(res, 6, {}, "")
+                if type(res) == "table" then
+                    for k, fn in pairs(res) do
+                        if type(fn) == "function" then
+                            if getup then
+                                local okU, ups = pcall(getup, fn)
+                                for i, u in pairs(okU and ups or {}) do
+                                    if type(u) == "table" then
+                                        lines[#lines + 1] = "\n" .. tostring(k) .. "  upvalue " .. tostring(i) .. " = " .. ser(u, 4, {}, "")
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            save("demonic/" .. s.Name .. "_data.txt", lines)
+            sum[#sum + 1] = "    data: demonic/" .. s.Name .. "_data.txt"
+        end
+    end
+    local mgh = pg and pg:FindFirstChild("MainGuiHandler", true)
+    if mgh and decompile then
+        status("decompiling MainGuiHandler...")
+        local ok, src = pcall(decompile, mgh)
+        save("demonic/MainGuiHandler.lua", ok and tostring(src) or ("(decompile failed) " .. tostring(src)))
+        sum[#sum + 1] = "  MainGuiHandler code: " .. (ok and (#tostring(src) .. " chars") or "decompile failed")
+    end
+
+    -- 2. memory: small tables that name a Demonic AND a Divine passive (a recipe list would),
+    --    and the strings used by functions of the demonic scripts
+    local hits, consts = {}, {}
+    if getgc then
+        status("searching memory...")
+        local okG, gc = pcall(getgc, true)
+        local seenConst = {}
+        for i, v in ipairs(okG and gc or {}) do
+            if i % 3000 == 0 then task.wait() end
+            local tv = type(v)
+            if tv == "table" and #hits < 40 then
+                local cnt, dem, div = 0, 0, 0
+                local okT = pcall(function()
+                    for k, x in pairs(v) do
+                        cnt = cnt + 1
+                        if cnt > 80 then break end
+                        local a = type(k) == "string" and kind[k] or nil
+                        local b = type(x) == "string" and kind[x] or nil
+                        if a == "demonic" or b == "demonic" then dem = dem + 1 end
+                        if a == "divine" or b == "divine" then div = div + 1 end
+                        if type(x) == "table" then         -- { "Angel", "Demon" } one level down
+                            local m = 0
+                            for _, y in pairs(x) do
+                                m = m + 1
+                                if m > 20 then break end
+                                local c = type(y) == "string" and kind[y] or nil
+                                if c == "demonic" then dem = dem + 1 elseif c == "divine" then div = div + 1 end
+                            end
+                        end
+                    end
+                end)
+                if okT and cnt <= 80 and dem > 0 and div > 0 then hits[#hits + 1] = v end
+            elseif tv == "function" and getk then
+                local okS, src = pcall(function() return debug.info(v, "s") end)
+                if okS and type(src) == "string" and string.find(string.lower(src), "demonic", 1, true) then
+                    local okK, ks = pcall(getk, v)
+                    for _, c in pairs(okK and ks or {}) do
+                        if type(c) == "string" and not seenConst[c] then seenConst[c] = true consts[#consts + 1] = c end
+                    end
+                end
+            end
+        end
+        sum[#sum + 1] = ""
+        sum[#sum + 1] = "memory: " .. #hits .. " small table(s) naming a Demonic + a Divine passive" .. (okG and "" or "  (getgc failed)")
+        local out = {}
+        for n, t in ipairs(hits) do
+            local okS, s = pcall(ser, t, 4, {}, "")
+            out[#out + 1] = "#" .. n .. " " .. (okS and s or "(can't print)")
+            out[#out + 1] = ""
+            local first = okS and string.gsub(string.sub(s, 1, 160), "%s+", " ") or "?"
+            sum[#sum + 1] = "  #" .. n .. "  " .. first
+        end
+        save("demonic/memory_tables.txt", #out > 0 and out or { "(none - the client doesn't hold the recipes as a table)" })
+        table.sort(consts)
+        save("demonic/strings.txt", #consts > 0 and consts or { "(no strings found)" })
+        sum[#sum + 1] = "strings used by the demonic scripts' functions: " .. #consts .. " -> demonic/strings.txt"
+        local named = {}
+        for _, c in ipairs(consts) do if kind[c] then named[#named + 1] = c .. " (" .. kind[c] .. ")" end end
+        if #named > 0 then sum[#sum + 1] = "  passive names among them: " .. table.concat(named, ", ") end
+    else
+        sum[#sum + 1] = "memory: this executor has no getgc"
+    end
+    save("demonic/summary.txt", sum)
+    status("demonic: " .. #scripts .. " script(s), " .. #hits .. " table(s) -> dump/demonic")
+end
+
+------------------------------------------------------------------------
 -- recorder: your remote calls (+ return values) and what the server sends
 ------------------------------------------------------------------------
 local recording = false
@@ -702,7 +848,7 @@ gui.DisplayOrder = 1000
 gui.Parent = parent
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(260, 206)
+frame.Size = UDim2.fromOffset(260, 240)
 frame.Position = UDim2.new(1, -280, 0, 80)
 frame.BackgroundColor3 = Color3.fromRGB(19, 19, 20)
 frame.Active = true
@@ -725,7 +871,7 @@ title.Parent = frame
 
 local statusLabel = Instance.new("TextLabel")
 statusLabel.BackgroundTransparency = 1
-statusLabel.Position = UDim2.fromOffset(14, 170)
+statusLabel.Position = UDim2.fromOffset(14, 204)
 statusLabel.Size = UDim2.new(1, -28, 0, 28)
 statusLabel.Font = Enum.Font.Gotham
 statusLabel.TextSize = 11
@@ -790,6 +936,13 @@ watchBtn = button("Watch Other Hub", 108, function()
     end
 end)
 button("Save Summary Only", 144, function() dumpSummary() status("summary.txt saved") end).Size = UDim2.new(1, -28, 0, 22)
+button("Demonic Machine (recipes)", 172, function()
+    if busy then return end
+    busy = true
+    local ok, e = pcall(dumpDemonic)
+    if not ok then save("demonic/error.txt", tostring(e)) status("demonic: error - demonic/error.txt") end
+    busy = false
+end).Size = UDim2.new(1, -28, 0, 26)
 
 local function unload()
     if recording then pcall(stopRecord) end
