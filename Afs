@@ -5790,7 +5790,7 @@ function DM.FreeSlots(raw)
     return math.max(0, max - n)
 end
 -- where a new Demonic passive <key> goes: a Send Passive To fighter with a free slot (moved there,
--- TransferAllPassives), else one with a passive picked in "Passives It May Replace" (swapped,
+-- TransferAllPassives), else one with a passive picked in "Passives It May Swap Out" (swapped,
 -- TransferPassive: the old passive comes back to the middle, then goes onto a Take Divines From
 -- fighter). A fighter never gets the same Demonic passive twice; Demonic passives are never replaced.
 function DM.Destination(P, key, midSet, srcSet)
@@ -5849,14 +5849,14 @@ function DM.Plan()
                 if d then
                     return { kind = d.kind, from = u, fromSlot = p1.slot, to = d.to, toSlot = d.slot, what = p1.key, old = d.old }
                 end
-                stuck = stuck or ("no fighter in Send Passive To with a free slot or a passive it may replace (for "
+                stuck = stuck or ("no fighter in Send Passive To with a free slot or a passive it may swap out (for "
                     .. DM.PassiveName(p1.key) .. ")")
             elseif DM.Swapped[u] == p1.key or repl[p1.key] then
                 local f = DM.Fodder(P, midSet)
                 if f then return { kind = "move", from = u, to = f, what = p1.key } end
                 stuck = stuck or ("no room on the Take Divines From fighters for " .. DM.PassiveName(p1.key))
             else
-                stuck = stuck or ("the middle fighter has " .. DM.PassiveName(p1.key) .. " (not Demonic, not in Passives It May Replace)")
+                stuck = stuck or ("the middle fighter has " .. DM.PassiveName(p1.key) .. " (not Demonic, not in Passives It May Swap Out)")
             end
         end
     end
@@ -5892,7 +5892,7 @@ function DM.Plan()
     end
     if not any then return nil, "pick the recipes to craft" end
     if stuck then return nil, stuck end
-    if noDest then return nil, "no fighter in Send Passive To with a free slot or a passive it may replace - nothing crafted" end
+    if noDest then return nil, "no fighter in Send Passive To with a free slot or a passive it may swap out - nothing crafted" end
     return nil, "no Divine pair for the picked recipes on the fighters in Take Divines From"
 end
 -- what the game answers (SendMessage) right after a craft / move
@@ -6042,7 +6042,7 @@ function DM.Status()
             end
         end
     end
-    L[#L + 1] = string.format("Send Passive To : %d with a free slot, %d with a passive it may replace", free, swap)
+    L[#L + 1] = string.format("Send Passive To : %d with a free slot, %d with a passive it may swap out", free, swap)
     L[#L + 1] = string.format("Take Divines From : %d fighters", #DM.Picked("DemonicSources"))
     -- how many of each picked recipe the Divine fighters can make
     local want = F("DemonicRecipes") or {}
@@ -9378,9 +9378,9 @@ do
         dc:Paragraph({ Body = "[-] Crafts the picked Demonic passives at the Demonic Passive Machine (Machine World):\n"
             .. "    one Divine passive from each of 2 fighters in Take Divines From -> the middle Demonic fighter.\n"
             .. "[-] Then puts it on a fighter in Send Passive To (Passive Transfer, uses tokens): into a free slot,\n"
-            .. "    else in place of a passive picked in Passives It May Replace - that passive comes back to the\n"
-            .. "    middle and goes onto a Take Divines From fighter. Nothing is crafted when it has nowhere to go.\n"
-            .. "[-] Only passives picked in Passives It May Replace are ever swapped off a Send Passive To fighter." })
+            .. "    else it swaps places with a passive picked in Passives It May Swap Out - that passive isn't lost:\n"
+            .. "    it comes to the middle, then goes onto a Take Divines From fighter. Nothing is crafted when it has nowhere to go.\n"
+            .. "[-] Only passives picked in Passives It May Swap Out are ever swapped off a Send Passive To fighter." })
         dc:Dropdown({ Title = "Recipes", Items = DM.Labels(), Multi = true, Default = {}, Flag = "DemonicRecipes" })
         local function save(flag) return function(v) if Features.SavePetPicks then Features.SavePetPicks(flag, v) end end end
         local mid = dc:Dropdown({ Title = "Middle Fighter (Demonic)", Items = DM.MiddleItems(Data.Pets()), Multi = true, CountOnly = true,
@@ -9405,7 +9405,7 @@ do
             for _, k in ipairs((Data.Passives())) do if not skip[k] and not DM.IsDemonicPassive(k) then out[#out + 1] = k end end
             return out
         end
-        local rp = dc:Dropdown({ Title = "Passives It May Replace", Items = replItems(), Multi = true, Default = {}, Flag = "DemonicReplace" })
+        local rp = dc:Dropdown({ Title = "Passives It May Swap Out", Items = replItems(), Multi = true, Default = {}, Flag = "DemonicReplace" })
         Refreshers[#Refreshers + 1] = function() pcall(function() rp:Refresh(replItems()) end) end
         dc:Button({ Title = "Refresh Pets", Callback = function() Features.RefreshPetLists() end })
         Features.DemonicLabel = dc:Paragraph({ Body = "Status : -" })
