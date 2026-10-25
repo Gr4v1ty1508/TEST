@@ -5692,6 +5692,7 @@ end
 --             A pair that isn't a recipe does nothing (both Divine passives stay).
 --   move out  TransferAllPassives(uidFrom, uidTo) -> "Transferred 1 passive!" /
 --             "The receiving fighter has no free passive slots."
+--   swap      TransferPassive(uidFrom, uidTo, slotFrom, slotTo): the two passives change places
 -- One round: craft into the middle, check it, move the Demonic passive to the next empty fighter
 -- in "Send Passive To", check it -> the middle is free for the next craft. Only fighters picked in
 -- "Take Divines From" ever lose a passive.
@@ -5779,8 +5780,50 @@ function DM.MiddleItems(list)
     end
     return out
 end
--- what to do now: { kind = "move", from, to } / { kind = "craft", left, mid, right, slotA, slotB, recipe }
--- or nil + why not
+-- free passive slots of a pet (the game's own StatCalc.MaxPassives - what the machine window uses)
+function DM.FreeSlots(raw)
+    local n = #DM.Passives(raw)
+    local sc = Data.Module("StatCalc")
+    local ok, max = pcall(function() return sc.MaxPassives(raw) end)
+    max = ok and tonumber(max) or nil
+    if not max then return n == 0 and 1 or 0 end
+    return math.max(0, max - n)
+end
+-- where a new Demonic passive <key> goes: a Send Passive To fighter with a free slot (moved there,
+-- TransferAllPassives), else one with a passive picked in "Passives It May Replace" (swapped,
+-- TransferPassive: the old passive comes back to the middle, then goes onto a Take Divines From
+-- fighter). A fighter never gets the same Demonic passive twice; Demonic passives are never replaced.
+function DM.Destination(P, key, midSet, srcSet)
+    local repl = F("DemonicReplace") or {}
+    local swapTo
+    for _, t in ipairs(DM.Picked("DemonicTargets")) do
+        local raw = P[t]
+        if raw and not midSet[t] and not srcSet[t] then
+            local pas, has = DM.Passives(raw), false
+            for _, p in ipairs(pas) do if p.key == key then has = true end end
+            if not has then
+                if DM.FreeSlots(raw) > 0 then return { to = t, kind = "move" } end
+                if not swapTo then
+                    for _, p in ipairs(pas) do
+                        if repl[p.key] and not DM.IsDemonicPassive(p.key) then
+                            swapTo = { to = t, kind = "swap", slot = p.slot, old = p.key }
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return swapTo
+end
+-- a Take Divines From fighter with room for a passive the swap brought back
+function DM.Fodder(P, midSet)
+    for _, u in ipairs(DM.Picked("DemonicSources")) do
+        if P[u] and not midSet[u] and DM.FreeSlots(P[u]) > 0 then return u end
+    end
+end
+DM.Swapped = {}
+-- what to do now: { kind = "craft" | "move" | "swap", ... } or nil + why not
 function DM.Plan()
     local P = DM.Pets()
     if not next(P) then return nil, "reading your pets..." end
@@ -5791,55 +5834,65 @@ function DM.Plan()
     if #mids == 0 then return nil, "pick the middle Demonic fighter" end
     local srcSet = {}
     for _, u in ipairs(DM.Picked("DemonicSources")) do if P[u] and not midSet[u] then srcSet[u] = true end end
-    -- 1. a middle that holds a Demonic passive: move it out first
-    local emptyMid, fullMid
+    local repl = F("DemonicReplace") or {}
+    -- 1. empty the middle: a Demonic passive goes to Send Passive To, a passive a swap brought
+    --    back goes onto a Take Divines From fighter
+    local emptyMid, stuck
     for _, u in ipairs(mids) do
         local pas = DM.Passives(P[u])
         if #pas == 0 then
             emptyMid = emptyMid or u
-        elseif not fullMid then
-            local allDemonic = true
-            for _, p in ipairs(pas) do if not DM.IsDemonicPassive(p.key) then allDemonic = false end end
-            if allDemonic then fullMid = { uid = u, what = pas[1].key } end
+        else
+            local p1 = pas[1]
+            if DM.IsDemonicPassive(p1.key) then
+                local d = DM.Destination(P, p1.key, midSet, srcSet)
+                if d then
+                    return { kind = d.kind, from = u, fromSlot = p1.slot, to = d.to, toSlot = d.slot, what = p1.key, old = d.old }
+                end
+                stuck = stuck or ("no fighter in Send Passive To with a free slot or a passive it may replace (for "
+                    .. DM.PassiveName(p1.key) .. ")")
+            elseif DM.Swapped[u] == p1.key or repl[p1.key] then
+                local f = DM.Fodder(P, midSet)
+                if f then return { kind = "move", from = u, to = f, what = p1.key } end
+                stuck = stuck or ("no room on the Take Divines From fighters for " .. DM.PassiveName(p1.key))
+            else
+                stuck = stuck or ("the middle fighter has " .. DM.PassiveName(p1.key) .. " (not Demonic, not in Passives It May Replace)")
+            end
         end
     end
-    -- (a fighter in Send Passive To that already has a passive is never used: nothing on it is
-    --  touched. None empty left -> nothing is crafted either, so no Demonic is left on the middle)
-    local freeTarget
-    for _, t in ipairs(DM.Picked("DemonicTargets")) do
-        if P[t] and not midSet[t] and not srcSet[t] and #DM.Passives(P[t]) == 0 then freeTarget = t break end
-    end
-    if fullMid then
-        if freeTarget then return { kind = "move", from = fullMid.uid, to = freeTarget, what = fullMid.what } end
-        if not emptyMid then return nil, "no empty fighter left in Send Passive To" end
-    end
-    if not emptyMid then return nil, "the middle fighter has a passive that isn't Demonic" end
-    if not freeTarget then return nil, "no empty fighter left in Send Passive To - nothing crafted" end
-    -- 2. craft: the first picked recipe with its two Divine passives on two different picked fighters
+    if not emptyMid then return nil, stuck or "no empty middle fighter" end
+    -- 2. craft: the first picked recipe whose result has somewhere to go, with its two Divine
+    --    passives on two different picked fighters
     local want = F("DemonicRecipes") or {}
-    local any = false
+    local any, noDest = false, false
     for _, r in ipairs(DM.Recipes) do
         if want[DM.Label(r)] then
             any = true
-            local hasA, hasB = {}, {}
-            for u in pairs(srcSet) do
-                for _, p in ipairs(DM.Passives(P[u])) do
-                    if p.key == r.a then hasA[#hasA + 1] = { uid = u, slot = p.slot } end
-                    if p.key == r.b then hasB[#hasB + 1] = { uid = u, slot = p.slot } end
+            if not DM.Destination(P, r.key, midSet, srcSet) then
+                noDest = true
+            else
+                local hasA, hasB = {}, {}
+                for u in pairs(srcSet) do
+                    for _, p in ipairs(DM.Passives(P[u])) do
+                        if p.key == r.a then hasA[#hasA + 1] = { uid = u, slot = p.slot } end
+                        if p.key == r.b then hasB[#hasB + 1] = { uid = u, slot = p.slot } end
+                    end
                 end
-            end
-            table.sort(hasA, function(x, y) return x.uid < y.uid end)
-            table.sort(hasB, function(x, y) return x.uid < y.uid end)
-            for _, x in ipairs(hasA) do
-                for _, y in ipairs(hasB) do
-                    if x.uid ~= y.uid and not (DM.badPair[r.key .. x.uid .. y.uid] and os.clock() < DM.badPair[r.key .. x.uid .. y.uid]) then
-                        return { kind = "craft", left = x.uid, mid = emptyMid, right = y.uid, slotA = x.slot, slotB = y.slot, recipe = r }
+                table.sort(hasA, function(x, y) return x.uid < y.uid end)
+                table.sort(hasB, function(x, y) return x.uid < y.uid end)
+                for _, x in ipairs(hasA) do
+                    for _, y in ipairs(hasB) do
+                        if x.uid ~= y.uid and not (DM.badPair[r.key .. x.uid .. y.uid] and os.clock() < DM.badPair[r.key .. x.uid .. y.uid]) then
+                            return { kind = "craft", left = x.uid, mid = emptyMid, right = y.uid, slotA = x.slot, slotB = y.slot, recipe = r }
+                        end
                     end
                 end
             end
         end
     end
     if not any then return nil, "pick the recipes to craft" end
+    if stuck then return nil, stuck end
+    if noDest then return nil, "no fighter in Send Passive To with a free slot or a passive it may replace - nothing crafted" end
     return nil, "no Divine pair for the picked recipes on the fighters in Take Divines From"
 end
 -- what the game answers (SendMessage) right after a craft / move
@@ -5871,6 +5924,7 @@ function DM.Craft(p)
         local now = DM.Passives(DM.Pets()[p.mid])
         if #now > before then
             DM.fails, DM.crafted = 0, DM.crafted + 1
+            DM.Swapped[p.mid] = nil
             Combat.Log("demonic", string.format("crafted %s on %s (%s from %s + %s from %s) - %d this session",
                 DM.PassiveName(now[#now].key), DM.PetName(P[p.mid]), DM.PassiveName(p.recipe.a), DM.PetName(P[p.left]),
                 DM.PassiveName(p.recipe.b), DM.PetName(P[p.right]), DM.crafted))
@@ -5881,21 +5935,40 @@ function DM.Craft(p)
     fail("crafting " .. p.recipe.name, DM.msg and ("the game says: " .. DM.msg) or "the middle fighter got nothing")
     return false
 end
-function DM.Move(p)
+local function hasKey(raw, key)
+    for _, p in ipairs(DM.Passives(raw)) do if p.key == key then return true end end
+    return false
+end
+-- move: TransferAllPassives(from, to) (recorded: "Transferred 1 passive!")
+-- swap: TransferPassive(from, to, fromSlot, toSlot) - the two passives change places (seen 25 Oct)
+function DM.Transfer(p)
     local P = DM.Pets()
     DM.msg, DM.msgUntil = nil, os.clock() + 5
-    Net.Raw("TransferAllPassives", { tonumber(p.from) or p.from, tonumber(p.to) or p.to, n = 2 })
+    local from, to = tonumber(p.from) or p.from, tonumber(p.to) or p.to
+    if p.kind == "swap" then
+        Net.Raw("TransferPassive", { from, to, p.fromSlot or 1, p.toSlot, n = 4 })
+    else
+        Net.Raw("TransferAllPassives", { from, to, n = 2 })
+    end
     local t0 = os.clock()
     while os.clock() - t0 < 4 do
         task.wait(0.3)
         local Q = DM.Pets()
-        if #DM.Passives(Q[p.from]) == 0 and #DM.Passives(Q[p.to]) > 0 then
+        if hasKey(Q[p.to], p.what) and not hasKey(Q[p.from], p.what) then
             DM.fails, DM.moved = 0, DM.moved + 1
-            Combat.Log("demonic", string.format("moved %s from %s to %s", DM.PassiveName(p.what), DM.PetName(P[p.from]), DM.PetName(P[p.to])))
+            if p.kind == "swap" then
+                DM.Swapped[p.from] = p.old
+                Combat.Log("demonic", string.format("put %s on %s in place of %s (it went to %s)", DM.PassiveName(p.what),
+                    DM.PetName(P[p.to]), DM.PassiveName(p.old), DM.PetName(P[p.from])))
+            else
+                if DM.Swapped[p.from] == p.what then DM.Swapped[p.from] = nil end
+                Combat.Log("demonic", string.format("moved %s from %s to %s", DM.PassiveName(p.what), DM.PetName(P[p.from]), DM.PetName(P[p.to])))
+            end
             return true
         end
     end
-    fail("moving " .. DM.PassiveName(p.what) .. " to " .. DM.PetName(P[p.to]), DM.msg and ("the game says: " .. DM.msg) or "nothing changed")
+    fail((p.kind == "swap" and "swapping " or "moving ") .. DM.PassiveName(p.what) .. " to " .. DM.PetName(P[p.to]),
+        DM.msg and ("the game says: " .. DM.msg) or "nothing changed")
     return false
 end
 -- Brain task: go to Machine World, stand at the machine, do one step
@@ -5909,7 +5982,8 @@ function DM.Run()
         DM.idleUntil = os.clock() + 20
         return false
     end
-    DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name) or ("moving " .. DM.PassiveName(plan.what) .. " out")
+    DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name)
+        or ((plan.kind == "swap" and "swapping " or "moving ") .. DM.PassiveName(plan.what) .. " out")
     if Util.World() ~= "MachineWorld" then
         DM.waitModel = nil
         if Util.Every("demonic-travel", 6) then Travel.To("MachineWorld") task.wait(1.5) end
@@ -5921,7 +5995,7 @@ function DM.Run()
         return m, m and (m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true))
     end
     local mdl, part = partOf(plan.kind == "craft" and "DemonicPassives" or "PassiveTransfer")
-    if not part and plan.kind == "move" then mdl, part = partOf("DemonicPassives") end   -- the two stand together
+    if not part and plan.kind ~= "craft" then mdl, part = partOf("DemonicPassives") end   -- the two stand together
     if not part then
         -- the machine isn't loaded yet: wait for it (never sent from far away)
         DM.waitModel = DM.waitModel or os.clock()
@@ -5938,7 +6012,7 @@ function DM.Run()
     task.wait(0.6)
     local prompt = mdl:FindFirstChildWhichIsA("ProximityPrompt", true)
     if prompt and fireproximityprompt then pcall(fireproximityprompt, prompt) task.wait(0.4) end
-    if plan.kind == "craft" then DM.Craft(plan) else DM.Move(plan) end
+    if plan.kind == "craft" then DM.Craft(plan) else DM.Transfer(plan) end
     closeWindows()
     return true
 end
@@ -5958,9 +6032,18 @@ function DM.Status()
                 .. "  -  " .. (#pas > 0 and table.concat(pas, ", ") or "empty")
         end
     end
-    local free = 0
-    for _, t in ipairs(DM.Picked("DemonicTargets")) do if P[t] and #DM.Passives(P[t]) == 0 then free = free + 1 end end
-    L[#L + 1] = string.format("Send Passive To : %d empty  /  Take Divines From : %d fighters", free, #DM.Picked("DemonicSources"))
+    local free, swap = 0, 0
+    local repl = F("DemonicReplace") or {}
+    for _, t in ipairs(DM.Picked("DemonicTargets")) do
+        if P[t] then
+            if DM.FreeSlots(P[t]) > 0 then free = free + 1
+            else
+                for _, p in ipairs(DM.Passives(P[t])) do if repl[p.key] and not DM.IsDemonicPassive(p.key) then swap = swap + 1 break end end
+            end
+        end
+    end
+    L[#L + 1] = string.format("Send Passive To : %d with a free slot, %d with a passive it may replace", free, swap)
+    L[#L + 1] = string.format("Take Divines From : %d fighters", #DM.Picked("DemonicSources"))
     -- how many of each picked recipe the Divine fighters can make
     local want = F("DemonicRecipes") or {}
     for _, r in ipairs(DM.Recipes) do
@@ -9294,9 +9377,10 @@ do
         local dc = Features.TAuto:Card("Demonic Passive Crafter", "Right")
         dc:Paragraph({ Body = "[-] Crafts the picked Demonic passives at the Demonic Passive Machine (Machine World):\n"
             .. "    one Divine passive from each of 2 fighters in Take Divines From -> the middle Demonic fighter.\n"
-            .. "[-] Each new Demonic passive is then moved to the next EMPTY fighter in Send Passive To\n"
-            .. "    (Passive Transfer, uses tokens), so the middle one is free for the next craft.\n"
-            .. "[-] Only fighters picked in Take Divines From lose a passive. Stops when nothing is left to craft." })
+            .. "[-] Then puts it on a fighter in Send Passive To (Passive Transfer, uses tokens): into a free slot,\n"
+            .. "    else in place of a passive picked in Passives It May Replace - that passive comes back to the\n"
+            .. "    middle and goes onto a Take Divines From fighter. Nothing is crafted when it has nowhere to go.\n"
+            .. "[-] Only passives picked in Passives It May Replace are ever swapped off a Send Passive To fighter." })
         dc:Dropdown({ Title = "Recipes", Items = DM.Labels(), Multi = true, Default = {}, Flag = "DemonicRecipes" })
         local function save(flag) return function(v) if Features.SavePetPicks then Features.SavePetPicks(flag, v) end end end
         local mid = dc:Dropdown({ Title = "Middle Fighter (Demonic)", Items = DM.MiddleItems(Data.Pets()), Multi = true, CountOnly = true,
@@ -9313,6 +9397,16 @@ do
             Features.PetDropFlags[e[1]] = e[2]
         end
         Features.PetDropFilter[mid] = DM.MiddleItems
+        -- passives a Send Passive To fighter may lose to a Demonic one (never Demonic / Divine ones)
+        local function replItems()
+            local skip = {}
+            for _, r in ipairs(DM.Recipes) do skip[r.key], skip[r.a], skip[r.b] = true, true, true end
+            local out = {}
+            for _, k in ipairs((Data.Passives())) do if not skip[k] and not DM.IsDemonicPassive(k) then out[#out + 1] = k end end
+            return out
+        end
+        local rp = dc:Dropdown({ Title = "Passives It May Replace", Items = replItems(), Multi = true, Default = {}, Flag = "DemonicReplace" })
+        Refreshers[#Refreshers + 1] = function() pcall(function() rp:Refresh(replItems()) end) end
         dc:Button({ Title = "Refresh Pets", Callback = function() Features.RefreshPetLists() end })
         Features.DemonicLabel = dc:Paragraph({ Body = "Status : -" })
         dc:Toggle({ Title = "Auto Craft Demonic", Flag = "AutoDemonic", Callback = function(v)
