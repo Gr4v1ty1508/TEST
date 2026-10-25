@@ -10339,9 +10339,19 @@ loop(120, function()
     local savedN = 0
     for _ in pairs(saved or {}) do savedN = savedN + 1 end
     local hum, root = Util.Humanoid(), Util.Root()
-    Combat.Log("alive", string.format("status: %s | main loop %.0f s ago | pets here %d/%d (save %s) | anchored %s, walk %s | world %s | %s",
+    -- (pets falling more after hours of farming: the log shows if it grows with memory / time)
+    local okM, mem = pcall(function() return tonumber(game:GetService("Stats"):GetTotalMemoryUsageMb()) end)
+    local okI, inst = pcall(function() return tonumber(game:GetService("Stats").InstanceCount) end)
+    okM, okI = okM and mem ~= nil, okI and inst ~= nil
+    local FS = Features.FallStats
+    Combat.Log("alive", string.format("status: %s | main loop %.0f s ago | pets here %d/%d (save %s) | anchored %s, walk %s | world %s | %s"
+        .. " | mem %s MB, %s instances, up %.1f h | pets caught falling %d (last 2 min %d), team reloads %d",
         tostring(Features.BrainOwner), os.clock() - (Features.BrainTickAt or 0), here, #pets, saved and tostring(savedN) or "?",
-        tostring(root and root.Anchored), tostring(hum and hum.WalkSpeed), Util.World(), os.date("%H:%M")))
+        tostring(root and root.Anchored), tostring(hum and hum.WalkSpeed), Util.World(), os.date("%H:%M"),
+        okM and string.format("%.0f", mem) or "?", okI and tostring(inst) or "?",
+        (os.clock() - (Features.StartedAt or os.clock())) / 3600,
+        FS and FS.total or 0, FS and FS.total - (FS.at2min or 0) or 0, Features.ReloadsTotal or 0))
+    if FS then FS.at2min = FS.total end
 end)
 loop(1, function()
     if Features.StatusUI and Features.StatusUI.hero then Features.UpdateStatus() end
@@ -10439,6 +10449,19 @@ end
 -- trial - "23 pets falling / left far behind" - while all 23 pets were fighting fine.)
 -- A pet that needed this 3 times in a minute is re-created (2 s loop below).
 Features.PetRescueAt, Features.PetLostHits = {}, {}
+-- what fell, for the log: is there a floor under them (map gone / not loaded), how far from you
+Features.FallStats = { total = 0, n = 0, noFloor = 0, far = 0, low = 0 }
+function Features.FloorUnder(pos)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local ex = {}
+    if LP.Character then ex[#ex + 1] = LP.Character end
+    local pf = workspace:FindFirstChild("Pets")
+    if pf then ex[#ex + 1] = pf end
+    params.FilterDescendantsInstances = ex
+    local hit = workspace:Raycast(pos + Vector3.new(0, 40, 0), Vector3.new(0, -1000, 0), params)
+    return hit ~= nil
+end
 loop(0.25, function()
     local root = Util.Root()
     if not root then return end
@@ -10457,6 +10480,13 @@ loop(0.25, function()
             if falling and now - (Features.PetRescueAt[m] or -99) > 2 then
                 Features.PetRescueAt[m] = now
                 rescued = rescued + 1
+                local FS = Features.FallStats
+                FS.total, FS.n = FS.total + 1, FS.n + 1
+                local flat = Vector3.new(p.X - pos.X, 0, p.Z - pos.Z).Magnitude
+                if flat > FS.far then FS.far = flat end
+                if pos.Y - p.Y > FS.low then FS.low = pos.Y - p.Y end
+                local okF, floor = pcall(Features.FloorUnder, p)
+                if okF and not floor then FS.noFloor = FS.noFloor + 1 end
                 local uid = Data.PetUID(m)
                 if uid then
                     local hits = Features.PetLostHits[uid] or {}
@@ -10477,7 +10507,14 @@ loop(0.25, function()
         end
     end
     if rescued > 0 and Util.Every("pet-rescue-log", 10) then
-        Combat.Log("pets", rescued .. " pets falling out of the map - put them back next to you")
+        local FS = Features.FallStats
+        local okM, mem = pcall(function() return tonumber(game:GetService("Stats"):GetTotalMemoryUsageMb()) end)
+        okM = okM and mem ~= nil
+        Combat.Log("pets", string.format("%d pets falling out of the map - put them back next to you"
+            .. " (%d caught since the last line: no floor under %d, up to %.0f studs from you, %.0f below you | %s | mem %s MB, up %.1f h, %d caught so far)",
+            rescued, FS.n, FS.noFloor, FS.far, FS.low, tostring(Features.BrainOwner), okM and string.format("%.0f", mem) or "?",
+            (os.clock() - (Features.StartedAt or os.clock())) / 3600, FS.total))
+        FS.n, FS.noFloor, FS.far, FS.low = 0, 0, 0, 0
     end
     for m in pairs(Features.PetRescueAt) do if not m.Parent then Features.PetRescueAt[m] = nil end end
 end)
@@ -10617,6 +10654,7 @@ loop(2, function()
         end
         Features.LostFixAt = now
         Features.LostFixes = (Features.LostFixes or 0) + 1
+        Features.ReloadsTotal = (Features.ReloadsTotal or 0) + 1
         Features.LostSince = nil
         table.clear(Features.PetLostHits)
         table.clear(Features.MissingSince)
