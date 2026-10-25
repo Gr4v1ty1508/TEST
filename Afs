@@ -5683,6 +5683,304 @@ function Features.CloneStatus()
 end
 end
 
+-- DEMONIC PASSIVE CRAFTER -------------------------------------------------------------------
+-- The Demonic Passive Machine (Machine World, model DemonicPassives): 2 Divine passives (one on a
+-- fighter left, one on a fighter right) -> 1 Demonic passive on the MIDDLE fighter (a Demonic =
+-- "Evolved" fighter with a free passive slot). Learned 25 Oct (decompiled window + recordings):
+--   craft     AttemptDemonicPassive({ uidLeft, uidMiddle, uidRight }, { slotOnLeft, slotOnRight })
+--             no answer from the server; done at once: the middle has the passive right after.
+--             A pair that isn't a recipe does nothing (both Divine passives stay).
+--   move out  TransferAllPassives(uidFrom, uidTo) -> "Transferred 1 passive!" /
+--             "The receiving fighter has no free passive slots."
+-- One round: craft into the middle, check it, move the Demonic passive to the next empty fighter
+-- in "Send Passive To", check it -> the middle is free for the next craft. Only fighters picked in
+-- "Take Divines From" ever lose a passive.
+do
+local DM = { failUntil = 0, fails = 0, idleUntil = 0, crafted = 0, moved = 0, badPair = {}, why = "off" }
+Features.Demonic = DM
+-- (recipes: community list, checked against the game's own "Fusion of ..." texts and a real craft)
+DM.Recipes = {
+    { key = "FallenAngel",      name = "Fallen Angel",      a = "Angel",           b = "Demon" },
+    { key = "Omnipresent",      name = "Omnipresent",       a = "Angel",           b = "Interstellar" },
+    { key = "AbyssalWealth",    name = "Abyssal Wealth",    a = "Demon",           b = "BrokenLimiter" },
+    { key = "AquaticDominion",  name = "Aquatic Dominion",  a = "CoralCommander",  b = "BrokenLimiter" },
+    { key = "TimelessPyre",     name = "Timeless Pyre",     a = "ShiningSun",      b = "Interstellar" },
+    { key = "InfernalContract", name = "Infernal Contract", a = "CelestialOath",   b = "DivineHarmony" },
+    { key = "AbyssalFury",      name = "Abyssal Fury",      a = "HeavensRadiance", b = "DivineHarmony" },
+    { key = "DemonOverdrive",   name = "Demon Overdrive",   a = "CelestialOath",   b = "EternalAscension" },
+    { key = "EasterOverlord",   name = "Easter Overlord",   a = "BlossomDeity",    b = "TheGrandHatchmaster" },
+    { key = "RagingWraith",     name = "Raging Wraith",     a = "JacksHatred",     b = "HollowedMight" },
+    { key = "WitchOfLuck",      name = "Witch of Luck",     a = "FrozenInTime",    b = "HauntedScarecrow" },
+    { key = "UndyingGreed",     name = "Undying Greed",     a = "SpookyShade",     b = "HollowedMight" },
+    { key = "SinisterShade",    name = "Sinister Shade",    a = "SpookyShade",     b = "JacksHatred" },
+}
+function DM.PassiveName(key)
+    local ps = Data.Module("PassiveStats")
+    local s = type(ps) == "table" and ps[key]
+    return (type(s) == "table" and type(s.DisplayName) == "string" and s.DisplayName ~= "") and s.DisplayName or tostring(key)
+end
+function DM.Label(r) return r.name .. "  (" .. DM.PassiveName(r.a) .. " + " .. DM.PassiveName(r.b) .. ")" end
+function DM.Labels()
+    local out = {}
+    for _, r in ipairs(DM.Recipes) do out[#out + 1] = DM.Label(r) end
+    return out
+end
+-- uid -> the pet's record in the save, read fresh
+function DM.Pets()
+    local out = {}
+    local st = Data.StoreData()
+    for _, t in pairs(st and type(st.Pets) == "table" and st.Pets or {}) do
+        if type(t) == "table" and t.UID ~= nil then out[tostring(t.UID)] = t end
+    end
+    return out
+end
+-- the passives of a pet in slot order: { { slot = 1, key = "FrozenInTime" }, ... }
+function DM.Passives(raw)
+    local out = {}
+    local p = type(raw) == "table" and raw.Passives
+    if type(p) ~= "table" then return out end
+    for slot, key in pairs(p) do
+        local n = tonumber(slot)
+        if n and type(key) == "string" and key ~= "" then out[#out + 1] = { slot = n, key = key } end
+    end
+    table.sort(out, function(a, b) return a.slot < b.slot end)
+    return out
+end
+-- a Demonic fighter = PetStats Rarity "Evolved" (the machine says "not Heavenly and not Demonic")
+function DM.IsDemonicFighter(raw)
+    local ps = Data.Module("PetStats")
+    local s = type(raw) == "table" and type(ps) == "table" and ps[raw.PetId]
+    return type(s) == "table" and s.Rarity == "Evolved"
+end
+function DM.IsDemonicPassive(key)
+    for _, r in ipairs(DM.Recipes) do if r.key == key then return true end end
+    local ps = Data.Module("PassiveStats")
+    local s = type(ps) == "table" and ps[key]
+    return type(s) == "table" and (s.Rarity == "Demonic" or s.Demonic == true)
+end
+function DM.PetName(raw)
+    if type(raw) ~= "table" then return "?" end
+    local nick = (type(raw.CustomName) == "string" and raw.CustomName ~= "") and (" \"" .. raw.CustomName .. "\"") or ""
+    return Data.PetDisplay(raw.PetId) .. nick
+end
+-- uids picked in a pet dropdown (labels "Name | [uid]"), in label order
+function DM.Picked(flag)
+    local out = {}
+    for _, label in ipairs(Util.SetToList(F(flag))) do out[#out + 1] = Data.PetId(label) end
+    return out
+end
+-- the pet list for the middle dropdown: only Demonic fighters
+function DM.MiddleItems(list)
+    local P = DM.Pets()
+    if not next(P) then return list end
+    local out = {}
+    for _, label in ipairs(list or {}) do
+        if DM.IsDemonicFighter(P[Data.PetId(label)]) then out[#out + 1] = label end
+    end
+    return out
+end
+-- what to do now: { kind = "move", from, to } / { kind = "craft", left, mid, right, slotA, slotB, recipe }
+-- or nil + why not
+function DM.Plan()
+    local P = DM.Pets()
+    if not next(P) then return nil, "reading your pets..." end
+    local mids, midSet = {}, {}
+    for _, u in ipairs(DM.Picked("DemonicMiddle")) do
+        if P[u] and DM.IsDemonicFighter(P[u]) then mids[#mids + 1] = u midSet[u] = true end
+    end
+    if #mids == 0 then return nil, "pick the middle Demonic fighter" end
+    local srcSet = {}
+    for _, u in ipairs(DM.Picked("DemonicSources")) do if P[u] and not midSet[u] then srcSet[u] = true end end
+    -- 1. a middle that holds a Demonic passive: move it out first
+    local emptyMid, fullMid
+    for _, u in ipairs(mids) do
+        local pas = DM.Passives(P[u])
+        if #pas == 0 then
+            emptyMid = emptyMid or u
+        elseif not fullMid then
+            local allDemonic = true
+            for _, p in ipairs(pas) do if not DM.IsDemonicPassive(p.key) then allDemonic = false end end
+            if allDemonic then fullMid = { uid = u, what = pas[1].key } end
+        end
+    end
+    if fullMid then
+        for _, t in ipairs(DM.Picked("DemonicTargets")) do
+            if P[t] and not midSet[t] and not srcSet[t] and #DM.Passives(P[t]) == 0 then
+                return { kind = "move", from = fullMid.uid, to = t, what = fullMid.what }
+            end
+        end
+        if not emptyMid then return nil, "no empty fighter left in Send Passive To" end
+    end
+    if not emptyMid then return nil, "the middle fighter has a passive that isn't Demonic" end
+    -- 2. craft: the first picked recipe with its two Divine passives on two different picked fighters
+    local want = F("DemonicRecipes") or {}
+    local any = false
+    for _, r in ipairs(DM.Recipes) do
+        if want[DM.Label(r)] then
+            any = true
+            local hasA, hasB = {}, {}
+            for u in pairs(srcSet) do
+                for _, p in ipairs(DM.Passives(P[u])) do
+                    if p.key == r.a then hasA[#hasA + 1] = { uid = u, slot = p.slot } end
+                    if p.key == r.b then hasB[#hasB + 1] = { uid = u, slot = p.slot } end
+                end
+            end
+            table.sort(hasA, function(x, y) return x.uid < y.uid end)
+            table.sort(hasB, function(x, y) return x.uid < y.uid end)
+            for _, x in ipairs(hasA) do
+                for _, y in ipairs(hasB) do
+                    if x.uid ~= y.uid and not (DM.badPair[r.key .. x.uid .. y.uid] and os.clock() < DM.badPair[r.key .. x.uid .. y.uid]) then
+                        return { kind = "craft", left = x.uid, mid = emptyMid, right = y.uid, slotA = x.slot, slotB = y.slot, recipe = r }
+                    end
+                end
+            end
+        end
+    end
+    if not any then return nil, "pick the recipes to craft" end
+    return nil, "no Divine pair for the picked recipes on the fighters in Take Divines From"
+end
+-- what the game answers (SendMessage) right after a craft / move
+Net.Listen("SendMessage", function(msg, ok)
+    if DM.msgUntil and os.clock() < DM.msgUntil and type(msg) == "string" then DM.msg, DM.msgOk = msg, ok end
+end)
+local function closeWindows()
+    for _, n in ipairs({ "DemonicPassive", "PassiveTransfer" }) do
+        pcall(function()
+            local f = Data.MainGui():FindFirstChild(n)
+            if f and f.Visible then Features.OpenMenu(n, false) end
+        end)
+    end
+end
+local function fail(what, why)
+    DM.fails = DM.fails + 1
+    DM.failUntil = os.clock() + (DM.fails >= 3 and 600 or 20)
+    Combat.Log("demonic", string.format("%s didn't work (%s)%s", what, why, DM.fails >= 3 and " - 3 times in a row, trying again in 10 min" or ""))
+end
+function DM.Craft(p)
+    local P = DM.Pets()
+    local before = #DM.Passives(P[p.mid])
+    DM.msg, DM.msgUntil = nil, os.clock() + 5
+    Net.Raw("AttemptDemonicPassive", { { tonumber(p.left) or p.left, tonumber(p.mid) or p.mid, tonumber(p.right) or p.right },
+        { p.slotA, p.slotB }, n = 2 })
+    local t0 = os.clock()
+    while os.clock() - t0 < 4 do
+        task.wait(0.3)
+        local now = DM.Passives(DM.Pets()[p.mid])
+        if #now > before then
+            DM.fails, DM.crafted = 0, DM.crafted + 1
+            Combat.Log("demonic", string.format("crafted %s on %s (%s from %s + %s from %s) - %d this session",
+                DM.PassiveName(now[#now].key), DM.PetName(P[p.mid]), DM.PassiveName(p.recipe.a), DM.PetName(P[p.left]),
+                DM.PassiveName(p.recipe.b), DM.PetName(P[p.right]), DM.crafted))
+            return true
+        end
+    end
+    DM.badPair[p.recipe.key .. p.left .. p.right] = os.clock() + 600
+    fail("crafting " .. p.recipe.name, DM.msg and ("the game says: " .. DM.msg) or "the middle fighter got nothing")
+    return false
+end
+function DM.Move(p)
+    local P = DM.Pets()
+    DM.msg, DM.msgUntil = nil, os.clock() + 5
+    Net.Raw("TransferAllPassives", { tonumber(p.from) or p.from, tonumber(p.to) or p.to, n = 2 })
+    local t0 = os.clock()
+    while os.clock() - t0 < 4 do
+        task.wait(0.3)
+        local Q = DM.Pets()
+        if #DM.Passives(Q[p.from]) == 0 and #DM.Passives(Q[p.to]) > 0 then
+            DM.fails, DM.moved = 0, DM.moved + 1
+            Combat.Log("demonic", string.format("moved %s from %s to %s", DM.PassiveName(p.what), DM.PetName(P[p.from]), DM.PetName(P[p.to])))
+            return true
+        end
+    end
+    fail("moving " .. DM.PassiveName(p.what) .. " to " .. DM.PetName(P[p.to]), DM.msg and ("the game says: " .. DM.msg) or "nothing changed")
+    return false
+end
+-- Brain task: go to Machine World, stand at the machine, do one step
+function DM.Run()
+    if not On("AutoDemonic") then DM.why = "off" return false end
+    if os.clock() < DM.failUntil or os.clock() < DM.idleUntil then return false end
+    if Features.InActiveRun and Features.InActiveRun() then return false end
+    local plan, why = DM.Plan()
+    if not plan then
+        DM.why = why
+        DM.idleUntil = os.clock() + 20
+        return false
+    end
+    DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name) or ("moving " .. DM.PassiveName(plan.what) .. " out")
+    if Util.World() ~= "MachineWorld" then
+        DM.waitModel = nil
+        if Util.Every("demonic-travel", 6) then Travel.To("MachineWorld") task.wait(1.5) end
+        return true
+    end
+    local w = Worlds:FindFirstChild("MachineWorld")
+    local function partOf(name)
+        local m = w and w:FindFirstChild(name)
+        return m, m and (m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true))
+    end
+    local mdl, part = partOf(plan.kind == "craft" and "DemonicPassives" or "PassiveTransfer")
+    if not part and plan.kind == "move" then mdl, part = partOf("DemonicPassives") end   -- the two stand together
+    if not part then
+        -- the machine isn't loaded yet: wait for it (never sent from far away)
+        DM.waitModel = DM.waitModel or os.clock()
+        if os.clock() - DM.waitModel > 20 then
+            DM.waitModel = nil
+            fail(DM.why, "the machine didn't load in Machine World")
+        end
+        task.wait(0.5)
+        return true
+    end
+    DM.waitModel = nil
+    local okS, spot = pcall(Features.CloneSpot, mdl, part)
+    Util.MoveTo((okS and spot) or part.CFrame * CFrame.new(0, 3, -6))
+    task.wait(0.6)
+    local prompt = mdl:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and fireproximityprompt then pcall(fireproximityprompt, prompt) task.wait(0.4) end
+    if plan.kind == "craft" then DM.Craft(plan) else DM.Move(plan) end
+    closeWindows()
+    return true
+end
+function DM.Status()
+    local P = DM.Pets()
+    local L = {}
+    local mids = DM.Picked("DemonicMiddle")
+    if #mids == 0 then
+        L[#L + 1] = "Middle : (pick a Demonic fighter)"
+    else
+        for _, u in ipairs(mids) do
+            local raw = P[u]
+            local pas = {}
+            for _, p in ipairs(DM.Passives(raw)) do pas[#pas + 1] = DM.PassiveName(p.key) end
+            L[#L + 1] = "Middle : " .. (raw and DM.PetName(raw) or "(not found)")
+                .. (raw and not DM.IsDemonicFighter(raw) and "  <font color='#f87171'>not a Demonic fighter</font>" or "")
+                .. "  -  " .. (#pas > 0 and table.concat(pas, ", ") or "empty")
+        end
+    end
+    local free = 0
+    for _, t in ipairs(DM.Picked("DemonicTargets")) do if P[t] and #DM.Passives(P[t]) == 0 then free = free + 1 end end
+    L[#L + 1] = string.format("Send Passive To : %d empty  /  Take Divines From : %d fighters", free, #DM.Picked("DemonicSources"))
+    -- how many of each picked recipe the Divine fighters can make
+    local want = F("DemonicRecipes") or {}
+    for _, r in ipairs(DM.Recipes) do
+        if want[DM.Label(r)] then
+            local a, b = 0, 0
+            for _, u in ipairs(DM.Picked("DemonicSources")) do
+                for _, p in ipairs(DM.Passives(P[u])) do
+                    if p.key == r.a then a = a + 1 end
+                    if p.key == r.b then b = b + 1 end
+                end
+            end
+            L[#L + 1] = string.format("[-] %s : %d x %s, %d x %s", r.name, a, DM.PassiveName(r.a), b, DM.PassiveName(r.b))
+        end
+    end
+    L[#L + 1] = string.format("This session : %d crafted, %d moved", DM.crafted, DM.moved)
+    if On("AutoDemonic") then
+        L[#L + 1] = "Now : " .. tostring(DM.why)
+            .. (os.clock() < DM.failUntil and string.format("  (waiting %ds after a failure)", math.ceil(DM.failUntil - os.clock())) or "")
+    end
+    return table.concat(L, "\n")
+end
+end
+
 -- PASSIVE MACHINE (like Yuto): rerolls are done standing at the machine.
 -- Each machine is Worlds.<World>.Passive (prompt "Reroll"). Event categories have their own
 -- world (Frieren2026, Easter2026, BC2026, Christmas2); Normal / Requiem use the main machine.
@@ -8060,13 +8358,16 @@ Features.Tasks = {
     { id = "Clone", name = "Auto Clone", run = function()
         if On("AutoClone") and Features.CloneWanted() and not Features.InActiveRun() then return Features.CloneGo() end
     end },
+    { id = "Demonic", name = "Demonic Craft", run = function()
+        return Features.Demonic and Features.Demonic.Run() or false
+    end },
     { id = "TimeChamber", name = "Time Chamber", run = function()
         if On("AutoTimeChamber") then Features.TimeChamber() return true end
     end },
 }
 -- default order (Settings > Priority changes it)
 Features.DefaultPrio = { Lunar = 1, Trial = 2, BattlePass = 3, Dungeon = 4, Hatch = 5, Passive = 6, Mega = 7, Infinity = 8,
-    Gate = 9, Raid = 10, Defense = 11, Event = 12, GlobalBoss = 13, Meteor = 14, Clone = 15, Farm = 16, TimeChamber = 17 }
+    Gate = 9, Raid = 10, Defense = 11, Event = 12, GlobalBoss = 13, Meteor = 14, Clone = 15, Demonic = 16, Farm = 17, TimeChamber = 18 }
 -- the tasks sorted by their Priority number (ties keep the default order)
 function Features.TaskOrder()
     local list = {}
@@ -8267,6 +8568,7 @@ do
     ST.mega = au:Stat({ Title = "Mega Craft" })
     ST.boost = au:Stat({ Title = "Auto Boosts" })
     ST.clone = au:Stat({ Title = "Auto Clone" })
+    ST.demonic = au:Stat({ Title = "Demonic Craft" })
 end
 -- one read of everything the Status tab and the webhook show
 -- (each row: c = colour name, or nil when the mode is off)
@@ -8424,6 +8726,14 @@ function Features.StatusRows()
         end
         return busy > 0 and "green" or "yellow", string.format("%d / %d cloning%s", busy, #(Features.CloneMachines or {}),
             nextDone and (" · next " .. (nextDone > 0 and hms(nextDone) or "done")) or "")
+    end)
+
+    row(R.auto, "demonic", "Demonic Craft", function()
+        if not On("AutoDemonic") then return nil end
+        local DM = Features.Demonic
+        if not DM then return "gray", "-" end
+        local c = owner == "Demonic" and "green" or (os.clock() < DM.failUntil and "red" or "gray")
+        return c, string.format("%s · %d crafted", tostring(DM.why), DM.crafted)
     end)
 
     pcall(function()
@@ -8976,6 +9286,36 @@ do
         Features.CloneLabel = cl:Paragraph({ Body = "Status : -" })
         cl:Toggle({ Title = "Auto Clone", Flag = "AutoClone" })
     end
+    ;(function()
+        local DM = Features.Demonic
+        local dc = Features.TAuto:Card("Demonic Passive Crafter", "Right")
+        dc:Paragraph({ Body = "[-] Crafts the picked Demonic passives at the Demonic Passive Machine (Machine World):\n"
+            .. "    one Divine passive from each of 2 fighters in Take Divines From -> the middle Demonic fighter.\n"
+            .. "[-] Each new Demonic passive is then moved to the next EMPTY fighter in Send Passive To\n"
+            .. "    (Passive Transfer, uses tokens), so the middle one is free for the next craft.\n"
+            .. "[-] Only fighters picked in Take Divines From lose a passive. Stops when nothing is left to craft." })
+        dc:Dropdown({ Title = "Recipes", Items = DM.Labels(), Multi = true, Default = {}, Flag = "DemonicRecipes" })
+        local function save(flag) return function(v) if Features.SavePetPicks then Features.SavePetPicks(flag, v) end end end
+        local mid = dc:Dropdown({ Title = "Middle Fighter (Demonic)", Items = DM.MiddleItems(Data.Pets()), Multi = true, CountOnly = true,
+            Default = {}, Flag = "DemonicMiddle", Callback = save("DemonicMiddle") })
+        local src = dc:Dropdown({ Title = "Take Divines From", Items = Data.Pets(), Multi = true, CountOnly = true,
+            Default = {}, Flag = "DemonicSources", Callback = save("DemonicSources") })
+        local dst = dc:Dropdown({ Title = "Send Passive To", Items = Data.Pets(), Multi = true, CountOnly = true,
+            Default = {}, Flag = "DemonicTargets", Callback = save("DemonicTargets") })
+        Features.PetDrops = Features.PetDrops or {}
+        Features.PetDropFlags = Features.PetDropFlags or {}
+        Features.PetDropFilter = Features.PetDropFilter or {}
+        for _, e in ipairs({ { mid, "DemonicMiddle" }, { src, "DemonicSources" }, { dst, "DemonicTargets" } }) do
+            table.insert(Features.PetDrops, e[1])
+            Features.PetDropFlags[e[1]] = e[2]
+        end
+        Features.PetDropFilter[mid] = DM.MiddleItems
+        dc:Button({ Title = "Refresh Pets", Callback = function() Features.RefreshPetLists() end })
+        Features.DemonicLabel = dc:Paragraph({ Body = "Status : -" })
+        dc:Toggle({ Title = "Auto Craft Demonic", Flag = "AutoDemonic", Callback = function(v)
+            if v then DM.failUntil, DM.idleUntil, DM.fails = 0, 0, 0 table.clear(DM.badPair) end
+        end })
+    end)()
     local c = TShop:Card("Auto Claim", "Right")
     c:Toggle({ Title = "Auto Daily Spin", Flag = "AutoSpin" })
     c:Toggle({ Title = "Auto Claim Ticket", Flag = "AutoTicket" })
@@ -9058,7 +9398,10 @@ do
     -- CONFIG/<name>_pets.json, and after a join they're found again by that fingerprint.
     -- Identical fingerprints (same fodder pet twice) are handed out one per pick.
     Features.PicksReady = false
-    local KEEP_PICKS = { EQPets = true }
+    local KEEP_PICKS = { EQPets = true, DemonicMiddle = true, DemonicSources = true, DemonicTargets = true }
+    Features.KeepPickFlags = KEEP_PICKS
+    Features.PickNames = { EQPets = "Lunar pets", DemonicMiddle = "Demonic: middle fighter",
+        DemonicSources = "Demonic: Take Divines From", DemonicTargets = "Demonic: Send Passive To" }
     -- the fingerprints live in the normal config as a hidden flag "<flag>Sigs" (saved / loaded
     -- with everything else, no extra file)
     local pickSigs = {}
@@ -9106,7 +9449,7 @@ do
         end
         -- the labels in the config hold LAST game's UIDs (= other pets now): never keep those
         d:Set(new, true)
-        if want > 0 then Util.Notify(string.format("Lunar pets: %d/%d picked again", n, want)) end
+        if want > 0 then Util.Notify(string.format("%s: %d/%d picked again", Features.PickNames[flag] or flag, n, want)) end
         return want > 0
     end
     function Features.RefreshPetLists(silent)
@@ -9114,12 +9457,19 @@ do
         local list = Data.Pets()
         local loaded = next(savedPets()) ~= nil
         for _, d in ipairs(Features.PetDrops) do
-            pcall(d.Refresh, d, list)
+            -- (a dropdown can show only part of the list: the Demonic middle one only Demonic fighters)
+            local l = list
+            local filt = Features.PetDropFilter and Features.PetDropFilter[d]
+            if filt then
+                local okF, fl = pcall(filt, list)
+                if okF and type(fl) == "table" then l = fl end
+            end
+            pcall(d.Refresh, d, l)
             local flag = Features.PetDropFlags and Features.PetDropFlags[d]
             if not Features.PicksReady and loaded and Features.ConfigLoaded and flag and KEEP_PICKS[flag] then
-                pcall(restorePicks, d, flag, list)
+                pcall(restorePicks, d, flag, l)
             else
-                pcall(Features.RemapPetPicks, d, list)
+                pcall(Features.RemapPetPicks, d, l)
             end
         end
         -- only after the config is loaded: before that the fingerprints aren't there yet, and
@@ -9812,11 +10162,14 @@ loop(30, function()
     if not (Features.PicksReady and Features.ConfigLoaded and Features.SavePetPicks) then return end
     local st = Data.StoreData()
     if not (st and type(st.Pets) == "table" and next(st.Pets)) then return end   -- save not readable: keep the old ones
-    local picks = F("EQPets")
-    if type(picks) == "table" and next(picks) then pcall(Features.SavePetPicks, "EQPets", picks) end
+    for flag in pairs(Features.KeepPickFlags or { EQPets = true }) do
+        local picks = F(flag)
+        if type(picks) == "table" and next(picks) then pcall(Features.SavePetPicks, flag, picks) end
+    end
 end)
 loop(5, function()
     if Features.CloneLabel then pcall(function() Features.CloneLabel:Set(Features.CloneStatus()) end) end
+    if Features.DemonicLabel and Features.Demonic then pcall(function() Features.DemonicLabel:Set(Features.Demonic.Status()) end) end
 end)
 loop(3, function()
     if Features.UseBoostLabel then pcall(function() Features.UseBoostLabel:Set(Features.UseBoostStatus()) end) end
