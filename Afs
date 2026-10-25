@@ -4550,8 +4550,8 @@ function Features.Passive()
                         Util.Notify(label .. ": can't read its passive - equip it to roll it")
                     end
                     break
-                elseif passiveWanted(now) then
-                    passiveDone[key] = true            -- already good: keep it, never roll it
+                elseif passiveWanted(now) or Features.SlotHasDemonic(id, slot) then
+                    passiveDone[key] = true            -- already good (or a Demonic passive): keep it, never roll it
                 else
                     passiveRolls[key] = (passiveRolls[key] or 0) + 1
                     Net.Call("RollPassive", id, machine, slot, F("PassiveMethod") == "Shard")
@@ -4883,7 +4883,14 @@ function Features.EventQuests()
     local slot = tonumber(F("EQSlot") or "1") or 1
     if not Features.PassiveReady(machine, "lunar") then return end
     for _, label in ipairs(pets) do
-        Net.Call("RollPassive", Data.PetId(label), machine, slot, best[2])
+        -- never roll away a Demonic passive (one the Demonic crafter parked there, or yours)
+        if Features.SlotHasDemonic(Data.PetId(label), slot) then
+            if Util.Every("eq-demonic-" .. label, 600) then
+                Combat.Log("eq", label .. ": slot " .. slot .. " holds a Demonic passive - not rerolled")
+            end
+        else
+            Net.Call("RollPassive", Data.PetId(label), machine, slot, best[2])
+        end
     end
     Features.EQLast = machine .. (best[2] and " shard" or " token") .. " reroll x" .. #pets
     task.wait(F("EQDelay") or 0.5)
@@ -5792,7 +5799,10 @@ end
 -- where a new Demonic passive <key> goes: a Send Passive To fighter with a free slot (moved there,
 -- TransferAllPassives), else one with a passive picked in "Passives It May Swap Out" (swapped,
 -- TransferPassive: the old passive comes back to the middle, then goes onto a Take Divines From
--- fighter). A fighter never gets the same Demonic passive twice; Demonic passives are never replaced.
+-- fighter). None (or Send Passive To left empty: you move it to your main fighters yourself) ->
+-- it's PARKED on a Take Divines From fighter with a free slot; fighters Auto Lunar / Auto Passive
+-- reroll come last (their rerolls skip a slot that holds a Demonic passive anyway).
+-- A fighter never gets the same Demonic passive twice; Demonic passives are never replaced.
 function DM.Destination(P, key, midSet, srcSet)
     local repl = F("DemonicReplace") or {}
     local swapTo
@@ -5814,7 +5824,36 @@ function DM.Destination(P, key, midSet, srcSet)
             end
         end
     end
-    return swapTo
+    if swapTo then return swapTo end
+    local rolled = DM.RolledPets()
+    local later
+    for _, u in ipairs(DM.Picked("DemonicSources")) do
+        local raw = P[u]
+        if raw and not midSet[u] and DM.FreeSlots(raw) > 0 and not DM.HasKey(raw, key) then
+            if not rolled[u] then return { to = u, kind = "move", park = true } end
+            later = later or { to = u, kind = "move", park = true }
+        end
+    end
+    return later
+end
+function DM.HasKey(raw, key)
+    for _, p in ipairs(DM.Passives(raw)) do if p.key == key then return true end end
+    return false
+end
+-- uids Auto Lunar / Auto Passive reroll
+function DM.RolledPets()
+    local out = {}
+    for _, flag in ipairs({ "EQPets", "PassivePets" }) do
+        for label, on in pairs(F(flag) or {}) do if on then out[Data.PetId(label)] = true end end
+    end
+    return out
+end
+-- a reroll must never hit a Demonic passive (a parked one, or yours): true = leave that slot alone
+function Features.SlotHasDemonic(petId, slot)
+    local DM = Features.Demonic
+    local raw = DM and DM.Pets()[tostring(petId)]
+    local key = raw and type(raw.Passives) == "table" and raw.Passives[tonumber(slot) or slot]
+    return type(key) == "string" and DM.IsDemonicPassive(key) or false
 end
 -- a Take Divines From fighter with room for a passive the swap brought back
 function DM.Fodder(P, midSet)
@@ -5847,7 +5886,7 @@ function DM.Plan()
             if DM.IsDemonicPassive(p1.key) then
                 local d = DM.Destination(P, p1.key, midSet, srcSet)
                 if d then
-                    return { kind = d.kind, from = u, fromSlot = p1.slot, to = d.to, toSlot = d.slot, what = p1.key, old = d.old }
+                    return { kind = d.kind, from = u, fromSlot = p1.slot, to = d.to, toSlot = d.slot, what = p1.key, old = d.old, park = d.park }
                 end
                 stuck = stuck or ("no fighter in Send Passive To with a free slot or a passive it may swap out (for "
                     .. DM.PassiveName(p1.key) .. ")")
@@ -5868,7 +5907,9 @@ function DM.Plan()
     for _, r in ipairs(DM.Recipes) do
         if want[DM.Label(r)] then
             any = true
-            if not DM.Destination(P, r.key, midSet, srcSet) then
+            -- (no room anywhere now is fine: the two fighters of the pair each lose a Divine passive,
+            --  so it can be parked on one of them right after)
+            if not DM.Destination(P, r.key, midSet, srcSet) and not next(srcSet) then
                 noDest = true
             else
                 local hasA, hasB = {}, {}
@@ -5962,7 +6003,8 @@ function DM.Transfer(p)
                     DM.PetName(P[p.to]), DM.PassiveName(p.old), DM.PetName(P[p.from])))
             else
                 if DM.Swapped[p.from] == p.what then DM.Swapped[p.from] = nil end
-                Combat.Log("demonic", string.format("moved %s from %s to %s", DM.PassiveName(p.what), DM.PetName(P[p.from]), DM.PetName(P[p.to])))
+                Combat.Log("demonic", string.format("%s %s from %s to %s", p.park and "parked" or "moved", DM.PassiveName(p.what),
+                    DM.PetName(P[p.from]), DM.PetName(P[p.to])))
             end
             return true
         end
@@ -6044,6 +6086,11 @@ function DM.Status()
     end
     L[#L + 1] = string.format("Send Passive To : %d with a free slot, %d with a passive it may swap out", free, swap)
     L[#L + 1] = string.format("Take Divines From : %d fighters", #DM.Picked("DemonicSources"))
+    for _, u in ipairs(DM.Picked("DemonicSources")) do
+        local names = {}
+        for _, p in ipairs(DM.Passives(P[u])) do if DM.IsDemonicPassive(p.key) then names[#names + 1] = DM.PassiveName(p.key) end end
+        if #names > 0 then L[#L + 1] = "    parked on " .. DM.PetName(P[u]) .. " : " .. table.concat(names, ", ") end
+    end
     -- how many of each picked recipe the Divine fighters can make
     local want = F("DemonicRecipes") or {}
     for _, r in ipairs(DM.Recipes) do
@@ -8107,7 +8154,9 @@ BP.Run = {
             return true
         end
         local slot = tonumber(F("EQSlot") or "1") or 1
-        for _, label in ipairs(pets) do Net.Call("RollPassive", Data.PetId(label), "Normal", slot, false) end
+        for _, label in ipairs(pets) do
+            if not Features.SlotHasDemonic(Data.PetId(label), slot) then Net.Call("RollPassive", Data.PetId(label), "Normal", slot, false) end
+        end
         task.wait(F("EQDelay") or 0.5)
         return true
     end,
@@ -9377,7 +9426,10 @@ do
         local dc = Features.TAuto:Card("Demonic Passive Crafter", "Right")
         dc:Paragraph({ Body = "[-] Crafts the picked Demonic passives at the Demonic Passive Machine (Machine World):\n"
             .. "    one Divine passive from each of 2 fighters in Take Divines From -> the middle Demonic fighter.\n"
-            .. "[-] Then puts it on a fighter in Send Passive To (Passive Transfer, uses tokens): into a free slot,\n"
+            .. "[-] Send Passive To empty (you move them to your main fighters yourself): each new Demonic passive is\n"
+            .. "    parked on a Take Divines From fighter with a free slot (Passive Transfer, uses tokens).\n"
+            .. "    Rerolls (Auto Lunar / Auto Passive / Battle Pass) never touch a slot that holds a Demonic passive.\n"
+            .. "[-] With Send Passive To picked it goes there instead: into a free slot,\n"
             .. "    else it swaps places with a passive picked in Passives It May Swap Out - that passive isn't lost:\n"
             .. "    it comes to the middle, then goes onto a Take Divines From fighter. Nothing is crafted when it has nowhere to go.\n"
             .. "[-] Only passives picked in Passives It May Swap Out are ever swapped off a Send Passive To fighter." })
