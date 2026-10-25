@@ -5803,15 +5803,18 @@ function DM.Plan()
             if allDemonic then fullMid = { uid = u, what = pas[1].key } end
         end
     end
+    -- (a fighter in Send Passive To that already has a passive is never used: nothing on it is
+    --  touched. None empty left -> nothing is crafted either, so no Demonic is left on the middle)
+    local freeTarget
+    for _, t in ipairs(DM.Picked("DemonicTargets")) do
+        if P[t] and not midSet[t] and not srcSet[t] and #DM.Passives(P[t]) == 0 then freeTarget = t break end
+    end
     if fullMid then
-        for _, t in ipairs(DM.Picked("DemonicTargets")) do
-            if P[t] and not midSet[t] and not srcSet[t] and #DM.Passives(P[t]) == 0 then
-                return { kind = "move", from = fullMid.uid, to = t, what = fullMid.what }
-            end
-        end
+        if freeTarget then return { kind = "move", from = fullMid.uid, to = freeTarget, what = fullMid.what } end
         if not emptyMid then return nil, "no empty fighter left in Send Passive To" end
     end
     if not emptyMid then return nil, "the middle fighter has a passive that isn't Demonic" end
+    if not freeTarget then return nil, "no empty fighter left in Send Passive To - nothing crafted" end
     -- 2. craft: the first picked recipe with its two Divine passives on two different picked fighters
     local want = F("DemonicRecipes") or {}
     local any = false
