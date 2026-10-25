@@ -5810,24 +5810,34 @@ function DM.RolledPets()
     return out
 end
 -- where a new Demonic passive <key> is kept until you move it to a main fighter yourself: a Take
--- Divines From (Reroll) fighter with a free slot that doesn't have it yet. The Demonic passives are
--- KEPT TOGETHER (so one fighter holds only Demonic ones and is easy to move from):
---   1. a fighter that already holds Demonic passives and nothing else (the fullest first)
---   2. an empty fighter (starts a new group)
---   3. a fighter that already has a Demonic one next to other passives
---   4. any fighter with a free slot
+-- Divines From (Reroll) fighter with a free slot. The SAME Demonic passives are kept together (a
+-- fighter can hold the same passive twice) so a fighter ends up with e.g. Witch of Luck x2:
+--   1. a fighter that holds only this Demonic passive (the fullest first)
+--   2. an empty fighter (starts a new pair)
+--   3. a fighter that has this one next to other passives
+--   4. a fighter with no Demonic passive (only other passives)
+--   5. a fighter with another Demonic passive mixed with other passives
+--   6. a fighter that holds only another Demonic passive (kept free for its own pair - last)
 -- fighters Auto Lunar / Auto Passive reroll come last in each (their rerolls skip Demonic slots anyway)
 function DM.Destination(P, key, midSet)
     local rolled, best, bestScore = DM.RolledPets(), nil, nil
     for _, u in ipairs(DM.Picked("DemonicSources")) do
         local raw = P[u]
-        if raw and not midSet[u] and DM.FreeSlots(raw) > 0 and not DM.HasKey(raw, key) then
-            local dem, other = 0, 0
+        if raw and not midSet[u] and DM.FreeSlots(raw) > 0 then
+            local same, demOther, other = 0, 0, 0
             for _, p in ipairs(DM.Passives(raw)) do
-                if DM.IsDemonicPassive(p.key) then dem = dem + 1 else other = other + 1 end
+                if p.key == key then same = same + 1
+                elseif DM.IsDemonicPassive(p.key) then demOther = demOther + 1
+                else other = other + 1 end
             end
-            local tier = (dem > 0 and other == 0) and 1 or ((dem == 0 and other == 0) and 2 or (dem > 0 and 3 or 4))
-            local score = tier * 100 + (rolled[u] and 50 or 0) - dem
+            local tier
+            if same > 0 and demOther == 0 and other == 0 then tier = 1
+            elseif same == 0 and demOther == 0 and other == 0 then tier = 2
+            elseif same > 0 then tier = 3
+            elseif demOther == 0 then tier = 4
+            elseif other > 0 then tier = 5
+            else tier = 6 end
+            local score = tier * 100 + (rolled[u] and 50 or 0) - same
             if not bestScore or score < bestScore then best, bestScore = u, score end
         end
     end
@@ -5866,6 +5876,38 @@ function DM.Plan()
                 stuck = stuck or ("no Reroll fighter with a free slot for " .. DM.PassiveName(p1.key))
             else
                 stuck = stuck or ("the middle fighter has " .. DM.PassiveName(p1.key) .. " (not Demonic) - take it off first")
+            end
+        end
+    end
+    -- 1b. pair up the same Demonic passives: when a Reroll fighter holds nothing but one kind of
+    --     Demonic passive, they go onto another fighter holding only that kind with room (the fullest
+    --     takes from the emptiest), e.g. R1 {Raging Wraith} + R2 {Raging Wraith} -> R1 {Raging Wraith x2}
+    --     (they end up alone when the Divine passives next to them are used up)
+    local pure = {}
+    for u in pairs(srcSet) do
+        local pas = DM.Passives(P[u])
+        local k = pas[1] and pas[1].key
+        if k and DM.IsDemonicPassive(k) then
+            local allK = true
+            for _, p in ipairs(pas) do if p.key ~= k then allK = false end end
+            if allK then
+                pure[k] = pure[k] or {}
+                table.insert(pure[k], { uid = u, n = #pas, free = DM.FreeSlots(P[u]) })
+            end
+        end
+    end
+    for k, list in pairs(pure) do
+        if #list >= 2 then
+            table.sort(list, function(a, b) if a.n ~= b.n then return a.n > b.n end return a.uid < b.uid end)
+            for i = 1, #list do
+                local to = list[i]
+                if to.free > 0 then
+                    for j = #list, i + 1, -1 do
+                        if list[j].n <= to.free then
+                            return { kind = "park", from = list[j].uid, to = to.uid, what = k, pairUp = true }
+                        end
+                    end
+                end
             end
         end
     end
@@ -5953,7 +5995,8 @@ function DM.Park(p, trial)
         local Q = DM.Pets()
         if DM.HasKey(Q[p.to], p.what) and not DM.HasKey(Q[p.from], p.what) then
             DM.fails, DM.moved = 0, DM.moved + 1
-            Combat.Log("demonic", string.format("parked %s from %s on %s", DM.PassiveName(p.what), DM.PetName(P[p.from]), DM.PetName(P[p.to])))
+            Combat.Log("demonic", string.format(p.pairUp and "paired %s: moved from %s next to the other one on %s" or "parked %s from %s on %s",
+                DM.PassiveName(p.what), DM.PetName(P[p.from]), DM.PetName(P[p.to])))
             return true
         end
     end
@@ -5978,7 +6021,8 @@ function DM.Background()
         return
     end
     local here, away = DM.Here[plan.kind], Util.World() ~= "MachineWorld"
-    DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name) or ("parking " .. DM.PassiveName(plan.what))
+    DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name)
+        or ((plan.pairUp and "pairing " or "parking ") .. DM.PassiveName(plan.what))
     if here == false or (here == nil and not away) then return end     -- the Brain task does it at the machine
     DM.busy = true
     local ok
