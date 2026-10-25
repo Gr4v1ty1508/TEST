@@ -5912,11 +5912,13 @@ local function closeWindows()
     end
 end
 local function fail(what, why)
+    DM.lastFail = what .. " didn't work"
     DM.fails = DM.fails + 1
     DM.failUntil = os.clock() + (DM.fails >= 3 and 600 or 20)
     Combat.Log("demonic", string.format("%s didn't work (%s)%s", what, why, DM.fails >= 3 and " - 3 times in a row, trying again in 10 min" or ""))
 end
 function DM.Craft(p, trial)
+    DM.lastActAt = os.clock()
     local P = DM.Pets()
     local before = #DM.Passives(P[p.mid])
     DM.msg, DM.msgUntil = nil, os.clock() + 5
@@ -5941,6 +5943,7 @@ function DM.Craft(p, trial)
 end
 -- park: TransferAllPassives(middle, rerollFighter) (recorded: "Transferred 1 passive!")
 function DM.Park(p, trial)
+    DM.lastActAt = os.clock()
     local P = DM.Pets()
     DM.msg, DM.msgUntil = nil, os.clock() + 5
     Net.Raw("TransferAllPassives", { tonumber(p.from) or p.from, tonumber(p.to) or p.to, n = 2 })
@@ -5968,15 +5971,16 @@ function DM.Background()
     if not On("AutoDemonic") or DM.busy then return end
     if os.clock() < DM.failUntil or os.clock() < DM.idleUntil then return end
     local plan, why = DM.Plan()
+    DM.planReady = plan ~= nil
     if not plan then
         DM.why = why
         DM.idleUntil = os.clock() + 20
         return
     end
     local here, away = DM.Here[plan.kind], Util.World() ~= "MachineWorld"
+    DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name) or ("parking " .. DM.PassiveName(plan.what))
     if here == false or (here == nil and not away) then return end     -- the Brain task does it at the machine
     DM.busy = true
-    DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name) or ("parking " .. DM.PassiveName(plan.what))
     local ok
     if plan.kind == "craft" then ok = DM.Craft(plan, here == nil) else ok = DM.Park(plan, here == nil) end
     if here == nil then
@@ -5993,6 +5997,7 @@ function DM.Run()
     if DM.busy or os.clock() < DM.failUntil or os.clock() < DM.idleUntil then return false end
     if Features.InActiveRun and Features.InActiveRun() then return false end
     local plan, why = DM.Plan()
+    DM.planReady = plan ~= nil
     if not plan then
         DM.why = why
         DM.idleUntil = os.clock() + 20
@@ -6038,9 +6043,26 @@ function DM.Run()
     closeWindows()
     return true
 end
+-- CRAFTING (doing it now) / PAUSED (a failure or another mode has the character - goes on by
+-- itself) / STOPPED (nothing it can do: no recipe pair, not set up - checked again every 20 s) / OFF
+function DM.State()
+    if not On("AutoDemonic") then return "OFF", "gray", "turned off" end
+    local now = os.clock()
+    if DM.busy or Features.BrainOwner == "Demonic" or (DM.lastActAt and now - DM.lastActAt < 4) then
+        return "CRAFTING", "green", tostring(DM.why)
+    end
+    if now < DM.failUntil then
+        return "PAUSED", "yellow", string.format("%s - trying again in %ds", DM.lastFail or "it didn't work", math.ceil(DM.failUntil - now))
+    end
+    if DM.planReady then return "PAUSED", "yellow", "waiting for the character (another mode is running): " .. tostring(DM.why) end
+    return "STOPPED", "red", tostring(DM.why)
+end
 function DM.Status()
     local P = DM.Pets()
     local L = {}
+    local st, c, detail = DM.State()
+    local COL = { green = "#4ade80", yellow = "#facc15", red = "#f87171", gray = "#6b7280" }
+    L[#L + 1] = string.format("<font color='%s'><b>● %s</b></font>  %s", COL[c] or "#6b7280", st, detail)
     local mids = DM.Picked("DemonicMiddle")
     if #mids == 0 then
         L[#L + 1] = "Middle : (pick a Demonic fighter)"
@@ -6077,10 +6099,6 @@ function DM.Status()
     L[#L + 1] = string.format("This session : %d crafted, %d parked", DM.crafted, DM.moved)
     local function where(k) local h = DM.Here[k] return h == true and "anywhere" or (h == false and "at the machine" or "not tried yet") end
     L[#L + 1] = "Crafting : " .. where("craft") .. "  /  Parking : " .. where("park")
-    if On("AutoDemonic") then
-        L[#L + 1] = "Now : " .. tostring(DM.why)
-            .. (os.clock() < DM.failUntil and string.format("  (waiting %ds after a failure)", math.ceil(DM.failUntil - os.clock())) or "")
-    end
     return table.concat(L, "\n")
 end
 end
@@ -8838,8 +8856,8 @@ function Features.StatusRows()
         if not On("AutoDemonic") then return nil end
         local DM = Features.Demonic
         if not DM then return "gray", "-" end
-        local c = owner == "Demonic" and "green" or (os.clock() < DM.failUntil and "red" or "gray")
-        return c, string.format("%s · %d crafted", tostring(DM.why), DM.crafted)
+        local st, c, detail = DM.State()
+        return c, string.format("%s · %s · %d crafted", st, detail, DM.crafted)
     end)
 
     pcall(function()
