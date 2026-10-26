@@ -4425,6 +4425,7 @@ end
 -- take every equipped pet off and put it back in the same slot order (what "re equip" means:
 -- fresh pet models = they attack again right away)
 function Features.ReEquipPets()
+    if Features.RaidBare then return end
     -- taking every pet off and on is the same as a team swap for the game's pet script: same
     -- rules (not right after a world change, not in the Time Chamber, 10 s after any swap)
     if Features.WorldChangedAt and os.clock() - Features.WorldChangedAt < 4 then return end
@@ -6446,6 +6447,7 @@ function Extras.TeamNames()
 end
 function Extras.EquipTeam(name, fromTravel, force)
     if not name or name == "" then return end
+    if Features.RaidBare then return end          -- pets off on purpose until the raid mobs spawn
     -- never swap teams while the game is moving you to another world (wait 4 s after a world change)
     if Features.WorldChangedAt and os.clock() - Features.WorldChangedAt < 4 then return end
     -- a team the hub just put on before travelling: nothing else may swap until we've arrived
@@ -6541,6 +6543,7 @@ end
 -- team's title / artefact); no button found -> the team's pets from the save one by one;
 -- no team at all -> the same pets that were on.
 function Extras.ReloadTeam(why)
+    if Features.RaidBare then return end
     local name = Extras.TeamForNow()
     local on = {}
     local saved = Data.SavedEquipped and Data.SavedEquipped() or {}
@@ -6584,6 +6587,7 @@ end
 -- Used when nothing at all is equipped: a team press that put nothing on, a reload that didn't
 -- come back. Returns how many pets were sent.
 function Extras.PutTeamOn(name)
+    if Features.RaidBare then return 0 end         -- (Features.RaidPetsBack clears it first)
     local list = name and Extras.TeamUIDList(name)
     if not list or #list == 0 then return 0 end
     Features.LastPetSwapAt = os.clock()
@@ -6763,11 +6767,94 @@ local function pressPopup(name)
     return pressOnce((main and main:FindFirstChild("Yes")) or g:FindFirstChild("Yes", true))
 end
 
+-- RAID MOBS SCALE WITH YOUR PETS (Tawan tested, 27 Oct: take every pet off, wait until the raid
+-- starts and the mobs spawn, put them back on = much easier than having them on when the mobs
+-- spawn). "Take Pets Off Until Mobs Spawn": right after arriving in the raid (before any mob),
+-- every pet goes off; once the first mobs have been there 2 s, the Raid team (or the same pets)
+-- goes back on. Nothing else puts pets on in between (team swaps / no-pets fixes wait).
+-- Back on anyway after 2 min, when you leave the raid, or when Auto Raid is turned off.
+Features.RaidBare, Features.RaidVisit = nil, nil
+function Features.RaidBossMax()
+    local v = 0
+    pcall(function() v = tonumber(Worlds.Raid.RaidData.BossMaxHealth.Value) or 0 end)
+    return v
+end
+function Features.RaidPetsBack(why)
+    local RB = Features.RaidBare
+    if not RB then return end
+    Features.RaidBare = nil
+    local name = F("TeamRaid")
+    local n = 0
+    if type(name) == "string" and name ~= "" then
+        -- the game's team button first (pets + the team's title / artifact); with no pet on there's
+        -- nothing for a quick second swap to break, so the 10 s between swaps doesn't apply here
+        Extras.TeamPressedAt, Features.LastPetSwapAt = nil, nil
+        if Extras.EquipTeam(name, true, true) then
+            local _, teamN = Extras.TeamUIDs(name)
+            n = teamN or 0
+        else
+            n = Extras.PutTeamOn(name)
+        end
+    end
+    if n == 0 then
+        Features.LastPetSwapAt, Extras.TeamPressedAt = os.clock(), os.clock()
+        for slot, uid in ipairs(RB.uids) do Net.Call("ManagePetEquip", tonumber(uid) or uid, slot) end
+        n = #RB.uids
+    end
+    local mobs = #Combat.List("Raid")
+    Combat.Log("raid", string.format("%s - putting %d pets back on (%s) | %d mobs here, boss max hp %.3g, %.0f s with no pets",
+        why, n, (type(name) == "string" and name ~= "") and ("team " .. name) or "the same pets", mobs, Features.RaidBossMax(), os.clock() - RB.since))
+end
+-- true = hold (pets are off, waiting for the mobs): don't attack yet
+function Features.RaidHold()
+    local now = os.clock()
+    local V = Features.RaidVisit
+    if not V then V = { at = now, sawMobs = false } Features.RaidVisit = V end
+    local mobs = #Combat.List("Raid")
+    local RB = Features.RaidBare
+    if RB then
+        if mobs > 0 then
+            RB.mobsAt = RB.mobsAt or now
+            -- the first wave spawned scaled to no pets: 2 s for the rest of it, then pets on
+            if now - RB.mobsAt >= 2 then Features.RaidPetsBack("raid mobs spawned with no pets on") return false end
+        end
+        if now - RB.since > 120 then Features.RaidPetsBack("no raid mobs after 2 min") return false end
+        return true
+    end
+    if mobs > 0 then V.sawMobs = true end
+    if V.sawMobs or V.stripped or not On("RaidBare") then return false end
+    -- only right after arriving (between waves there are no mobs either - never then)
+    if now - V.at > 20 then V.sawMobs = true return false end
+    local saved = Data.SavedEquipped() or {}
+    local slots = {}
+    for slot in pairs(saved) do slots[#slots + 1] = slot end
+    table.sort(slots)
+    local uids = {}
+    for _, slot in ipairs(slots) do uids[#uids + 1] = saved[slot] end
+    if #uids == 0 then return false end
+    V.stripped = true
+    Features.RaidBare = { since = now, uids = uids }
+    Features.LastPetSwapAt, Extras.TeamPressedAt = now, now
+    for _, uid in ipairs(uids) do Net.Call("ManagePetUnequip", tonumber(uid) or uid) end
+    Combat.Log("raid", string.format("in the raid before the mobs: took all %d pets off (raid mobs scale with your pets) - back on once they spawn", #uids))
+    return true
+end
+-- every 1 s: left the raid / Auto Raid off / waited too long -> pets back on
+function Features.RaidBareWatch()
+    if Util.World() ~= "Raid" then Features.RaidVisit = nil end
+    local RB = Features.RaidBare
+    if not RB then return end
+    if Util.World() ~= "Raid" then Features.RaidPetsBack("left the raid")
+    elseif not On("AutoRaid") then Features.RaidPetsBack("Auto Raid turned off")
+    elseif os.clock() - RB.since > 130 then Features.RaidPetsBack("no raid mobs after 2 min") end
+end
+
 local baseRaid = Features.Raid
 function Features.Raid()
     if Util.World() == "Raid" then
         -- built into Auto Raid: confirm the results, go back to the farm world,
         -- forcefield up = minions first, forcefield down = boss
+        if Features.RaidHold() then task.wait(0.2) return true end
         if Extras.RaidResults() then
             task.wait(1)
             if HomeWorld ~= "" and not CFG.ModeWorlds[HomeWorld] then Travel.To(HomeWorld) end
@@ -9356,6 +9443,8 @@ do
     r:Dropdown({ Title = "Select Raid Mode", Items = CFG.RaidModes, Multi = true, Flag = "RaidModes" })
     r:Toggle({ Title = "Farm All World", Flag = "RaidAllWorlds" })
     r:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "RaidTarget" })
+    -- raid mobs are made as strong as your pets when they spawn: no pets on then = easy mobs
+    r:Toggle({ Title = "Take Pets Off Until Mobs Spawn", Default = true, Flag = "RaidBare" })
     r:Toggle({ Title = "Auto Raid", Flag = "AutoRaid" })
 
     local m = TRaid:Card("Auto Meteor / Fallen Star !", "Left")
@@ -10473,6 +10562,7 @@ end
 end
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
 loop(1, function() Features.RollArtifactRestore() end)
+loop(1, function() Features.RaidBareWatch() end)
 -- after joining, the save (GameData) loads a bit after the hub: refresh the pet lists once it's there
 task.spawn(function()
     for _ = 1, 90 do
@@ -10762,7 +10852,7 @@ loop(2, function()
         local saved = Data.SavedEquipped()
         local savedN = 0
         for _ in pairs(saved or {}) do savedN = savedN + 1 end
-        if not saved or savedN > 0 or #Data.EquippedPets() > 0 then Features.ZeroSince = nil return end
+        if not saved or savedN > 0 or #Data.EquippedPets() > 0 or Features.RaidBare then Features.ZeroSince = nil return end
         if (Features.WorldChangedAt and now - Features.WorldChangedAt < 10)
            or (Features.LastPetSwapAt and now - Features.LastPetSwapAt < 6) then
             Features.ZeroSince = nil
