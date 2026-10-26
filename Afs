@@ -3293,15 +3293,14 @@ function Features.Raid()
         local massive, giant = rd:FindFirstChild("Massive"), rd:FindFirstChild("Giant")
         mode = (massive and massive.Value and "Massive") or (giant and giant.Value and "Giant") or "Normal"
     end)
-    if not active then
-        for _, f in ipairs(Worlds:GetChildren()) do
-            local b = f:FindFirstChild("RaidBeacon")
-            if b and b:GetAttribute("Active") == true then active = f.Name break end
-        end
-    end
+    -- RaidData.CurrentWorld may still name the last raid: only a raid that's open (RaidBeacon
+    -- @Active) or coming (world @RaidRumble) counts, in the world where it is
+    local openW = Features.RaidOpenWorld()
+    if not openW then active = nil elseif active ~= openW then active = openW end
     local worlds, modes = worldsFrom("RaidWorlds"), F("RaidModes") or {}
-    local worldOk = On("RaidAllWorlds") or contains(worlds, active)
-    local modeOk = not next(modes) or mode == nil or modes[mode]
+    local picked = Features.RaidPicked and Features.RaidPicked.world == active
+    local worldOk = On("RaidAllWorlds") or contains(worlds, active) or picked
+    local modeOk = not next(modes) or mode == nil or modes[mode] or picked
     if not modeOk and type(mode) == "string" then
         for m, on in pairs(modes) do
             if on and string.find(string.lower(mode), string.lower(m), 1, true) then modeOk = true break end
@@ -3331,7 +3330,102 @@ function Features.Raid()
         end
         return true
     end
+    -- nothing to join: call one with a Raid Picker (when no raid is open or coming anywhere)
+    pcall(Features.UseRaidPicker)
     return false
+end
+
+-- RAID PICKER (recorded 27 Oct): UseItem("RaidPicker", <world key>) -> "a raid is coming to
+-- <world>!" (RaidPicker.COUNTDOWN = 60 s). Used when Auto Raid has nothing to join and no raid is
+-- open (RaidBeacon @Active) or coming (world @RaidRumble) anywhere; the raid it calls is joined
+-- whatever world / mode is picked above. One at a time: the next only after that raid (or 150 s).
+-- Not taken 3 times (the count in the save didn't drop) -> 10 min pause.
+Features.RaidPick = { at = nil, fails = 0, pauseUntil = 0 }
+function Features.RaidOpenWorld()
+    for _, f in ipairs(Worlds:GetChildren()) do
+        local b = f:FindFirstChild("RaidBeacon")
+        if b and b:GetAttribute("Active") == true then return f.Name, "open" end
+        if f:GetAttribute("RaidRumble") == true then return f.Name, "coming" end
+    end
+    return nil
+end
+function Features.RaidPickerValid(world)
+    local mod = Data.Module("RaidPicker")
+    if mod and type(mod.IsValidWorld) == "function" then
+        local ok, res = pcall(mod.IsValidWorld, world)
+        if ok and res == false then return false end
+    end
+    return true
+end
+function Data.RaidPickerLabels()
+    local all, out = Data.FarmWorldLabels(), {}
+    for _, label in ipairs(all) do
+        if Features.RaidPickerValid(Data.FromLabel(label)) then out[#out + 1] = label end
+    end
+    return #out > 0 and out or all
+end
+function Features.RaidPickerWorld()
+    local label = F("RaidPickerWorld")
+    local w = type(label) == "string" and label ~= "" and Data.FromLabel(label) or nil
+    if not w then w = worldsFrom("RaidWorlds")[1] end
+    if w and not Features.RaidPickerValid(w) then return nil end
+    return w
+end
+function Features.RaidPickersLeft()
+    local st = Data.StoreData()
+    local items = type(st) == "table" and st.Items
+    return type(items) == "table" and (tonumber(items.RaidPicker) or 0) or nil
+end
+function Features.UseRaidPicker()
+    if not On("RaidPicker") or Util.World() == "Raid" then return false end
+    local RP, now = Features.RaidPick, os.clock()
+    local have = Features.RaidPickersLeft()
+    local openW = Features.RaidOpenWorld()
+    if RP.at then
+        -- did the game take it? (one fewer in the save, or the raid is coming)
+        if not RP.taken and ((have and RP.before and have < RP.before) or openW) then
+            RP.taken, RP.fails = true, 0
+        end
+        if not RP.taken and now - RP.at > 12 then
+            RP.at, RP.fails = nil, RP.fails + 1
+            if RP.fails >= 3 then
+                RP.fails, RP.pauseUntil = 0, now + 600
+                Combat.Log("raid", "Raid Picker: the game didn't take it 3 times - trying again in 10 min")
+            end
+            return false
+        end
+        if openW or now - RP.at < 150 then return false end    -- its raid is coming / on
+        RP.at = nil                                             -- 150 s and no raid: the next one may go
+    end
+    if openW or now < RP.pauseUntil then return false end
+    if have == 0 then
+        if Util.Every("raidpick-none", 600) then Combat.Log("raid", "Raid Picker: none left") end
+        return false
+    end
+    local world = Features.RaidPickerWorld()
+    if not world then
+        if Util.Every("raidpick-world", 600) then Combat.Log("raid", "Raid Picker: pick a world in Raid Picker World (or Select Raid World)") end
+        return false
+    end
+    Net.Raw("UseItem", { "RaidPicker", world, n = 2 })
+    RP.at, RP.before, RP.taken, RP.world = now, have, false, world
+    Features.RaidPicked = { world = world, at = now }
+    Combat.Log("raid", string.format("Raid Picker used on %s (%s) - %s left, the raid comes in about %d s",
+        Data.WorldDisplay(world), world, have and tostring(have - 1) or "?",
+        tonumber((Data.Module("RaidPicker") or {}).COUNTDOWN) or 60))
+    return true
+end
+function Features.RaidPickerStatus()
+    local RP = Features.RaidPick
+    local have = Features.RaidPickersLeft()
+    local w = Features.RaidPickerWorld()
+    local openW, how = Features.RaidOpenWorld()
+    local L = { string.format("Raid Picker : %s left | world %s", have and tostring(have) or "?", w and Data.WorldDisplay(w) or "(pick one)") }
+    if openW then L[#L + 1] = "Raid " .. how .. " : " .. Data.WorldDisplay(openW)
+    elseif RP.at then L[#L + 1] = string.format("Used %.0f s ago on %s - waiting for its raid", os.clock() - RP.at, Data.WorldDisplay(RP.world or "?"))
+    elseif os.clock() < RP.pauseUntil then L[#L + 1] = string.format("Paused %.0f min (the game didn't take it)", (RP.pauseUntil - os.clock()) / 60)
+    else L[#L + 1] = On("RaidPicker") and "No raid open - used when Auto Raid has nothing to join" or "Off" end
+    return table.concat(L, "\n")
 end
 
 local defenseActive = false
@@ -6804,6 +6898,10 @@ function Features.RaidPetsBack(why)
         n = #RB.uids
     end
     local mobs = #Combat.List("Raid")
+    if n == 0 then
+        Combat.Log("raid", why .. " - no team to put on (pick a Raid Team in Teams)")
+        return
+    end
     Combat.Log("raid", string.format("%s - putting %d pets back on (%s) | %d mobs here, boss max hp %.3g, %.0f s with no pets",
         why, n, (type(name) == "string" and name ~= "") and ("team " .. name) or "the same pets", mobs, Features.RaidBossMax(), os.clock() - RB.since))
 end
@@ -6851,6 +6949,11 @@ end
 -- arriving, back on once the mobs spawned / you left / the toggle is turned off / 3 min passed
 function Features.RaidBareWatch()
     if Util.World() ~= "Raid" then
+        -- a raid we called with the Raid Picker is over once we've been in and left (or after 10 min)
+        if Features.RaidPicked and (Features.RaidVisit or os.clock() - Features.RaidPicked.at > 600) then
+            Features.RaidPicked = nil
+            if Features.RaidPick then Features.RaidPick.at = nil end
+        end
         Features.RaidVisit = nil
         if Features.RaidBare then Features.RaidPetsBack("left the raid") end
         return
@@ -9458,6 +9561,10 @@ do
     r:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "RaidTarget" })
     -- raid mobs are made as strong as your pets when they spawn: no pets on then = easy mobs
     r:Toggle({ Title = "Take Pets Off Until Mobs Spawn", Default = true, Flag = "RaidBare" })
+    -- no raid open anywhere: call one with a Raid Picker (item from dungeon chests, max 100)
+    r:Toggle({ Title = "Use Raid Picker When No Raid", Default = true, Flag = "RaidPicker" })
+    local rpw = r:Dropdown({ Title = "Raid Picker World", Items = Data.RaidPickerLabels(), Flag = "RaidPickerWorld" })
+    Features.RaidPickerLabel = r:Paragraph({ Body = "Raid Picker : -" })
     r:Toggle({ Title = "Auto Raid", Flag = "AutoRaid" })
 
     local m = TRaid:Card("Auto Meteor / Fallen Star !", "Left")
@@ -9474,6 +9581,7 @@ do
     Refreshers[#Refreshers + 1] = function()
         local labels = Data.FarmWorldLabels()
         Data.RefreshWorldDrop(rw, labels) Data.RefreshWorldDrop(mw, labels)
+        Data.RefreshWorldDrop(rpw, Data.RaidPickerLabels())
         Data.RefreshWorldDrop(dw, Data.DefenseWorldLabels())
     end
 end
@@ -10576,6 +10684,9 @@ end
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
 loop(1, function() Features.RollArtifactRestore() end)
 loop(0.5, function() Features.RaidBareWatch() end)
+loop(5, function()
+    if Features.RaidPickerLabel then pcall(function() Features.RaidPickerLabel:Set(Features.RaidPickerStatus()) end) end
+end)
 -- after joining, the save (GameData) loads a bit after the hub: refresh the pet lists once it's there
 task.spawn(function()
     for _ = 1, 90 do
