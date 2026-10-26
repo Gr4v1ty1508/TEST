@@ -4508,6 +4508,9 @@ function Features.PassiveStatusText()
     for _, n in ipairs(Util.SetToList(F("PassiveRarity"))) do lines[#lines + 1] = "    [+] " .. n end
     lines[#lines + 1] = "[-] Passive Machine : " .. tostring(F("PassiveMachine") or "-")
     lines[#lines + 1] = "[-] Delayed " .. tostring(F("PassiveDelay") or 0.5)
+    local RA = Features.RollArt
+    lines[#lines + 1] = "[-] Artifact of Dreams : " .. (not On("PassiveDreams") and "off"
+        or (RA and RA.prev and ("on - " .. (RA.prev ~= "" and RA.prev or "nothing") .. " goes back when rolling stops") or "goes on while rolling"))
     local done, total = 0, 0
     for _ in pairs(passiveRolls) do total = total + 1 end
     for _ in pairs(passiveDone) do done = done + 1 end
@@ -4536,6 +4539,7 @@ function Features.Passive()
     if #pets == 0 or #slots == 0 then return end
     local machine = F("PassiveMachine") or "Normal"
     if not Features.PassiveReady(machine, "passive") then return end
+    if not Features.RollArtifact("passive") then task.wait(0.2) return end     -- Artifact of Dreams going on
     local sent = {}
     for _, label in ipairs(pets) do
         local id = Data.PetId(label)
@@ -4883,6 +4887,7 @@ function Features.EventQuests()
     local machine = best[1] == "Event" and (F("EQEventMachine") or "Frieren2026") or best[1]
     local slot = tonumber(F("EQSlot") or "1") or 1
     if not Features.PassiveReady(machine, "lunar") then return end
+    if not Features.RollArtifact("lunar") then task.wait(0.2) return end       -- Artifact of Dreams going on
     for _, label in ipairs(pets) do
         -- a Demonic passive (one the Demonic crafter parked there, or yours) is left alone
         -- unless "Reroll Over Demonic Passives" is on
@@ -6254,6 +6259,7 @@ end
 end
 
 function Features.ResetPassive() passiveDone, passiveRolls, warnedRead = {}, {}, false end
+
 
 -- SHOP ------------------------------------------------------------------------------------------
 function Features.Shop()
@@ -9692,6 +9698,8 @@ do
     -- off: a slot holding a Demonic passive is skipped; on: it's rerolled like any other
     p:Toggle({ Title = "Reroll Over Demonic Passives", Default = false, Flag = "PassiveRollDemonic",
         Callback = function() Features.ResetPassive() end })
+    -- Artifact of Dreams (better passive odds) on while rolling, your artifact back on after
+    p:Toggle({ Title = "Wear Artifact of Dreams While Rolling", Default = true, Flag = "PassiveDreams" })
     p:Toggle({ Title = "Auto Reroll Passive !", Flag = "AutoPassive", Callback = function(v) if v then Features.ResetPassive() end end })
     if #names == 0 then
         p:Paragraph({ Body = "PassiveStats module could not be read. Type a passive name below instead." })
@@ -9735,6 +9743,7 @@ do
     -- off: a pet whose slot holds a Demonic passive is skipped; on: it's rerolled like any other
     -- (also Battle Pass "Roll Passive", which uses these pets / slot)
     q:Toggle({ Title = "Reroll Over Demonic Passives", Default = false, Flag = "EQRollDemonic" })
+    q:Toggle({ Title = "Wear Artifact of Dreams While Rolling", Default = true, Flag = "EQDreams" })
     Features.EQTimer = q:Paragraph({ Body = "New Quests In : -" })
     Features.EQStatus = q:Paragraph({ Body = "Status : -" })
     q:Button({ Title = "Read Board Now", Callback = function()
@@ -10386,7 +10395,84 @@ loop(3, function()
     if Features.UseBoostLabel then pcall(function() Features.UseBoostLabel:Set(Features.UseBoostStatus()) end) end
 end)
 loop(2, function() if Features.MegaStatus then pcall(function() Features.MegaStatus:Set(Features.MegaStatusText()) end) end end)
+do
+-- ARTIFACT OF DREAMS WHILE ROLLING -----------------------------------------------------------------
+-- ArtefactData.Dreams ("Artifact of Dreams", PassiveChanceBuff) goes on right before Auto Reroll
+-- Passive / Auto Lunar roll; once nothing has rolled for 8 s (or both are off) the artifact that
+-- was in that slot goes back on. EquipArtefact(name, "CurrentArtefact" / "CurrentSecondArtefact")
+-- like the dungeon one. The slot holding Artifact of Multitude (Equip, +1 pet) is never used.
+-- A team put on in between (its loadout has its own artifact) = that one is put back later.
+Features.RollArt = { prev = nil, slot = nil, putAt = -99, lastRollAt = -99, fails = 0, offUntil = 0 }
+local function artSlots()
+    local st = Data.StoreData()
+    if type(st) ~= "table" then return nil end
+    return tostring(st.CurrentArtefact or ""), tostring(st.CurrentSecondArtefact or ""), st
+end
+local function teamChangedSince(t)
+    return (Extras.TeamPressedAt and Extras.TeamPressedAt > t) or (Features.LastPetSwapAt and Features.LastPetSwapAt > t)
+end
+-- true = roll now; false = Artifact of Dreams was just sent, roll once the save shows it
+function Features.RollArtifact(who)
+    if not On(who == "lunar" and "EQDreams" or "PassiveDreams") then return true end
+    local RA = Features.RollArt
+    local now = os.clock()
+    RA.lastRollAt = now
+    local c1, c2, st = artSlots()
+    if not c1 then return true end
+    if c1 == "Dreams" or c2 == "Dreams" then
+        RA.fails = 0
+        -- a team went on since we put it on and its loadout has Dreams too: nothing to put back
+        if RA.prev and teamChangedSince(RA.putAt) then RA.prev, RA.slot = nil, nil end
+        return true
+    end
+    if now < RA.offUntil then return true end
+    if type(st.Artefacts) == "table" and st.Artefacts.Dreams == nil then
+        if Util.Every("dreams-none", 600) then Combat.Log("passive", "you don't have the Artifact of Dreams - rolling without it") end
+        return true
+    end
+    -- the dungeon summon has the Artifact of Passage on for a moment: it puts yours back itself
+    if (c1 == "Dungeon" or c2 == "Dungeon") and Features.LastSummon and now - (Features.LastSummon.at or -99) < 10 then return false end
+    if now - RA.putAt < 2 then return false end                 -- sent: wait for the save
+    if RA.putAt > 0 and RA.prev ~= nil and now - RA.putAt < 6 then
+        RA.fails = RA.fails + 1
+        if RA.fails >= 3 then
+            RA.offUntil, RA.fails = now + 300, 0
+            Combat.Log("passive", "the Artifact of Dreams didn't go on 3 times - rolling without it for 5 min")
+            return true
+        end
+    end
+    -- the slot to use: the first one, unless it holds Artifact of Multitude (it's +1 pet)
+    local slot, was
+    if c1 ~= "Equip" then slot, was = "CurrentArtefact", c1
+    elseif c2 ~= "Equip" then slot, was = "CurrentSecondArtefact", c2
+    else return true end
+    RA.prev, RA.slot = was, slot          -- what's there now (yours, or the team's that just went on) comes back later
+    RA.putAt = now
+    Net.Call("EquipArtifact", "Dreams", slot)
+    Combat.Log("passive", string.format("%s: Artifact of Dreams on (slot %s, was %s) - put back when rolling stops",
+        who == "lunar" and "Auto Lunar" or "Auto Reroll Passive", slot == "CurrentArtefact" and "1" or "2", was ~= "" and was or "empty"))
+    return false
+end
+-- every 1 s: rolling stopped (8 s nothing rolled, or both off) -> the artifact from before goes back
+function Features.RollArtifactRestore()
+    local RA = Features.RollArt
+    if not RA.prev then return end
+    local rolling = (On("AutoPassive") and On("PassiveDreams")) or (On("AutoEventQuests") and On("EQDreams"))
+    if rolling and os.clock() - RA.lastRollAt < 8 then return end
+    local c1, c2 = artSlots()
+    if not c1 then return end
+    local cur = RA.slot == "CurrentSecondArtefact" and c2 or c1
+    local prev, slot = RA.prev, RA.slot
+    RA.prev, RA.slot, RA.putAt = nil, nil, -99
+    -- a team swap since then put its own artifact on: leave that one
+    if cur ~= "Dreams" then return end
+    if prev == "" or prev == "Dreams" then return end
+    Net.Call("EquipArtifact", prev, slot)
+    Combat.Log("passive", string.format("rolling stopped - %s back on (slot %s)", prev, slot == "CurrentArtefact" and "1" or "2"))
+end
+end
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
+loop(1, function() Features.RollArtifactRestore() end)
 -- after joining, the save (GameData) loads a bit after the hub: refresh the pet lists once it's there
 task.spawn(function()
     for _ = 1, 90 do
