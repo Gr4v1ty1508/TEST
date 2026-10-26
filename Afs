@@ -6772,7 +6772,8 @@ end
 -- spawn). "Take Pets Off Until Mobs Spawn": right after arriving in the raid (before any mob),
 -- every pet goes off; once the first mobs have been there 2 s, the Raid team (or the same pets)
 -- goes back on. Nothing else puts pets on in between (team swaps / no-pets fixes wait).
--- Back on anyway after 2 min, when you leave the raid, or when Auto Raid is turned off.
+-- Back on anyway after 3 min, when you leave the raid, or when the toggle is turned off. Works in a
+-- raid you went to yourself too (Auto Raid off).
 Features.RaidBare, Features.RaidVisit = nil, nil
 function Features.RaidBossMax()
     local v = 0
@@ -6784,6 +6785,7 @@ function Features.RaidPetsBack(why)
     if not RB then return end
     Features.RaidBare = nil
     local name = F("TeamRaid")
+    if (type(name) ~= "string" or name == "") and #RB.uids == 0 then name = Extras.TeamForNow() end
     local n = 0
     if type(name) == "string" and name ~= "" then
         -- the game's team button first (pets + the team's title / artifact); with no pet on there's
@@ -6818,7 +6820,7 @@ function Features.RaidHold()
             -- the first wave spawned scaled to no pets: 2 s for the rest of it, then pets on
             if now - RB.mobsAt >= 2 then Features.RaidPetsBack("raid mobs spawned with no pets on") return false end
         end
-        if now - RB.since > 120 then Features.RaidPetsBack("no raid mobs after 2 min") return false end
+        if now - RB.since > 180 then Features.RaidPetsBack("no raid mobs after 3 min") return false end
         return true
     end
     if mobs > 0 then V.sawMobs = true end
@@ -6831,22 +6833,33 @@ function Features.RaidHold()
     table.sort(slots)
     local uids = {}
     for _, slot in ipairs(slots) do uids[#uids + 1] = saved[slot] end
-    if #uids == 0 then return false end
+    if #uids == 0 and #Data.EquippedPets() > 0 then return false end   -- the save hasn't caught up yet
     V.stripped = true
+    if #uids == 0 then
+        -- no pet on already (you took them off): wait the same way, the team goes on after the spawn
+        Features.RaidBare = { since = now, uids = {} }
+        Combat.Log("raid", "in the raid before the mobs with no pets on - the team goes on once the mobs spawn")
+        return true
+    end
     Features.RaidBare = { since = now, uids = uids }
     Features.LastPetSwapAt, Extras.TeamPressedAt = now, now
     for _, uid in ipairs(uids) do Net.Call("ManagePetUnequip", tonumber(uid) or uid) end
     Combat.Log("raid", string.format("in the raid before the mobs: took all %d pets off (raid mobs scale with your pets) - back on once they spawn", #uids))
     return true
 end
--- every 1 s: left the raid / Auto Raid off / waited too long -> pets back on
+-- every 0.5 s, with or without Auto Raid (a raid you went to yourself too): pets off right after
+-- arriving, back on once the mobs spawned / you left / the toggle is turned off / 3 min passed
 function Features.RaidBareWatch()
-    if Util.World() ~= "Raid" then Features.RaidVisit = nil end
-    local RB = Features.RaidBare
-    if not RB then return end
-    if Util.World() ~= "Raid" then Features.RaidPetsBack("left the raid")
-    elseif not On("AutoRaid") then Features.RaidPetsBack("Auto Raid turned off")
-    elseif os.clock() - RB.since > 130 then Features.RaidPetsBack("no raid mobs after 2 min") end
+    if Util.World() ~= "Raid" then
+        Features.RaidVisit = nil
+        if Features.RaidBare then Features.RaidPetsBack("left the raid") end
+        return
+    end
+    if not On("RaidBare") then
+        if Features.RaidBare then Features.RaidPetsBack("Take Pets Off Until Mobs Spawn turned off") end
+        return
+    end
+    Features.RaidHold()
 end
 
 local baseRaid = Features.Raid
@@ -10562,7 +10575,7 @@ end
 end
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
 loop(1, function() Features.RollArtifactRestore() end)
-loop(1, function() Features.RaidBareWatch() end)
+loop(0.5, function() Features.RaidBareWatch() end)
 -- after joining, the save (GameData) loads a bit after the hub: refresh the pet lists once it's there
 task.spawn(function()
     for _ = 1, 90 do
@@ -10852,7 +10865,27 @@ loop(2, function()
         local saved = Data.SavedEquipped()
         local savedN = 0
         for _ in pairs(saved or {}) do savedN = savedN + 1 end
-        if not saved or savedN > 0 or #Data.EquippedPets() > 0 or Features.RaidBare then Features.ZeroSince = nil return end
+        if not saved or savedN > 0 or #Data.EquippedPets() > 0 or Features.RaidBare then
+            Features.ZeroSince, Features.PetsZeroAt = nil, nil
+            return
+        end
+        -- when did they all go: right after a team press / reload of the hub = its doing (fix it
+        -- in 6 s); otherwise you took them off yourself (record 27 Oct: you took them off for the
+        -- raid, this put the team back on 13 s later, before the raid mobs spawned) - 3 min
+        if not Features.PetsZeroAt then
+            Features.PetsZeroAt = now
+            local t = math.max(Features.LastPetSwapAt or -999, Extras.TeamPressedAt or -999)
+            Features.PetsZeroByHub = now - t < 30
+            if not Features.PetsZeroByHub then
+                Combat.Log("pets", "all pets were taken off (not by the hub) - leaving them off; the team goes back on after 3 min if still none")
+            end
+        end
+        -- in a raid before its mobs spawned: raid mobs are made as strong as your pets then
+        if Util.World() == "Raid" then
+            if #Combat.List("Raid") == 0 then Features.ZeroSince = nil return end
+            Features.PetsZeroByHub = true                -- the mobs are here: pets on now
+        end
+        if not Features.PetsZeroByHub and now - Features.PetsZeroAt < 180 then Features.ZeroSince = nil return end
         if (Features.WorldChangedAt and now - Features.WorldChangedAt < 10)
            or (Features.LastPetSwapAt and now - Features.LastPetSwapAt < 6) then
             Features.ZeroSince = nil
