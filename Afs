@@ -3349,27 +3349,48 @@ function Features.RaidOpenWorld()
     end
     return nil
 end
-function Features.RaidPickerValid(world)
-    local mod = Data.Module("RaidPicker")
-    if mod and type(mod.IsValidWorld) == "function" then
-        local ok, res = pcall(mod.IsValidWorld, world)
-        if ok and res == false then return false end
-    end
-    return true
-end
+-- the game's own list of worlds a Raid Picker can call (RaidPicker.Worlds() / IsValidWorld) - used
+-- only to shorten the dropdown, and only when it clearly works (28 Oct: IsValidWorld said no to
+-- the world you picked, so the pick was thrown away and nothing was ever called)
 function Data.RaidPickerLabels()
-    local all, out = Data.FarmWorldLabels(), {}
-    for _, label in ipairs(all) do
-        if Features.RaidPickerValid(Data.FromLabel(label)) then out[#out + 1] = label end
+    local all = Data.FarmWorldLabels()
+    local mod = Data.Module("RaidPicker")
+    local okSet = nil
+    if mod and type(mod.Worlds) == "function" then
+        local ok, res = pcall(mod.Worlds)
+        if ok and type(res) == "table" then
+            okSet = {}
+            for k, v in pairs(res) do
+                if type(v) == "string" then okSet[v] = true elseif type(k) == "string" and v then okSet[k] = true end
+            end
+            if not next(okSet) then okSet = nil end
+        end
     end
+    if not okSet and mod and type(mod.IsValidWorld) == "function" then
+        okSet = {}
+        for _, label in ipairs(all) do
+            local w = Data.FromLabel(label)
+            local ok, res = pcall(mod.IsValidWorld, w)
+            if ok and res then okSet[w] = true end
+        end
+        if not next(okSet) then okSet = nil end
+    end
+    if not okSet then return all end
+    local out = {}
+    for _, label in ipairs(all) do if okSet[Data.FromLabel(label)] then out[#out + 1] = label end end
     return #out > 0 and out or all
 end
+-- the world to call the raid in: Raid Picker World, else the first Select Raid World, else the
+-- world you farm in. Returns world key, where it came from
 function Features.RaidPickerWorld()
     local label = F("RaidPickerWorld")
-    local w = type(label) == "string" and label ~= "" and Data.FromLabel(label) or nil
-    if not w then w = worldsFrom("RaidWorlds")[1] end
-    if w and not Features.RaidPickerValid(w) then return nil end
-    return w
+    if type(label) == "string" and label ~= "" then return Data.FromLabel(label), "picked" end
+    local w = worldsFrom("RaidWorlds")[1]
+    if w then return w, "Select Raid World" end
+    for _, h in ipairs({ HomeWorld, Util.World() }) do
+        if type(h) == "string" and h ~= "" and Data.IsFarmWorldName(h) then return h, "your farm world" end
+    end
+    return nil
 end
 function Features.RaidPickersLeft()
     local st = Data.StoreData()
@@ -3418,9 +3439,10 @@ end
 function Features.RaidPickerStatus()
     local RP = Features.RaidPick
     local have = Features.RaidPickersLeft()
-    local w = Features.RaidPickerWorld()
+    local w, from = Features.RaidPickerWorld()
     local openW, how = Features.RaidOpenWorld()
-    local L = { string.format("Raid Picker : %s left | world %s", have and tostring(have) or "?", w and Data.WorldDisplay(w) or "(pick one)") }
+    local L = { string.format("Raid Picker : %s left | world %s", have and tostring(have) or "?",
+        w and (Data.WorldDisplay(w) .. (from ~= "picked" and (" (" .. from .. ")") or "")) or "(pick one)") }
     if openW then L[#L + 1] = "Raid " .. how .. " : " .. Data.WorldDisplay(openW)
     elseif RP.at then L[#L + 1] = string.format("Used %.0f s ago on %s - waiting for its raid", os.clock() - RP.at, Data.WorldDisplay(RP.world or "?"))
     elseif os.clock() < RP.pauseUntil then L[#L + 1] = string.format("Paused %.0f min (the game didn't take it)", (RP.pauseUntil - os.clock()) / 60)
