@@ -6167,6 +6167,21 @@ function Features.DemonicWantsTrip()
     return On("AutoDemonic") and DM.Here.park == false and DM.parkPlanAt ~= nil and os.clock() - DM.parkPlanAt < 10
         and os.clock() >= DM.failUntil and not DM.busy
 end
+-- a park waiting 20 s+ for the character: who has it (once a minute; every 5 s from the loops below)
+function Features.DemonicTripWatch()
+    if not Features.DemonicWantsTrip() then DM.tripWaitSince = nil return end
+    if Features.BrainOwner == "Demonic" then DM.tripWaitSince = nil return end
+    DM.tripWaitSince = DM.tripWaitSince or os.clock()
+    if os.clock() - DM.tripWaitSince > 20 and Util.Every("demonic-trip-wait", 60) then
+        local names = {}
+        for i, t in ipairs(Features.TaskOrder()) do
+            names[#names + 1] = i .. "." .. t.id
+            if t.id == "Demonic" then break end
+        end
+        Combat.Log("demonic", string.format("parking waits %.0f s for the character - %s has it (order: %s)",
+            os.clock() - DM.tripWaitSince, tostring(Features.BrainOwner), table.concat(names, " ")))
+    end
+end
 -- one log line each time the reason it waits changes
 function DM.Note(why)
     DM.why = why
@@ -9130,8 +9145,15 @@ function Features.TaskOrder()
         list[#list + 1] = { task = t, prio = tonumber(F("Prio_" .. t.id)) or def, def = def }
     end
     table.sort(list, function(a, b) if a.prio ~= b.prio then return a.prio < b.prio end return a.def < b.def end)
-    local out = {}
-    for _, e in ipairs(list) do out[#out + 1] = e.task end
+    -- Farm and Time Chamber take the character whenever they're on (they always have something to
+    -- do), so anything under them never runs: they always go last (in their own order). Configs
+    -- saved before Clone / Demonic existed still had Farm 15 / Time Chamber 16-17 - the Demonic
+    -- crafter (16) then never got the character to park (log 29-30 Oct: no trip for 16 min).
+    local out, idle = {}, {}
+    for _, e in ipairs(list) do
+        if e.task.id == "Farm" or e.task.id == "TimeChamber" then idle[#idle + 1] = e.task else out[#out + 1] = e.task end
+    end
+    for _, t in ipairs(idle) do out[#out + 1] = t end
     return out
 end
 local function Brain()
@@ -11047,6 +11069,7 @@ loop(1, function() Features.RollArtifactRestore() end)
 loop(0.5, function() Features.RaidBareWatch() end)
 loop(1, function() Features.RaidStateWatch() end)
 loop(2, function() Features.RaidPickerTick() end)
+loop(5, function() Features.DemonicTripWatch() end)
 loop(5, function()
     if Features.RaidPickerLabel then pcall(function() Features.RaidPickerLabel:Set(Features.RaidPickerStatus()) end) end
 end)
