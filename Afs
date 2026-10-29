@@ -4813,9 +4813,10 @@ function Features.Passive()
     local machine = F("PassiveMachine") or "Normal"
     if not Features.PassiveReady(machine, "passive") then return end
     if not Features.RollArtifact("passive") then task.wait(0.2) return end     -- Artifact of Dreams going on
-    local sent = {}
+    local sent, held = {}, 0
     for _, label in ipairs(pets) do
         local id = Data.PetId(label)
+        if Features.DemonicHeld and Features.DemonicHeld(id) then held = held + 1 continue end   -- the Demonic crafter needs its free slot
         for _, slotText in ipairs(slots) do
             local slot = tonumber(slotText) or 1
             local key = id .. "#" .. slot
@@ -4839,6 +4840,7 @@ function Features.Passive()
             end
         end
     end
+    if #sent == 0 and held > 0 then task.wait(0.5) return end
     if #sent == 0 then
         Flags.AutoPassive:Set(false)
         Util.Notify("All selected slots have a kept passive")
@@ -5168,6 +5170,8 @@ function Features.EventQuests()
             if Util.Every("eq-demonic-" .. label, 600) then
                 Combat.Log("eq", label .. ": slot " .. slot .. " holds a Demonic passive - not rerolled")
             end
+        elseif Features.DemonicHeld and Features.DemonicHeld(Data.PetId(label)) then
+            -- the Demonic crafter is about to park a Demonic passive in its free slot
         else
             Net.Call("RollPassive", Data.PetId(label), machine, slot, best[2])
         end
@@ -6143,6 +6147,26 @@ function Features.SlotHasDemonic(petId, slot)
     local key = raw and type(raw.Passives) == "table" and raw.Passives[tonumber(slot) or slot]
     return type(key) == "string" and DM.IsDemonicPassive(key) or false
 end
+-- rerolls (Auto Passive / Auto Lunar / Battle Pass) leave these fighters alone for a while: a craft
+-- frees a slot on its two Divine fighters, and that free slot is where the new Demonic passive is
+-- parked - a reroll of that empty slot filled it again ("The receiving fighter has no free passive
+-- slots", 29 Oct 22:03: parking "didn't work" and the Demonic passive stayed on the middle)
+DM.Hold = {}
+function Features.DemonicHeld(petId)
+    local t = DM.Hold[tostring(petId)]
+    return t ~= nil and os.clock() < t
+end
+function DM.HoldPets(list, secs)
+    for _, u in ipairs(list) do DM.Hold[tostring(u)] = os.clock() + (secs or 90) end
+end
+-- one log line each time the reason it waits changes
+function DM.Note(why)
+    DM.why = why
+    if DM.whyLogged ~= why then
+        DM.whyLogged = why
+        Combat.Log("demonic", "waiting: " .. tostring(why))
+    end
+end
 -- what to do now: { kind = "craft" | "park", ... } or nil + why not
 function DM.Plan()
     local P = DM.Pets()
@@ -6165,7 +6189,7 @@ function DM.Plan()
             local p1 = pas[1]
             if DM.IsDemonicPassive(p1.key) then
                 local to = DM.Destination(P, p1.key, midSet)
-                if to then return { kind = "park", from = u, to = to, what = p1.key } end
+                if to then DM.HoldPets({ to }, 30) return { kind = "park", from = u, to = to, what = p1.key } end
                 stuck = stuck or ("no Reroll fighter with a free slot for " .. DM.PassiveName(p1.key))
             else
                 stuck = stuck or ("the middle fighter has " .. DM.PassiveName(p1.key) .. " (not Demonic) - take it off first")
@@ -6202,6 +6226,7 @@ function DM.Plan()
                 if to.free > 0 then
                     for j = #list, i + 1, -1 do
                         if list[j].n <= to.free then
+                            DM.HoldPets({ to.uid }, 30)
                             return { kind = "park", from = list[j].uid, to = to.uid, what = k, pairUp = true }
                         end
                     end
@@ -6259,6 +6284,7 @@ local function fail(what, why)
 end
 function DM.Craft(p, trial)
     DM.lastActAt = os.clock()
+    DM.HoldPets({ p.left, p.right }, 90)
     local P = DM.Pets()
     local before = #DM.Passives(P[p.mid])
     DM.msg, DM.msgUntil = nil, os.clock() + 5
@@ -6288,13 +6314,14 @@ function DM.Park(p, trial)
     DM.msg, DM.msgUntil = nil, os.clock() + 5
     Net.Raw("TransferAllPassives", { tonumber(p.from) or p.from, tonumber(p.to) or p.to, n = 2 })
     local t0 = os.clock()
-    while os.clock() - t0 < 4 do
+    while os.clock() - t0 < (trial and 8 or 4) do
         task.wait(0.3)
         local Q = DM.Pets()
         if DM.HasKey(Q[p.to], p.what) and not DM.HasKey(Q[p.from], p.what) then
             DM.fails, DM.moved = 0, DM.moved + 1
             Combat.Log("demonic", string.format(p.pairUp and "paired %s: moved from %s next to the other one on %s" or "parked %s from %s on %s",
                 DM.PassiveName(p.what), DM.PetName(P[p.from]), DM.PetName(P[p.to])))
+            table.clear(DM.Hold)
             return true
         end
     end
@@ -6314,7 +6341,7 @@ function DM.Background()
     local plan, why = DM.Plan()
     DM.planReady = plan ~= nil
     if not plan then
-        DM.why = why
+        DM.Note(why)
         DM.idleUntil = os.clock() + 20
         return
     end
@@ -6326,9 +6353,16 @@ function DM.Background()
     local ok
     if plan.kind == "craft" then ok = DM.Craft(plan, here == nil) else ok = DM.Park(plan, here == nil) end
     if here == nil then
-        DM.Here[plan.kind] = ok and true or false
-        Combat.Log("demonic", ok and (kindName(plan.kind) .. " works from anywhere - no trip to the machine for it")
-            or (kindName(plan.kind) .. " didn't work from here (" .. Util.World() .. ") - doing it at the machine"))
+        local noSlot = not ok and type(DM.msg) == "string" and string.find(string.lower(DM.msg), "free passive slot", 1, true)
+        if noSlot then
+            -- the fighter it went to had no free slot (a reroll filled it): says nothing about where
+            -- it can be done - try again from here
+            Combat.Log("demonic", "parking: the game says '" .. DM.msg .. "' - trying again (rerolls now leave that fighter alone)")
+        else
+            DM.Here[plan.kind] = ok and true or false
+            Combat.Log("demonic", ok and (kindName(plan.kind) .. " works from anywhere - no trip to the machine for it")
+                or (kindName(plan.kind) .. " didn't work from here (" .. Util.World() .. (DM.msg and (", the game says '" .. DM.msg .. "'") or "") .. ") - doing it at the machine"))
+        end
     end
     closeWindows()
     DM.busy = false
@@ -6341,7 +6375,7 @@ function DM.Run()
     local plan, why = DM.Plan()
     DM.planReady = plan ~= nil
     if not plan then
-        DM.why = why
+        DM.Note(why)
         DM.idleUntil = os.clock() + 20
         return false
     end
@@ -8723,7 +8757,10 @@ BP.Run = {
         end
         local slot = tonumber(F("EQSlot") or "1") or 1
         for _, label in ipairs(pets) do
-            if not (Features.KeepDemonic("lunar") and Features.SlotHasDemonic(Data.PetId(label), slot)) then Net.Call("RollPassive", Data.PetId(label), "Normal", slot, false) end
+            if not (Features.KeepDemonic("lunar") and Features.SlotHasDemonic(Data.PetId(label), slot))
+               and not (Features.DemonicHeld and Features.DemonicHeld(Data.PetId(label))) then
+                Net.Call("RollPassive", Data.PetId(label), "Normal", slot, false)
+            end
         end
         task.wait(F("EQDelay") or 0.5)
         return true
