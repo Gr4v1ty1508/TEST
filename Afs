@@ -6361,8 +6361,9 @@ end
 -- no passive is used). Works -> done from anywhere from then on, in the background, without taking
 -- the character; doesn't -> the Brain task goes to the machine for it. (Per hub start.)
 -- kind ("craft" / "park") -> true = anywhere, false = at the machine, nil = not tried.
--- Parking (Passive Transfer) only works standing at the machine (Tawan, 29 Oct): always done there.
-DM.Here = { park = false }
+-- Both are tried from where you are first (Tawan, 30 Oct: "like before" - the trip that never
+-- happened was the Priority order, not the transfer); didn't work -> done at the machine.
+DM.Here, DM.HereAt = {}, {}
 local function kindName(k) return k == "craft" and "crafting" or "parking" end
 function DM.Background()
     if not On("AutoDemonic") or DM.busy then return end
@@ -6373,6 +6374,11 @@ function DM.Background()
         DM.Note(why)
         DM.idleUntil = os.clock() + 20
         return
+    end
+    -- "only at the machine" is tried again from where you are every 20 min (it may have been a
+    -- one-off: a full receiving fighter, a slow save)
+    if DM.Here[plan.kind] == false and DM.HereAt[plan.kind] and os.clock() - DM.HereAt[plan.kind] > 1200 then
+        DM.Here[plan.kind] = nil
     end
     local here, away = DM.Here[plan.kind], Util.World() ~= "MachineWorld"
     DM.why = plan.kind == "craft" and ("crafting " .. plan.recipe.name)
@@ -6389,6 +6395,7 @@ function DM.Background()
             Combat.Log("demonic", "parking: the game says '" .. DM.msg .. "' - trying again (rerolls now leave that fighter alone)")
         else
             DM.Here[plan.kind] = ok and true or false
+            DM.HereAt[plan.kind] = os.clock()
             Combat.Log("demonic", ok and (kindName(plan.kind) .. " works from anywhere - no trip to the machine for it")
                 or (kindName(plan.kind) .. " didn't work from here (" .. Util.World() .. (DM.msg and (", the game says '" .. DM.msg .. "'") or "") .. ") - doing it at the machine"))
         end
@@ -10083,8 +10090,8 @@ do
             .. "    one Divine passive from each of 2 fighters in Take Divines From -> the middle Demonic fighter.\n"
             .. "[-] Each new Demonic passive is then parked on a Take Divines From (Reroll) fighter with a free slot\n"
             .. "    (Passive Transfer, uses tokens) - you move it to your main fighter yourself. Main fighters are never touched.\n"
-            .. "[-] Crafting is tried from where you are first (done from anywhere if the game takes it);\n"
-            .. "    parking only works at the machine, so the hub goes to Machine World for it.\n"
+            .. "[-] The first craft / park is tried from where you are: if the game takes it, it's done from anywhere\n"
+            .. "    (in the background, no trip); if not, the hub goes to the machine for it.\n"
             .. "[-] Auto Lunar / Auto Passive / Battle Pass rerolls skip a slot that holds a Demonic passive,\n"
             .. "    unless that card's \"Reroll Over Demonic Passives\" is on - then fighters rerolled there are only\n"
             .. "    used for parking when no other has room, and the status says to move it soon." })
