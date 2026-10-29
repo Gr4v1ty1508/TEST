@@ -3510,6 +3510,12 @@ function Features.RaidPickerTick()
     local RP, now = Features.RaidPick, os.clock()
     if not On("AutoRaidPicker") then RP.why = "off" return end
     if Util.World() == "Raid" then RP.why = "in a raid" return end
+    local busyWorld = ({ Tower = true, Dungeon = true, GatesMode = true, InfinityTower = true, GlobalBoss = true, Titan = true })[Util.World()]
+    local busyTask = ({ Trial = true, Dungeon = true, Gate = true, Infinity = true, Defense = true, GlobalBoss = true })[tostring(Features.BrainOwner)]
+    if not RP.at and (busyWorld or busyTask) then
+        RP.why = "busy (" .. tostring(busyTask and Features.BrainOwner or Util.World()) .. ") - after that"
+        return
+    end
     local have = Features.RaidPickersLeft()
     if RP.at then
         if not RP.taken then
@@ -7038,7 +7044,8 @@ end
 -- spawn). "Take Pets Off Until Mobs Spawn": right after arriving in the raid (before any mob),
 -- every pet goes off; once the first mobs have been there 2 s, the Raid team (or the same pets)
 -- goes back on. Nothing else puts pets on in between (team swaps / no-pets fixes wait).
--- Back on anyway after 3 min, when you leave the raid, or when the toggle is turned off. Works in a
+-- Back on anyway when the raid runs and no mobs came for 60 s (12 min at most before it starts),
+-- when you leave the raid, or when the toggle is turned off. Works in a
 -- raid you went to yourself too (Auto Raid off).
 Features.RaidBare, Features.RaidVisit = nil, nil
 function Features.RaidBossMax()
@@ -7090,7 +7097,17 @@ function Features.RaidHold()
             -- the first wave spawned scaled to no pets: 2 s for the rest of it, then pets on
             if now - RB.mobsAt >= 2 then Features.RaidPetsBack("raid mobs spawned with no pets on") return false end
         end
-        if now - RB.since > 180 then Features.RaidPetsBack("no raid mobs after 3 min") return false end
+        -- (log 29 Oct 16:41: a natural raid joined with 9 min of countdown left - the pets went back
+        -- on after 3 min, the raid started at 16:49:59 with them on and took 19 min. Now: off for as
+        -- long as the raid hasn't started (Worlds.Raid.Running), 60 s once it runs, 12 min at most)
+        local running = false
+        pcall(function() running = Worlds.Raid.Running.Value == true end)
+        if running then
+            RB.runAt = RB.runAt or now
+            if now - RB.runAt > 60 then Features.RaidPetsBack("the raid runs but no mobs for 60 s") return false end
+        elseif now - RB.since > 720 then
+            Features.RaidPetsBack("the raid didn't start in 12 min") return false
+        end
         return true
     end
     if mobs > 0 then V.sawMobs = true end
