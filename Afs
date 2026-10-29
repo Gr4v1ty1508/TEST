@@ -3327,6 +3327,7 @@ function Features.Raid()
         -- 15:01:00 and it was joined at 15:01:01) - other things meanwhile
         if openHow == "coming" then
             Features.RaidNote("raid coming in " .. Data.WorldDisplay(active) .. " - waiting for its beacon")
+            if Features.DemonicWantsTrip and Features.DemonicWantsTrip() then return false end   -- park first
             return picked == true          -- ours (Raid Picker): stay put, it opens in a few seconds
         end
         if Features.RaidJoinTarget ~= active then Features.RaidJoinTarget, Features.RaidJoinFails = active, 0 end
@@ -3395,6 +3396,7 @@ function Features.Raid()
     local RP = Features.RaidPick
     if not active and On("AutoRaidPicker") and RP and RP.at and os.clock() - RP.at < 30 then
         Features.RaidNote("waiting for the raid the Raid Picker called")
+        if Features.DemonicWantsTrip and Features.DemonicWantsTrip() then return false end   -- park first
         return true
     end
     return false
@@ -6159,6 +6161,12 @@ end
 function DM.HoldPets(list, secs)
     for _, u in ipairs(list) do DM.Hold[tostring(u)] = os.clock() + (secs or 90) end
 end
+-- a Demonic passive on the middle waits to be parked (at the machine): Auto Raid lets the character
+-- go for it while it only waits for a raid to open (else the Raid Picker loop never left a gap)
+function Features.DemonicWantsTrip()
+    return On("AutoDemonic") and DM.Here.park == false and DM.parkPlanAt ~= nil and os.clock() - DM.parkPlanAt < 10
+        and os.clock() >= DM.failUntil and not DM.busy
+end
 -- one log line each time the reason it waits changes
 function DM.Note(why)
     DM.why = why
@@ -6189,7 +6197,11 @@ function DM.Plan()
             local p1 = pas[1]
             if DM.IsDemonicPassive(p1.key) then
                 local to = DM.Destination(P, p1.key, midSet)
-                if to then DM.HoldPets({ to }, 30) return { kind = "park", from = u, to = to, what = p1.key } end
+                if to then
+                    DM.HoldPets({ to }, 30)
+                    DM.parkPlanAt = os.clock()
+                    return { kind = "park", from = u, to = to, what = p1.key }
+                end
                 stuck = stuck or ("no Reroll fighter with a free slot for " .. DM.PassiveName(p1.key))
             else
                 stuck = stuck or ("the middle fighter has " .. DM.PassiveName(p1.key) .. " (not Demonic) - take it off first")
@@ -6333,7 +6345,9 @@ end
 -- tried from wherever you are (a try that doesn't work costs nothing: the save shows nothing changed,
 -- no passive is used). Works -> done from anywhere from then on, in the background, without taking
 -- the character; doesn't -> the Brain task goes to the machine for it. (Per hub start.)
-DM.Here = {}          -- kind ("craft" / "park") -> true = anywhere, false = at the machine, nil = not tried
+-- kind ("craft" / "park") -> true = anywhere, false = at the machine, nil = not tried.
+-- Parking (Passive Transfer) only works standing at the machine (Tawan, 29 Oct): always done there.
+DM.Here = { park = false }
 local function kindName(k) return k == "craft" and "crafting" or "parking" end
 function DM.Background()
     if not On("AutoDemonic") or DM.busy then return end
@@ -10047,8 +10061,8 @@ do
             .. "    one Divine passive from each of 2 fighters in Take Divines From -> the middle Demonic fighter.\n"
             .. "[-] Each new Demonic passive is then parked on a Take Divines From (Reroll) fighter with a free slot\n"
             .. "    (Passive Transfer, uses tokens) - you move it to your main fighter yourself. Main fighters are never touched.\n"
-            .. "[-] The first craft / park is tried from where you are: if the game takes it, it's done from anywhere\n"
-            .. "    (in the background, no trip); if not, the hub goes to the machine for it.\n"
+            .. "[-] Crafting is tried from where you are first (done from anywhere if the game takes it);\n"
+            .. "    parking only works at the machine, so the hub goes to Machine World for it.\n"
             .. "[-] Auto Lunar / Auto Passive / Battle Pass rerolls skip a slot that holds a Demonic passive,\n"
             .. "    unless that card's \"Reroll Over Demonic Passives\" is on - then fighters rerolled there are only\n"
             .. "    used for parking when no other has room, and the status says to move it soon." })
