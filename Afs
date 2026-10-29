@@ -2408,8 +2408,10 @@ local function pressMount()
     local b = frame and frame:FindFirstChildWhichIsA("GuiButton", true)
     if b then fireGui(b, { "MouseButton1Down", "MouseButton1Click", "Activated" }) end
 end
+Features.PressMount = pressMount
 function Features.Mount()
     if not On("AutoMount") or os.clock() < mountBlockUntil then return end
+    if Features.MountHoldUntil and os.clock() < Features.MountHoldUntil then return end
     if Features.IsMounted() == true then return end
     local now = os.clock()
     if now - lastMountCall < 1.5 then return end          -- wait for the game to answer the last press
@@ -3325,15 +3327,23 @@ function Features.Raid()
         -- 15:01:00 and it was joined at 15:01:01) - other things meanwhile
         if openHow == "coming" then
             Features.RaidNote("raid coming in " .. Data.WorldDisplay(active) .. " - waiting for its beacon")
-            return false
+            return picked == true          -- ours (Raid Picker): stay put, it opens in a few seconds
         end
         if Features.RaidJoinTarget ~= active then Features.RaidJoinTarget, Features.RaidJoinFails = active, 0 end
         -- not right after a travel (a travel just before it may be why the game said no), then one
         -- try every 4 s - holding the character meanwhile
         local lastTravel = math.max(Features.WorldChangedAt or -99, Features.LastTravelAt or -99)
-        if now - lastTravel < 8 then return true end
+        if now - lastTravel < 10 then return true end
         if not Util.Every("raid-join", 4) then return true end
-        local res = Net.Call("JoinRaid", active, mode)
+        -- the game's own "join raid" does SetMounted(false) first, then AttemptTravel("Raid", nil, nil)
+        -- (record 27 Oct) - the same here, and no auto mount until we're in
+        Features.MountHoldUntil = now + 8
+        if Features.IsMounted and Features.IsMounted() == true and Features.PressMount then
+            Features.PressMount()                       -- the mount button: off (the game sends SetMounted(false))
+            task.wait(0.6)
+        end
+        Features.RaidMsgUntil = os.clock() + 3
+        local res = Net.Raw("AttemptTravel", { "Raid", nil, nil, n = 3 })
         Features.RaidJoinWorld = active
         -- AttemptTravel answers with where to go (like the gates): go there, the game's client
         -- only moves you when its own button sent it
@@ -3380,6 +3390,13 @@ function Features.Raid()
     if active and not (worldOk and modeOk) then
         Features.RaidNote(string.format("raid open in %s (%s) - not in Select Raid World / Mode", Data.WorldDisplay(active), tostring(mode)))
     end
+    -- our Raid Picker was just used and its raid isn't open yet: stay put (no Time Chamber trip
+    -- right before the join - logs 29 Oct: the joins that failed came after one)
+    local RP = Features.RaidPick
+    if not active and On("AutoRaidPicker") and RP and RP.at and os.clock() - RP.at < 30 then
+        Features.RaidNote("waiting for the raid the Raid Picker called")
+        return true
+    end
     return false
 end
 -- into the raid: AttemptTravel said where (the game's own button moves you there itself; ours
@@ -3387,6 +3404,7 @@ end
 -- stand there, tell the game's client we teleported, call the pets.
 function Features.RaidEnter(pos)
     Features.RaidJoinPos = pos
+    Features.MountHoldUntil = os.clock() + 4
     local done = false
     task.spawn(function() pcall(function() LP:RequestStreamAroundAsync(pos) end) done = true end)
     local t0 = os.clock()
@@ -3505,6 +3523,9 @@ function Features.RaidPickerTick()
                 Features.RaidNote(RP.fails >= 5 and "Raid Picker: the game didn't take it 5 times - trying again in 10 min"
                     or "Raid Picker: the game didn't take it (a raid going on?) - trying again in 30 s")
                 if RP.fails >= 5 then RP.fails = 0 end
+                return
+            else
+                RP.why = "used - waiting for the game to take it"
                 return
             end
         end
@@ -10493,7 +10514,8 @@ Net.Listen("SendSubtleMessage", function(msg)
 end)
 for _, rn in ipairs({ "SendMessage", "SendSubtleMessage" }) do
     Net.Listen(rn, function(...)
-        if Features.SummonMsgUntil and os.clock() < Features.SummonMsgUntil then
+        local raidMsg = Features.RaidMsgUntil and os.clock() < Features.RaidMsgUntil
+        if (Features.SummonMsgUntil and os.clock() < Features.SummonMsgUntil) or raidMsg then
             local parts = {}
             for i = 1, select("#", ...) do
                 local v = select(i, ...)
@@ -10503,7 +10525,7 @@ for _, rn in ipairs({ "SendMessage", "SendSubtleMessage" }) do
                 end
                 parts[#parts + 1] = tostring(v)
             end
-            Combat.Log("dungeon", "the game says (" .. rn .. "): " .. string.sub(table.concat(parts, " | "), 1, 240))
+            Combat.Log(raidMsg and "raid" or "dungeon", "the game says (" .. rn .. "): " .. string.sub(table.concat(parts, " | "), 1, 240))
         end
     end)
 end
