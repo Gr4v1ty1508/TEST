@@ -3308,11 +3308,6 @@ function Features.Raid()
     end
     if active and worldOk and modeOk then
         local now = os.clock()
-        -- only coming (Raid Picker countdown): nothing to join yet - other things meanwhile
-        if openHow == "coming" then
-            Features.RaidNote("raid coming in " .. Data.WorldDisplay(active) .. " - waiting for it to open")
-            return false
-        end
         -- the raid we just did is still open: don't go back in (and no Raid Picker - one raid at a time)
         local done = Features.RaidDone
         if done and done.world == active and now - done.at < 900 then
@@ -3330,9 +3325,9 @@ function Features.Raid()
         -- only moves you when its own button sent it
         if typeof(res) == "Vector3" then
             Features.RaidJoinFails = 0
-            Util.MoveTo(CFrame.new(res + Vector3.new(0, 4, 0)))
-            Combat.Log("raid", string.format("joining the raid in %s (%s)", Data.WorldDisplay(active), tostring(mode)))
-            task.delay(0.5, function() pcall(Features.PetsFollow) end)
+            Combat.Log("raid", string.format("joining the raid in %s (%s, %s) - going in to wait",
+                Data.WorldDisplay(active), tostring(mode), tostring(openHow)))
+            Features.RaidEnter(res)
             return true
         end
         Features.RaidJoinFails = (Features.RaidJoinFails or 0) + 1
@@ -3365,12 +3360,24 @@ function Features.Raid()
         end
         return true
     end
-    -- nothing to join: call one with a Raid Picker (when no raid is open or coming anywhere)
     if active and not (worldOk and modeOk) then
         Features.RaidNote(string.format("raid open in %s (%s) - not in Select Raid World / Mode", Data.WorldDisplay(active), tostring(mode)))
     end
-    pcall(Features.UseRaidPicker)
     return false
+end
+-- into the raid: AttemptTravel said where (the game's own button moves you there itself; ours
+-- doesn't). Load that area first (it's far away and not loaded - you fell through before), then
+-- stand there, tell the game's client we teleported, call the pets.
+function Features.RaidEnter(pos)
+    Features.RaidJoinPos = pos
+    local done = false
+    task.spawn(function() pcall(function() LP:RequestStreamAroundAsync(pos) end) done = true end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < 3 do task.wait(0.1) end
+    Util.MoveTo(CFrame.new(pos + Vector3.new(0, 4, 0)))
+    local tp = Bindables:FindFirstChild("Teleported")
+    if tp and tp:IsA("BindableEvent") then pcall(tp.Fire, tp) end
+    task.delay(0.5, function() pcall(Features.PetsFollow) end)
 end
 -- one log line each time the reason Auto Raid / the Raid Picker waits changes
 function Features.RaidNote(why)
@@ -3387,13 +3394,25 @@ end
 -- whatever world / mode is picked above. One at a time: the next only after that raid (or 150 s).
 -- Not taken 3 times (the count in the save didn't drop) -> 10 min pause.
 Features.RaidPick = { at = nil, fails = 0, pauseUntil = 0 }
+-- the raid to go for: the one our Raid Picker called first, then one that's coming (@RaidRumble),
+-- then an open beacon (@Active - may be a stale one at the last raid's world). Raids we just did /
+-- that refused us are skipped. Returns world, "open" / "coming"
 function Features.RaidOpenWorld()
+    local now = os.clock()
+    local D, R, P = Features.RaidDone, Features.RaidRefused, Features.RaidPicked
+    local best, bestHow, bestRank
     for _, f in ipairs(Worlds:GetChildren()) do
         local b = f:FindFirstChild("RaidBeacon")
-        if b and b:GetAttribute("Active") == true then return f.Name, "open" end
-        if f:GetAttribute("RaidRumble") == true then return f.Name, "coming" end
+        local how = (f:GetAttribute("RaidRumble") == true and "coming") or (b and b:GetAttribute("Active") == true and "open") or nil
+        if how then
+            local skip = (D and D.world == f.Name and now - D.at < 900) or (R and R.world == f.Name and now < R.untilT)
+            if not skip then
+                local rank = (P and P.world == f.Name and 1) or (how == "coming" and 2) or 3
+                if not bestRank or rank < bestRank then best, bestHow, bestRank = f.Name, how, rank end
+            end
+        end
     end
-    return nil
+    return best, bestHow
 end
 -- the game's own list of worlds a Raid Picker can call (RaidPicker.Worlds() / IsValidWorld) - used
 -- only to shorten the dropdown, and only when it clearly works (28 Oct: IsValidWorld said no to
@@ -3443,60 +3462,84 @@ function Features.RaidPickersLeft()
     local items = type(st) == "table" and st.Items
     return type(items) == "table" and (tonumber(items.RaidPicker) or 0) or nil
 end
-function Features.UseRaidPicker()
-    if not On("RaidPicker") or Util.World() == "Raid" then return false end
+-- AUTO RAID PICKER (its own toggle; asked 29 Oct: separate from Auto Raid). Every 2 s:
+--   * a Raid Picker of ours is pending (used, its raid not done yet) -> wait: done when we were in
+--     that raid and left it after it was over, or 9 min after (60 s countdown + 8 min raid)
+--   * the game didn't take it (count in the save didn't drop in 15 s - a raid going on?) -> 30 s
+--   * another raid is coming somewhere (world @RaidRumble, 3 min at most) -> wait
+--   * in a raid -> wait
+-- RaidBeacon @Active is NOT used here: it may stay on at the last raid's world (dump 25 Oct: JJK
+-- beacon on + CurrentWorld JJK while nothing was running).
+Features.RaidPick = { at = nil, fails = 0, pauseUntil = 0 }
+function Features.RaidPickerTick()
     local RP, now = Features.RaidPick, os.clock()
+    if not On("AutoRaidPicker") then RP.why = "off" return end
+    if Util.World() == "Raid" then RP.why = "in a raid" return end
     local have = Features.RaidPickersLeft()
-    local openW = Features.RaidOpenWorld()
     if RP.at then
-        -- did the game take it? (one fewer in the save, or the raid is coming)
-        if not RP.taken and ((have and RP.before and have < RP.before) or openW) then
-            RP.taken, RP.fails = true, 0
-        end
-        if not RP.taken and now - RP.at > 12 then
-            RP.at, RP.fails = nil, RP.fails + 1
-            if RP.fails >= 3 then
-                RP.fails, RP.pauseUntil = 0, now + 600
-                Combat.Log("raid", "Raid Picker: the game didn't take it 3 times - trying again in 10 min")
+        if not RP.taken then
+            local rum = RP.world and Worlds:FindFirstChild(RP.world)
+            local coming = rum and rum:GetAttribute("RaidRumble") == true
+            if (have and RP.before and have < RP.before) or coming then
+                RP.taken, RP.fails = true, 0
+            elseif now - RP.at > 15 then
+                RP.at, RP.fails = nil, RP.fails + 1
+                RP.pauseUntil = now + (RP.fails >= 5 and 600 or 30)
+                Features.RaidNote(RP.fails >= 5 and "Raid Picker: the game didn't take it 5 times - trying again in 10 min"
+                    or "Raid Picker: the game didn't take it (a raid going on?) - trying again in 30 s")
+                if RP.fails >= 5 then RP.fails = 0 end
+                return
             end
-            return false
         end
-        if openW or now - RP.at < 150 then return false end    -- its raid is coming / on
-        RP.at = nil                                             -- 150 s and no raid: the next one may go
+        if RP.taken then
+            local doneIt = Features.RaidLeftAt and Features.RaidLeftAt > RP.at
+            if not doneIt and now - RP.at < 540 then
+                RP.why = string.format("waiting for its raid in %s (%.0f s ago)", Data.WorldDisplay(RP.world or "?"), now - RP.at)
+                return
+            end
+            Features.RaidNote(doneIt and "Raid Picker: its raid is done - calling the next one"
+                or "Raid Picker: 9 min since the last one - calling the next one")
+            RP.at = nil
+        end
     end
-    if openW then
-        Features.RaidNote("Raid Picker waits: a raid is " .. tostring(select(2, Features.RaidOpenWorld())) .. " in " .. Data.WorldDisplay(openW) .. " (one raid at a time)")
-        return false
+    if now < RP.pauseUntil then RP.why = "paused" return end
+    -- someone else's raid is coming (3 min at most per rumble)
+    for _, f in ipairs(Worlds:GetChildren()) do
+        if f:GetAttribute("RaidRumble") == true then
+            RP.rumbleSince = RP.rumbleSince or now
+            if now - RP.rumbleSince < 180 then
+                RP.why = "a raid is coming in " .. Data.WorldDisplay(f.Name)
+                return
+            end
+            break
+        end
     end
-    if now < RP.pauseUntil then return false end
+    RP.rumbleSince = nil
     if have == 0 then
+        RP.why = "none left"
         if Util.Every("raidpick-none", 600) then Combat.Log("raid", "Raid Picker: none left") end
-        return false
+        return
     end
     local world = Features.RaidPickerWorld()
-    if not world then
-        if Util.Every("raidpick-world", 600) then Combat.Log("raid", "Raid Picker: pick a world in Raid Picker World (or Select Raid World)") end
-        return false
-    end
+    if not world then RP.why = "pick a world" return end
     Net.Raw("UseItem", { "RaidPicker", world, n = 2 })
     RP.at, RP.before, RP.taken, RP.world = now, have, false, world
     Features.RaidPicked = { world = world, at = now }
+    RP.why = "used"
     Combat.Log("raid", string.format("Raid Picker used on %s (%s) - %s left, the raid comes in about %d s",
         Data.WorldDisplay(world), world, have and tostring(have - 1) or "?",
         tonumber((Data.Module("RaidPicker") or {}).COUNTDOWN) or 60))
-    return true
 end
 function Features.RaidPickerStatus()
     local RP = Features.RaidPick
     local have = Features.RaidPickersLeft()
     local w, from = Features.RaidPickerWorld()
-    local openW, how = Features.RaidOpenWorld()
     local L = { string.format("Raid Picker : %s left | world %s", have and tostring(have) or "?",
         w and (Data.WorldDisplay(w) .. (from ~= "picked" and (" (" .. from .. ")") or "")) or "(pick one)") }
-    if openW then L[#L + 1] = "Raid " .. how .. " : " .. Data.WorldDisplay(openW)
-    elseif RP.at then L[#L + 1] = string.format("Used %.0f s ago on %s - waiting for its raid", os.clock() - RP.at, Data.WorldDisplay(RP.world or "?"))
-    elseif os.clock() < RP.pauseUntil then L[#L + 1] = string.format("Paused %.0f min (the game didn't take it)", (RP.pauseUntil - os.clock()) / 60)
-    else L[#L + 1] = On("RaidPicker") and "No raid open - used when Auto Raid has nothing to join" or "Off" end
+    if not On("AutoRaidPicker") then L[#L + 1] = "Off"
+    elseif os.clock() < RP.pauseUntil then L[#L + 1] = string.format("Waiting %.0f s (the game didn't take it)", RP.pauseUntil - os.clock())
+    else L[#L + 1] = "Now : " .. tostring(RP.why or "-") end
+    if Features.RaidPicked and not On("AutoRaid") then L[#L + 1] = "(Auto Raid is off - nobody goes in)" end
     return table.concat(L, "\n")
 end
 
@@ -7028,6 +7071,7 @@ function Features.RaidBareWatch()
             local w = Features.RaidJoinWorld or (Features.RaidPicked and Features.RaidPicked.world)
             local over = V.over or (Features.RaidEndedAt and Features.RaidEndedAt > V.at)
             if w and over then Features.RaidDone = { world = w, at = os.clock() } end
+            if over then Features.RaidLeftAt = os.clock() end
             Combat.Log("raid", string.format("left the raid (%s) after %.0f s%s", w and Data.WorldDisplay(w) or "?", os.clock() - V.at,
                 over and "" or " - it wasn't over"))
             Features.RaidJoinWorld = nil
@@ -7035,8 +7079,8 @@ function Features.RaidBareWatch()
         -- a raid we called with the Raid Picker is over once we've been in and left (or after 10 min)
         if Features.RaidPicked and (Features.RaidVisit or os.clock() - Features.RaidPicked.at > 600) then
             Features.RaidPicked = nil
-            if Features.RaidPick then Features.RaidPick.at = nil end
         end
+        Features.RaidJoinPos = nil
         Features.RaidVisit = nil
         if Features.RaidBare then Features.RaidPetsBack("left the raid") end
         return
@@ -7044,6 +7088,23 @@ function Features.RaidBareWatch()
     -- in the raid: arrival time / mobs seen, for every raid (also with the toggle off)
     if not Features.RaidVisit then Features.RaidVisit = { at = os.clock(), sawMobs = false } end
     if not Features.RaidBare and #Combat.List("Raid") > 0 then Features.RaidVisit.sawMobs = true end
+    -- before the first mobs: be IN the raid area to wait (the world said Raid while you were still
+    -- standing in the old world - nobody moved you there)
+    if not Features.RaidVisit.sawMobs and #Combat.List("Raid") == 0 and Util.Every("raid-stay-in", 3) then
+        local root = Util.Root()
+        local target = Features.RaidJoinPos
+        if not target then
+            local cf = Travel.SpawnCFrame("Raid")
+            target = cf and cf.Position
+        end
+        if root and target and (root.Position - target).Magnitude > 250 then
+            if not Features.RaidVisit.movedIn then
+                Combat.Log("raid", string.format("in the raid but %.0f studs away from it - going in to wait", (root.Position - target).Magnitude))
+            end
+            Features.RaidVisit.movedIn = true
+            Features.RaidEnter(target)
+        end
+    end
     if not On("RaidBare") then
         if Features.RaidBare then Features.RaidPetsBack("Take Pets Off Until Mobs Spawn turned off") end
         return
@@ -9724,11 +9785,18 @@ do
     r:Dropdown({ Title = "Select Target Mobs", Items = CFG.TargetModes, Default = "Nearest", Required = true, Flag = "RaidTarget" })
     -- raid mobs are made as strong as your pets when they spawn: no pets on then = easy mobs
     r:Toggle({ Title = "Take Pets Off Until Mobs Spawn", Default = true, Flag = "RaidBare" })
-    -- no raid open anywhere: call one with a Raid Picker (item from dungeon chests, max 100)
-    r:Toggle({ Title = "Use Raid Picker When No Raid", Default = true, Flag = "RaidPicker" })
-    local rpw = r:Dropdown({ Title = "Raid Picker World", Items = Data.RaidPickerLabels(), Flag = "RaidPickerWorld" })
-    Features.RaidPickerLabel = r:Paragraph({ Body = "Raid Picker : -" })
     r:Toggle({ Title = "Auto Raid", Flag = "AutoRaid" })
+
+    -- Raid Picker (item from dungeon chests, max 100): calls a raid in the world you pick, the next
+    -- one once that raid is done. Auto Raid (above) is what goes in and fights it.
+    local rp = TRaid:Card("Auto Raid Picker !", "Left")
+    rp:Paragraph({ Body = "[-] Uses a Raid Picker to call a raid in the picked world, one at a time:\n"
+        .. "    the next once that raid is done (9 min at most).\n"
+        .. "[-] Turn on Auto Raid too - that's what goes in and fights it\n"
+        .. "    (the raid it calls is joined whatever Raid World / Mode is picked there)." })
+    local rpw = rp:Dropdown({ Title = "Raid Picker World", Items = Data.RaidPickerLabels(), Flag = "RaidPickerWorld" })
+    Features.RaidPickerLabel = rp:Paragraph({ Body = "Raid Picker : -" })
+    rp:Toggle({ Title = "Auto Raid Picker", Flag = "AutoRaidPicker" })
 
     local m = TRaid:Card("Auto Meteor / Fallen Star !", "Left")
     local mw = m:Dropdown({ Title = "Select World", Items = Data.FarmWorldLabels(), Multi = true, Flag = "MeteorWorlds" })
@@ -10848,6 +10916,7 @@ loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
 loop(1, function() Features.RollArtifactRestore() end)
 loop(0.5, function() Features.RaidBareWatch() end)
 loop(1, function() Features.RaidStateWatch() end)
+loop(2, function() Features.RaidPickerTick() end)
 loop(5, function()
     if Features.RaidPickerLabel then pcall(function() Features.RaidPickerLabel:Set(Features.RaidPickerStatus()) end) end
 end)
