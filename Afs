@@ -3295,7 +3295,7 @@ function Features.Raid()
     end)
     -- RaidData.CurrentWorld may still name the last raid: only a raid that's open (RaidBeacon
     -- @Active) or coming (world @RaidRumble) counts, in the world where it is
-    local openW = Features.RaidOpenWorld()
+    local openW, openHow = Features.RaidOpenWorld()
     if not openW then active = nil elseif active ~= openW then active = openW end
     local worlds, modes = worldsFrom("RaidWorlds"), F("RaidModes") or {}
     local picked = Features.RaidPicked and Features.RaidPicked.world == active
@@ -3307,7 +3307,42 @@ function Features.Raid()
         end
     end
     if active and worldOk and modeOk then
-        Net.Call("JoinRaid", active, mode)
+        local now = os.clock()
+        -- only coming (Raid Picker countdown): nothing to join yet - other things meanwhile
+        if openHow == "coming" then
+            Features.RaidNote("raid coming in " .. Data.WorldDisplay(active) .. " - waiting for it to open")
+            return false
+        end
+        -- the raid we just did is still open: don't go back in (and no Raid Picker - one raid at a time)
+        local done = Features.RaidDone
+        if done and done.world == active and now - done.at < 900 then
+            Features.RaidNote("the raid in " .. Data.WorldDisplay(active) .. " we just did is still open - waiting for it to close")
+            return false
+        end
+        local ref = Features.RaidRefused
+        if ref and ref.world == active and now < ref.untilT then
+            Features.RaidNote("the game didn't let us into the raid in " .. Data.WorldDisplay(active) .. " - waiting for it to close")
+            return false
+        end
+        local res = Net.Call("JoinRaid", active, mode)
+        Features.RaidJoinWorld = active
+        -- AttemptTravel answers with where to go (like the gates): go there, the game's client
+        -- only moves you when its own button sent it
+        if typeof(res) == "Vector3" then
+            Features.RaidJoinFails = 0
+            Util.MoveTo(CFrame.new(res + Vector3.new(0, 4, 0)))
+            Combat.Log("raid", string.format("joining the raid in %s (%s)", Data.WorldDisplay(active), tostring(mode)))
+            task.delay(0.5, function() pcall(Features.PetsFollow) end)
+            return true
+        end
+        Features.RaidJoinFails = (Features.RaidJoinFails or 0) + 1
+        if Features.RaidJoinFails >= 4 then
+            Features.RaidJoinFails = 0
+            Features.RaidRefused = { world = active, untilT = now + 600 }
+            Combat.Log("raid", string.format("the game didn't let us into the raid in %s 4 times (answer %s) - not trying it again until it closes (10 min at most)",
+                Data.WorldDisplay(active), tostring(res)))
+            return false
+        end
         task.wait(1.5)
         -- still outside: walk into the active world's raid beacon like a player
         if Util.World() ~= "Raid" then
@@ -3331,8 +3366,19 @@ function Features.Raid()
         return true
     end
     -- nothing to join: call one with a Raid Picker (when no raid is open or coming anywhere)
+    if active and not (worldOk and modeOk) then
+        Features.RaidNote(string.format("raid open in %s (%s) - not in Select Raid World / Mode", Data.WorldDisplay(active), tostring(mode)))
+    end
     pcall(Features.UseRaidPicker)
     return false
+end
+-- one log line each time the reason Auto Raid / the Raid Picker waits changes
+function Features.RaidNote(why)
+    Features.RaidWhy = why
+    if Features.RaidWhyLogged ~= why then
+        Features.RaidWhyLogged = why
+        Combat.Log("raid", why)
+    end
 end
 
 -- RAID PICKER (recorded 27 Oct): UseItem("RaidPicker", <world key>) -> "a raid is coming to
@@ -3418,7 +3464,11 @@ function Features.UseRaidPicker()
         if openW or now - RP.at < 150 then return false end    -- its raid is coming / on
         RP.at = nil                                             -- 150 s and no raid: the next one may go
     end
-    if openW or now < RP.pauseUntil then return false end
+    if openW then
+        Features.RaidNote("Raid Picker waits: a raid is " .. tostring(select(2, Features.RaidOpenWorld())) .. " in " .. Data.WorldDisplay(openW) .. " (one raid at a time)")
+        return false
+    end
+    if now < RP.pauseUntil then return false end
     if have == 0 then
         if Util.Every("raidpick-none", 600) then Combat.Log("raid", "Raid Picker: none left") end
         return false
@@ -6971,6 +7021,17 @@ end
 -- arriving, back on once the mobs spawned / you left / the toggle is turned off / 3 min passed
 function Features.RaidBareWatch()
     if Util.World() ~= "Raid" then
+        -- left a raid that was over: that raid is done (its beacon may stay on a while - we don't go
+        -- back in). Left in the middle of it (a dungeon came first...): it may be joined again.
+        local V = Features.RaidVisit
+        if V then
+            local w = Features.RaidJoinWorld or (Features.RaidPicked and Features.RaidPicked.world)
+            local over = V.over or (Features.RaidEndedAt and Features.RaidEndedAt > V.at)
+            if w and over then Features.RaidDone = { world = w, at = os.clock() } end
+            Combat.Log("raid", string.format("left the raid (%s) after %.0f s%s", w and Data.WorldDisplay(w) or "?", os.clock() - V.at,
+                over and "" or " - it wasn't over"))
+            Features.RaidJoinWorld = nil
+        end
         -- a raid we called with the Raid Picker is over once we've been in and left (or after 10 min)
         if Features.RaidPicked and (Features.RaidVisit or os.clock() - Features.RaidPicked.at > 600) then
             Features.RaidPicked = nil
@@ -6980,11 +7041,79 @@ function Features.RaidBareWatch()
         if Features.RaidBare then Features.RaidPetsBack("left the raid") end
         return
     end
+    -- in the raid: arrival time / mobs seen, for every raid (also with the toggle off)
+    if not Features.RaidVisit then Features.RaidVisit = { at = os.clock(), sawMobs = false } end
+    if not Features.RaidBare and #Combat.List("Raid") > 0 then Features.RaidVisit.sawMobs = true end
     if not On("RaidBare") then
         if Features.RaidBare then Features.RaidPetsBack("Take Pets Off Until Mobs Spawn turned off") end
         return
     end
     Features.RaidHold()
+end
+-- the raid is over: the game said so (EndRaid / RaidResults), or its mobs were there and there
+-- have been none for 45 s. Then the results are confirmed and we go back to the farm world
+-- (before, the hub stayed in the empty raid with nothing to hit and never called the next one).
+function Features.RaidOver()
+    local V = Features.RaidVisit
+    if not V then return false end
+    local now = os.clock()
+    if Features.RaidEndedAt and Features.RaidEndedAt > V.at then return "the game ended the raid" end
+    if V.sawMobs and not Features.RaidBare then
+        if #Combat.List("Raid") == 0 then
+            V.emptySince = V.emptySince or now
+            if now - V.emptySince > 45 then return "no raid mobs for 45 s" end
+        else
+            V.emptySince = nil
+        end
+    end
+    return false
+end
+-- the game's raid messages (names from the remote list; what they carry goes to the log once)
+for _, rn in ipairs({ "EndRaid", "RaidResults" }) do
+    Net.Listen(rn, function(...)
+        Features.RaidEndedAt = os.clock()
+        local parts = {}
+        for i = 1, math.min(select("#", ...), 4) do
+            local v = select(i, ...)
+            if type(v) == "table" then
+                local ok, j = pcall(HttpService.JSONEncode, HttpService, v)
+                v = ok and j or "table"
+            end
+            parts[#parts + 1] = tostring(v)
+        end
+        Combat.Log("raid", "the game says " .. rn .. ": " .. string.sub(table.concat(parts, " | "), 1, 200))
+    end)
+end
+-- raid state changes -> log (which worlds' beacons are on / rumbling, RaidData Running /
+-- CurrentWorld): to see what the game does before / after a raid
+Features.RaidStateLast = nil
+function Features.RaidStateWatch()
+    local on, rum = {}, {}
+    for _, f in ipairs(Worlds:GetChildren()) do
+        local b = f:FindFirstChild("RaidBeacon")
+        if b and b:GetAttribute("Active") == true then on[#on + 1] = f.Name end
+        if f:GetAttribute("RaidRumble") == true then rum[#rum + 1] = f.Name end
+    end
+    local running, cur, left = "?", "?", "?"
+    pcall(function()
+        local rd = Worlds.Raid.RaidData
+        cur = tostring(rd.CurrentWorld.Value)
+        left = tostring(rd.TimeLeft.Value)
+        running = tostring(Worlds.Raid.Running.Value)
+    end)
+    local key = table.concat(on, ",") .. "|" .. table.concat(rum, ",") .. "|" .. running .. "|" .. cur
+    if key ~= Features.RaidStateLast then
+        if Features.RaidStateLast then
+            Combat.Log("raidstate", string.format("raid state: beacon on [%s] | rumbling [%s] | running %s | current %s | time left %s | world %s",
+                table.concat(on, ","), table.concat(rum, ","), running, cur, left, Util.World()))
+        end
+        Features.RaidStateLast = key
+    end
+    -- the raid we did closed: forget it
+    local D = Features.RaidDone
+    if D and not table.find(on, D.world) and not table.find(rum, D.world) then Features.RaidDone = nil end
+    local R = Features.RaidRefused
+    if R and not table.find(on, R.world) then Features.RaidRefused = nil end
 end
 
 local baseRaid = Features.Raid
@@ -6994,8 +7123,20 @@ function Features.Raid()
         -- forcefield up = minions first, forcefield down = boss
         if Features.RaidHold() then task.wait(0.2) return true end
         if Extras.RaidResults() then
+            if Features.RaidVisit then Features.RaidVisit.over = true end
             task.wait(1)
             if HomeWorld ~= "" and not CFG.ModeWorlds[HomeWorld] then Travel.To(HomeWorld) end
+            return true
+        end
+        local over = Features.RaidOver()
+        if over then
+            if Features.RaidVisit then Features.RaidVisit.over = true end
+            if Util.Every("raid-over-leave", 10) then
+                local home = (HomeWorld ~= "" and not CFG.ModeWorlds[HomeWorld]) and HomeWorld or Data.FarmWorlds()[1]
+                Combat.Log("raid", over .. " - the raid is over, going back to " .. tostring(home and Data.WorldDisplay(home) or "?"))
+                pcall(function() Extras.RaidResults() end)
+                if home then Travel.To(home) end
+            end
             return true
         end
         do
@@ -10706,6 +10847,7 @@ end
 loop(0.05, function() if On("AutoPassive") then Features.Passive() end end)
 loop(1, function() Features.RollArtifactRestore() end)
 loop(0.5, function() Features.RaidBareWatch() end)
+loop(1, function() Features.RaidStateWatch() end)
 loop(5, function()
     if Features.RaidPickerLabel then pcall(function() Features.RaidPickerLabel:Set(Features.RaidPickerStatus()) end) end
 end)
