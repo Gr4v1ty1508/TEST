@@ -6984,9 +6984,45 @@ function Extras.CheckTeam()
         Combat.Log("team", string.format("team %s: no pets went on - putting its %d pets on one by one", c.name, n))
         return false
     end
+    -- some of the team didn't go on (log 30 Oct: "team DR: 19/23 pets on" - the team button put the
+    -- pets on before the team's title / artifact gave the extra slots): put the missing ones on one
+    -- by one into free slots, once (that's no team press - the pet script isn't at risk)
+    if wrong == 0 and #pets < want and not c.filled then
+        local on = {}
+        for _, m in ipairs(pets) do local u = Data.PetUID(m) if u then on[u] = true end end
+        local used = {}
+        for slot in pairs(Data.SavedEquipped() or {}) do used[slot] = true end
+        local inClone = {}
+        pcall(function()
+            for _, v in pairs(Data.StoreData().CloneMachineData or {}) do
+                if type(v) == "table" and v.UID then inClone[tostring(v.UID)] = true end
+            end
+        end)
+        local slot, n, cloned = 1, 0, 0
+        for _, uid in ipairs(Extras.TeamUIDList(c.name) or {}) do
+            if not on[uid] then
+                if inClone[uid] then
+                    cloned = cloned + 1
+                else
+                    while used[slot] do slot = slot + 1 end
+                    used[slot] = true
+                    Net.Call("ManagePetEquip", tonumber(uid) or uid, slot)
+                    n = n + 1
+                end
+            end
+        end
+        if n > 0 then
+            c.filled, c.at = true, os.clock()
+            Features.LastPetSwapAt = os.clock()
+            Combat.Log("team", string.format("team %s: %d/%d pets on - putting the %d missing ones on one by one%s",
+                c.name, #pets, want, n, cloned > 0 and string.format(" (%d more are in a clone machine)", cloned) or ""))
+            return false
+        end
+    end
     -- not all on: only say so (pressing the team again is what broke the game's pet script)
     Extras.TeamCheck = nil
-    Combat.Log("team", string.format("team %s: %d/%d pets on (%d not in the team) - not pressing it again", c.name, #pets - wrong, want, wrong))
+    Combat.Log("team", string.format("team %s: %d/%d pets on (%d not in the team)%s - not pressing it again", c.name, #pets - wrong, want, wrong,
+        c.filled and " after putting the missing ones on" or ""))
     return false
 end
 -- which saved team fits what we're doing right now
