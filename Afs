@@ -4359,13 +4359,18 @@ function Features.FarmDungeon()
     return true
 end
 
+-- Auto Open Dungeon only opens while Auto Farm Dungeon is on too (Tawan, 30 Oct: with only Open on
+-- it summoned dungeons nobody farmed)
+function Features.DungeonOpenOn()
+    return On("AutoOpenDungeon") and On("AutoFarmDungeon")
+end
 -- false = nothing to do here (lets the next feature in the Priority list run)
 function Features.Dungeon()
     if Features.InDungeon() then
         if On("AutoFarmDungeon") and Features.FarmDungeon() ~= false then return true end
         -- run finished: leave (Time Chamber), the next one is summoned from outside like Yuto
         -- does it - summoning from inside would look "already in a dungeon" and repeat
-        if On("AutoOpenDungeon") then
+        if Features.DungeonOpenOn() then
             if Util.Every("dungeon-leave", 8) then Travel.To("TimeChamber", true) end
             return true
         end
@@ -4373,7 +4378,7 @@ function Features.Dungeon()
     end
     Features.DungeonBossAt, Features.DungeonIdleSince = nil, nil
     dungeonStep = "lobby"
-    if On("AutoOpenDungeon") then
+    if Features.DungeonOpenOn() then
         -- the next dungeon can't be opened yet: don't try (and don't hold the character -
         -- the next feature in the Priority list runs meanwhile)
         -- inside a Time Trial / tower / gate / raid the summon is refused (log 16 Oct 18:24: 11
@@ -9105,7 +9110,7 @@ Features.Tasks = {
         if On("AutoInf") then Features.InfinityTower() return true end
     end },
     { id = "Dungeon", name = "Dungeon", run = function()
-        if On("AutoOpenDungeon") or (On("AutoFarmDungeon") and Features.InDungeon()) then return Features.Dungeon() end
+        if Features.DungeonOpenOn() or (On("AutoFarmDungeon") and Features.InDungeon()) then return Features.Dungeon() end
     end },
     { id = "Gate", name = "Gate", run = function()
         -- false = no gates left: the next feature in the Priority list runs
@@ -9423,6 +9428,7 @@ function Features.StatusRows()
     -- modes
     row(R.modes, "dungeon", "Dungeon", function()
         if not (On("AutoFarmDungeon") or On("AutoOpenDungeon")) then return nil end
+        if not On("AutoFarmDungeon") then return "yellow", "Auto Open Dungeon waits for Auto Farm Dungeon" end
         local cd = Features.DungeonCooldown and Features.DungeonCooldown() or 0
         local bo = Features.DungeonBackoffUntil and Features.DungeonBackoffUntil - os.clock() or 0
         if Features.InDungeon() then return "green", "in a run" end
