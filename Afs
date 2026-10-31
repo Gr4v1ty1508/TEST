@@ -1173,6 +1173,7 @@ function Combat.Attack(e, wanted, opts)
             hpAt = hpAt or os.clock()
             if Combat.HP(e) < hp0 then
                 hp0, hpAt = Combat.HP(e), os.clock()
+                if not stats.firstHit and Util.World() == "Tower" then stats.info = Combat.EnemyInfo(e, pets) end
                 stats.firstHit = stats.firstHit or (os.clock() - t0)
             end
             if os.clock() - hpAt > 8 then
@@ -1190,7 +1191,8 @@ function Combat.Attack(e, wanted, opts)
                     if ok and dist > 150 then far = far + 1 end
                 end
                 Combat.Log("atk", string.format("no damage on %s for 8 s (pets on it %d/%d | on another enemy %d%s | idle %d | far %d | %s | direct sends %d | world %s) -> skipped 30 s",
-                    e.Name, on, total, busy, other and (" (" .. other.Name .. ")") or "", idle, far, Combat.PetsSeen(pets), stats.direct or 0, Util.World()))
+                    e.Name, on, total, busy, other and (" (" .. other.Name .. ")") or "", idle, far, Combat.PetsSeen(pets), stats.direct or 0, Util.World())
+                    .. (Util.World() == "Tower" and ("  [" .. Combat.EnemyInfo(e, pets) .. "]") or ""))
                 Combat.Skip[e] = os.clock() + 30
                 break
             end
@@ -1299,8 +1301,57 @@ function Combat.Attack(e, wanted, opts)
         Combat.Log("done", string.format("%s [%s] %s in %.1f s | first hit %s | pets on it max %d/%d | sends %d | direct %d | pulls %d | tps %d | hp %.3g -> %.3g",
             e.Name, Combat.Name(e), Combat.Alive(e) and (tag and "visited (pets on it)" or "LEFT") or "killed", os.clock() - t0,
             stats.firstHit and string.format("%.1f s", stats.firstHit) or "never", stats.maxOn, #pets,
-            stats.sends, stats.direct or 0, stats.pulls, stats.tps, hpStart, Combat.HP(e)))
+            stats.sends, stats.direct or 0, stats.pulls, stats.tps, hpStart, Combat.HP(e))
+            .. (stats.info and ("  [" .. stats.info .. "]") or ""))
     end)
+end
+
+-- Time Trial: what an enemy is made of, for the log - where it sits, its attributes, its
+-- children, how many attackers it lists (ours / all) and "twins" (same name within 6 studs).
+-- Most trial enemies took no damage at all for 8 s with every pet on them, others died in
+-- 2 s; this is to see what tells them apart.
+function Combat.EnemyInfo(e, pets)
+    local ok, s = pcall(function()
+        local out = {}
+        local p = e.Parent
+        out[#out + 1] = "in " .. (p and ((p.Parent and (p.Parent.Name .. ".") or "") .. p.Name) or "?")
+        local attrs = {}
+        for k, v in pairs(e:GetAttributes()) do attrs[#attrs + 1] = k .. "=" .. tostring(v) end
+        table.sort(attrs)
+        if #attrs > 0 then out[#out + 1] = "attrs " .. table.concat(attrs, ",", 1, math.min(#attrs, 8)) end
+        local kids, seen = {}, {}
+        for _, c in ipairs(e:GetChildren()) do
+            if not seen[c.Name] then seen[c.Name] = true kids[#kids + 1] = c.Name end
+        end
+        table.sort(kids)
+        out[#out + 1] = "kids " .. table.concat(kids, ",", 1, math.min(#kids, 16))
+        local att = e:FindFirstChild("Attackers")
+        if att then
+            local mine, all = {}, 0
+            for _, pm in ipairs(pets or {}) do mine[pm] = true end
+            local n = 0
+            for _, v in ipairs(att:GetChildren()) do
+                if v:IsA("ObjectValue") and v.Value then
+                    all = all + 1
+                    if mine[v.Value] then n = n + 1 end
+                end
+            end
+            out[#out + 1] = string.format("attackers %d ours / %d", n, all)
+        end
+        local pos = Combat.Pos(e)
+        local twins = 0
+        if pos and p then
+            for _, o in ipairs(p:GetChildren()) do
+                if o ~= e and o.Name == e.Name then
+                    local op = Combat.Pos(o)
+                    if op and (op - pos).Magnitude < 6 then twins = twins + 1 end
+                end
+            end
+        end
+        out[#out + 1] = "twins " .. twins
+        return table.concat(out, " | ")
+    end)
+    return ok and s or ("? " .. tostring(s))
 end
 
 -- one attack step; false when nothing is left
@@ -3186,6 +3237,7 @@ end
 -- in a run = the game's TowerTimer is on screen, or the "Room N" label, or we're
 -- far above / away from the lobby
 function Features.InTrialRun()
+    if Features.TrialIsOver and Features.TrialIsOver() then return false end
     local mg = Data.MainGui()
     local tt = mg and mg:FindFirstChild("TowerTimer")
     if tt and tt:IsA("GuiObject") and tt.Visible then return true end
@@ -3204,6 +3256,7 @@ end
 -- join exactly like the game: JoinTimeTrial(n) -> AttemptTravel("TowerDoor<n>", true)
 function Features.JoinTrial(name, id)
     Stats.TrialName, Stats.TrialFloor = name, 0
+    Features.TrialOverAt = nil
     trialDoorId = id
     Features.ResetTrialRooms()
     local root0 = Util.Root()
@@ -7478,7 +7531,10 @@ end
 --   MainGui.TimeTrialTeleport     "teleport to the time trial?" popup  -> Yes
 --   MainGui.TowerTransport        same kind of popup                   -> Yes
 --   MainGui.TowerLose             run over screen                      -> close it
-function Extras.InTrialRun() return isShown(mainChild("TowerTimer")) end
+function Extras.InTrialRun()
+    if Features.TrialIsOver and Features.TrialIsOver() then return false end
+    return isShown(mainChild("TowerTimer"))
+end
 function Extras.TrialFloor()
     local tt = mainChild("TowerTimer")
     if not isShown(tt) then return nil end
@@ -7509,17 +7565,93 @@ function Features.TimeTrial()
         task.wait(1)
         return true
     end
-    -- run over: close the result screen so the next run / farming can go on
-    local lose = mainChild("TowerLose")
-    if isShown(lose) then
-        pressOnce(lose)
+    -- run over: RETURN on the result screen (its own 1 s loop presses it too, so it also
+    -- happens while another mode has the main loop), then out of the finished run
+    Features.TrialLoseWatch()
+    if Features.TrialIsOver() then
         Stats.TrialFloor = 0
-        task.wait(0.5)
+        if Features.TrialLeaveDeadRun() then return true end
+        return baseTrial()
     end
     -- real floor number from the game instead of counting button presses
     local floor = Extras.TrialFloor()
     if floor then Stats.TrialFloor = floor end
     return baseTrial()
+end
+
+-- RUN OVER ----------------------------------------------------------------------------------------
+-- When a run ends the server fires Remote TowerLose and the game shows MainGui.TowerLose
+-- (Room Reached / Total DMG / Kills and a RETURN button = TowerLose.Confirm). The old code
+-- pressed it only while the Time Trial had the main loop's turn, and with pressOnce (the
+-- button's FIRST handler only - this button has a UIScale click animation, which can be that
+-- first handler): the screen stayed up, the hub still counted you as "in a run" (far from the
+-- lobby / Room label still up) and kept sending the pets at the finished run's enemies, which
+-- don't take damage any more.
+Features.TrialLose = { tries = 0, at = 0, shownAt = nil }
+function Features.TrialIsOver()
+    local t = Features.TrialOverAt
+    return t ~= nil and os.clock() - t < 120
+end
+function Features.TrialOver(why)
+    if Features.TrialIsOver() then return end
+    Features.TrialOverAt = os.clock()
+    Features.TrialLeftAt = nil
+    Combat.Log("trial", "trial run over (" .. tostring(why) .. ") - last room " .. tostring(Stats.TrialFloor or "?"))
+end
+function Features.TrialLoseWatch()
+    local lose = mainChild("TowerLose")
+    local L = Features.TrialLose
+    if not isShown(lose) then
+        L.tries, L.shownAt = 0, nil
+        return false
+    end
+    if not L.shownAt then
+        L.shownAt = os.clock()
+        local st = lose:FindFirstChild("Stats")
+        local room = st and st:FindFirstChild("Room")
+        local v = room and room:FindFirstChild("Value")
+        Features.TrialOver("result screen, room reached " .. tostring(v and v:IsA("TextLabel") and v.Text or "?"))
+    end
+    if os.clock() - L.at < 2 then return true end
+    L.at = os.clock()
+    -- not in the Tower any more (another mode took us away and the run ended behind us):
+    -- RETURN would send us back to the Tower - only close the screen
+    if Util.World() ~= "Tower" then
+        if os.clock() - L.shownAt > 2 then
+            pcall(function() lose.Visible = false end)
+            Combat.Log("trial", "trial result screen came up while in " .. tostring(Util.World()) .. " - closed it (no RETURN, that would travel)")
+            L.tries, L.shownAt = 0, nil
+        end
+        return true
+    end
+    if L.tries >= 3 then
+        -- 3 presses and still up: close it ourselves (it's only the screen, the run is over)
+        pcall(function() lose.Visible = false end)
+        Combat.Log("trial", "RETURN didn't close the result screen after 3 presses - closed it ourselves")
+        L.tries, L.shownAt = 0, nil
+        return true
+    end
+    L.tries = L.tries + 1
+    local btn = lose:FindFirstChild("Confirm")
+    if not (btn and btn:IsA("GuiButton")) then btn = lose:FindFirstChildWhichIsA("GuiButton", true) end
+    Combat.Log("trial", "trial result screen: pressing " .. (btn and btn.Name or "?") .. " (RETURN), try " .. L.tries)
+    if btn then Extras.Press(btn) end
+    return true
+end
+-- still standing in the finished run (far from the lobby) a few seconds after it ended: go to
+-- the lobby ourselves (what RETURN does), so nothing keeps fighting the dead run
+function Features.TrialLeaveDeadRun()
+    if Util.World() ~= "Tower" or not Features.TrialIsOver() then return false end
+    if os.clock() - Features.TrialOverAt < 5 then return true end   -- RETURN's moment first
+    local tower = Worlds:FindFirstChild("Tower")
+    local spawn = tower and tower:FindFirstChild("Spawns") and tower.Spawns:FindFirstChildWhichIsA("BasePart")
+    local root = Util.Root()
+    if not (spawn and root) or (root.Position - spawn.Position).Magnitude < 300 then return false end
+    if Features.TrialLeftAt and os.clock() - Features.TrialLeftAt < 10 then return false end
+    Features.TrialLeftAt = os.clock()
+    Combat.Log("trial", "the run is over but we're still in it - back to the Tower lobby")
+    Travel.To("Tower", true)
+    return true
 end
 
 -- QUEST -------------------------------------------------------------------------------------------
@@ -10765,10 +10897,13 @@ end)
 Net.Listen("UpdateMap", function(grid) if type(grid) == "table" then Features.DungeonMap = grid end end)
 Net.Listen("SetTowerFloor", function(floor)
     if type(floor) == "number" then
+        -- room 1 of a new run (not the same moment the last one ended): that run is done with
+        if floor == 0 and Features.TrialOverAt and os.clock() - Features.TrialOverAt > 20 then Features.TrialOverAt = nil end
         Stats.TrialFloor = floor + 1
         Features.TrialLog("server: room " .. (floor + 1))
     end
 end)
+Net.Listen("TowerLose", function() Features.TrialOver("the game sent TowerLose") end)
 Net.Listen("InfinityFloorTransition", function(floor)
     Stats.InfFloor = type(floor) == "number" and floor or Stats.InfFloor + 1
     Stats.InfBest = math.max(Stats.InfBest, Stats.InfFloor)
@@ -11119,6 +11254,7 @@ loop(0.5, function() Features.RaidBareWatch() end)
 loop(1, function() Features.RaidStateWatch() end)
 loop(2, function() Features.RaidPickerTick() end)
 loop(5, function() Features.DemonicTripWatch() end)
+loop(1, function() Features.TrialLoseWatch() end)
 loop(5, function()
     if Features.RaidPickerLabel then pcall(function() Features.RaidPickerLabel:Set(Features.RaidPickerStatus()) end) end
 end)
